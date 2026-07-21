@@ -1,0 +1,3 @@
+[submodule "tests/third_party/rohc-lib"]
+	path = tests/third_party/rohc-lib
+	url = https://github.com/didier-barvaux/rohc

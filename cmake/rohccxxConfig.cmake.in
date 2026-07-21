@@ -1,0 +1,6 @@
+# Copyright (c) AlteredNets Cyber Solutions, Inc. 2026
+# See LICENSE.md for licensing details.
+
+@PACKAGE_INIT@
+
+include("${CMAKE_CURRENT_LIST_DIR}/rohccxxTargets.cmake")
