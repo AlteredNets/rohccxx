@@ -100,10 +100,14 @@ inline bool capture_rtp_packet(Context& ctx,
     if(ip_len < 40)
         return false;
 
+    const bool had_ipv4_rtp_context = ctx.rtp.initialized != 0;
+    const std::uint16_t previous_ipv4_id = ctx.ipv4_id;
+    const std::uint16_t previous_rtp_seq = ctx.rtp.last_seq;
+
     ctx.ipv4_tos = ip_packet[1];
     ctx.ipv4_ttl = ip_packet[8];
     ctx.ipv4_id = read_u16(ip_packet + 4);
-    ctx.ipv4_flags = 0;
+    ctx.ipv4_flags = static_cast<std::uint8_t>((read_u16(ip_packet + 6) >> 13U) & 0x07U);
     ctx.ipv4_saddr = read_u32(ip_packet + 12);
     ctx.ipv4_daddr = read_u32(ip_packet + 16);
     ctx.udp_sport = read_u16(ip_packet + 20);
@@ -122,6 +126,17 @@ inline bool capture_rtp_packet(Context& ctx,
             ctx.rtp.ts_stride = stride;
             ctx.rtp.ts_residue = residue;
         }
+    }
+
+    if(had_ipv4_rtp_context)
+    {
+        const auto id_delta = static_cast<std::uint16_t>(ctx.ipv4_id - previous_ipv4_id);
+        const auto seq_delta = static_cast<std::uint16_t>(seq - previous_rtp_seq);
+        ctx.ipv4_id_sequential = id_delta != 0U && id_delta == seq_delta;
+    }
+    else
+    {
+        ctx.ipv4_id_sequential = false;
     }
 
     ctx.rtp.vpxcc = rtp[0];

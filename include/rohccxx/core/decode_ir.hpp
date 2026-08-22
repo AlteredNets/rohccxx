@@ -569,6 +569,7 @@ inline bool decode_ir_rtp_udp_lite(const uint8_t* in,
     if(consumed)
         *consumed = pos + 1U;
 
+    ctx.ipv4_id_sequential = false;
     ctx.rtp.seq_window.init(ctx.rtp.last_seq);
     ctx.rtp.ts_window.init(ctx.rtp.last_ts);
     ctx.rtp.ts_residue = ctx.rtp.ts_stride == 0 ? 0U : (ctx.rtp.last_ts % ctx.rtp.ts_stride);
@@ -650,6 +651,7 @@ inline bool decode_ir_rtp(const uint8_t* in,
     if(consumed)
         *consumed = pos + 1U;
 
+    ctx.ipv4_id_sequential = false;
     ctx.rtp.seq_window.init(ctx.rtp.last_seq);
     ctx.rtp.ts_window.init(ctx.rtp.last_ts);
     ctx.rtp.ts_residue = ctx.rtp.ts_stride == 0 ? 0U : (ctx.rtp.last_ts % ctx.rtp.ts_stride);

@@ -254,6 +254,10 @@ inline bool decode_ir_dyn_rtp_udp_lite(const uint8_t* in,
 
     const size_t min_header_len = 22U + cid_len + small_cid_len + (ctx.ip_version == 6 ? 1U : 0U);
     const size_t crc_index = (!ctx.large_cid && ctx.cid > 0) ? 3U : (ctx.large_cid ? (2U + cid::encoded_len(ctx.cid)) : 2U);
+    const bool had_ipv4_rtp_context = ctx.ip_version == 4 && ctx.rtp.initialized != 0;
+    const std::uint16_t previous_ipv4_id = ctx.ipv4_id;
+    const std::uint16_t previous_rtp_seq = ctx.rtp.last_seq;
+
     const size_t dynamic_pos = pos;
     size_t options_extra_len = 0;
     if(!detail::ip_dynamic_extra_len(in, len, dynamic_pos, ctx, options_extra_len))
@@ -298,6 +302,16 @@ inline bool decode_ir_dyn_rtp_udp_lite(const uint8_t* in,
             ctx.rtp.ts_stride = stride;
             ctx.rtp.ts_residue = residue;
         }
+    }
+    if(ctx.ip_version == 4 && had_ipv4_rtp_context)
+    {
+        const auto id_delta = static_cast<std::uint16_t>(ctx.ipv4_id - previous_ipv4_id);
+        const auto seq_delta = static_cast<std::uint16_t>(decoded_seq - previous_rtp_seq);
+        ctx.ipv4_id_sequential = id_delta != 0U && id_delta == seq_delta;
+    }
+    else
+    {
+        ctx.ipv4_id_sequential = false;
     }
     ctx.rtp.last_seq = decoded_seq;
     ctx.rtp.last_ts = decoded_ts;
@@ -344,6 +358,10 @@ inline bool decode_ir_dyn_rtp(const uint8_t* in,
 
     const uint8_t received_crc = in[pos++];
 
+    const bool had_ipv4_rtp_context = ctx.ip_version == 4 && ctx.rtp.initialized != 0;
+    const std::uint16_t previous_ipv4_id = ctx.ipv4_id;
+    const std::uint16_t previous_rtp_seq = ctx.rtp.last_seq;
+
     // IR-DYN can also vary by one tail byte in the reference traces.
     const size_t candidate_min_header_len = 20U + cid_len + small_cid_len + (ctx.ip_version == 6 ? 1U : 0U);
     const size_t crc_index = (!ctx.large_cid && ctx.cid > 0) ? 3U : (ctx.large_cid ? (2U + cid::encoded_len(ctx.cid)) : 2U);
@@ -389,6 +407,16 @@ inline bool decode_ir_dyn_rtp(const uint8_t* in,
             ctx.rtp.ts_stride = stride;
             ctx.rtp.ts_residue = residue;
         }
+    }
+    if(ctx.ip_version == 4 && had_ipv4_rtp_context)
+    {
+        const auto id_delta = static_cast<std::uint16_t>(ctx.ipv4_id - previous_ipv4_id);
+        const auto seq_delta = static_cast<std::uint16_t>(decoded_seq - previous_rtp_seq);
+        ctx.ipv4_id_sequential = id_delta != 0U && id_delta == seq_delta;
+    }
+    else
+    {
+        ctx.ipv4_id_sequential = false;
     }
     ctx.rtp.last_seq = decoded_seq;
     ctx.rtp.last_ts = decoded_ts;
