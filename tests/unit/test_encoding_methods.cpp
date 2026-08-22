@@ -463,6 +463,22 @@ TEST_CASE("Encoding methods expose timer-scaled timestamp seam")
     REQUIRE(disabled.timestamp == 0);
 }
 
+TEST_CASE("Timer-scaled timestamp prediction preserves modulo wraparound")
+{
+    const auto decoded = rohccxx::encoding::decode_timer_scaled_lsb(
+        0x00U, 8, 0xFFFFFFE0U, 160U, 1U, 0x40U);
+    REQUIRE(decoded.valid);
+    REQUIRE(decoded.timestamp == 0x00000080U);
+}
+
+TEST_CASE("Timer-scaled timestamp fallback uses the advanced reference")
+{
+    const auto decoded = rohccxx::encoding::decode_timer_scaled_lsb(
+        0xB9U, 8, 50000U, 160U, 1U, 80U);
+    REQUIRE(decoded.valid);
+    REQUIRE(decoded.timestamp == 0x000113F0U);
+}
+
 TEST_CASE("Encoding methods scale RTP timestamps from inferred stride")
 {
     std::uint32_t stride = 0;
@@ -548,6 +564,61 @@ TEST_CASE("RTP FO can decode timer-scaled timestamps from packet context")
     REQUIRE(rohccxx::decode_fo_rtp(rohc, rohc_len, rx, seq, ts));
     REQUIRE(seq == tx.rtp.last_seq);
     REQUIRE(ts == tx.rtp.last_ts);
+}
+
+TEST_CASE("Timer-based RTP FO crosses the high timestamp boundary and wraps exactly")
+{
+    constexpr std::uint32_t timestamps[] = {0xFFFFFFE0U, 0x00000080U};
+    rohccxx::Context rx{};
+    rx.cid = 0;
+    rx.profile = rohccxx::Profile::RTP;
+    rx.rohc_state = rohccxx::RohcState::DynamicEstablished;
+    rx.rtp.last_seq = 0x5000;
+    rx.rtp.last_ts = 0xFFFFFF40U;
+    rx.rtp.ts_stride = 160U;
+    rx.rtp.ts_residue = 0x40U;
+    rx.rtp.timer_based_ts = true;
+    rx.rtp.timer_elapsed_ticks = 1U;
+    rx.rtp.seq_window.init(rx.rtp.last_seq);
+    rx.rtp.ts_window.init(rx.rtp.last_ts);
+
+    std::uint16_t sequence = 0x5001;
+    for(const auto timestamp : timestamps)
+    {
+        CAPTURE(sequence, timestamp);
+        std::uint8_t input[64] = {};
+        make_valid_rtp(input, sequence, timestamp, 0x00000000U);
+        std::uint8_t reconstructed[64] = {};
+        std::memcpy(reconstructed, input, sizeof(input));
+        std::memset(reconstructed + 30, 0, 10);
+
+        rohccxx::Context tx = rx;
+        tx.rtp.last_seq = sequence;
+        tx.rtp.last_ts = timestamp;
+        tx.rtp.ssrc = 0;
+        std::uint8_t rohc[16] = {};
+        std::size_t rohc_len = sizeof(rohc);
+        REQUIRE(rohccxx::emit_rtp_fo(rohc, &rohc_len, tx));
+
+        std::uint16_t decoded_sequence = 0;
+        std::uint32_t decoded_timestamp = 0;
+        REQUIRE(rohccxx::decode_fo_rtp(
+            rohc, rohc_len, rx, decoded_sequence, decoded_timestamp));
+        REQUIRE(decoded_sequence == sequence);
+        REQUIRE(decoded_timestamp == timestamp);
+        reconstructed[30] = static_cast<std::uint8_t>(decoded_sequence >> 8U);
+        reconstructed[31] = static_cast<std::uint8_t>(decoded_sequence);
+        reconstructed[32] = static_cast<std::uint8_t>(decoded_timestamp >> 24U);
+        reconstructed[33] = static_cast<std::uint8_t>(decoded_timestamp >> 16U);
+        reconstructed[34] = static_cast<std::uint8_t>(decoded_timestamp >> 8U);
+        reconstructed[35] = static_cast<std::uint8_t>(decoded_timestamp);
+        reconstructed[36] = static_cast<std::uint8_t>(rx.rtp.ssrc >> 24U);
+        reconstructed[37] = static_cast<std::uint8_t>(rx.rtp.ssrc >> 16U);
+        reconstructed[38] = static_cast<std::uint8_t>(rx.rtp.ssrc >> 8U);
+        reconstructed[39] = static_cast<std::uint8_t>(rx.rtp.ssrc);
+        REQUIRE(std::memcmp(reconstructed, input, sizeof(input)) == 0);
+        ++sequence;
+    }
 }
 
 TEST_CASE("C API RTP parity preserves regular 160-clock timestamps through FO")

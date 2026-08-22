@@ -4,11 +4,11 @@
 #include "decompressor.h"
 
 #include <rohccxx/core/context.hpp>
+#include <rohccxx/core/context_crc.hpp>
 #include <rohccxx/core/context_table.hpp>
 #include <rohccxx/core/decode_ir.hpp>
 #include <rohccxx/core/decode_ir_dyn.hpp>
 #include <rohccxx/core/lla.hpp>
-#include <rohccxx/utils/crc.hpp>
 
 #include <cstring>
 #include <mutex>
@@ -50,44 +50,6 @@ bool lla_context_established(const Context& ctx)
 bool lla_context_ready(const Context& ctx)
 {
     return lla_context_established(ctx) && ctx.rohc_state == RohcState::DynamicEstablished;
-}
-
-void write_context_u16(uint8_t* data, size_t& pos, uint16_t value)
-{
-    data[pos++] = static_cast<uint8_t>(value >> 8);
-    data[pos++] = static_cast<uint8_t>(value & 0xFFU);
-}
-
-void write_context_u32(uint8_t* data, size_t& pos, uint32_t value)
-{
-    data[pos++] = static_cast<uint8_t>(value >> 24);
-    data[pos++] = static_cast<uint8_t>(value >> 16);
-    data[pos++] = static_cast<uint8_t>(value >> 8);
-    data[pos++] = static_cast<uint8_t>(value & 0xFFU);
-}
-
-uint8_t context_crc7(const Context& ctx)
-{
-    uint8_t data[64] = {};
-    size_t pos = 0;
-    write_context_u16(data, pos, static_cast<uint16_t>(ctx.profile));
-    write_context_u32(data, pos, ctx.cid);
-    data[pos++] = static_cast<uint8_t>(ctx.ip_version);
-    data[pos++] = ctx.ipv4_tos;
-    data[pos++] = ctx.ipv4_ttl;
-    write_context_u16(data, pos, ctx.ipv4_id);
-    write_context_u32(data, pos, ctx.ipv4_saddr);
-    write_context_u32(data, pos, ctx.ipv4_daddr);
-    write_context_u16(data, pos, ctx.udp_sport);
-    write_context_u16(data, pos, ctx.udp_dport);
-    write_context_u16(data, pos, ctx.udp_check);
-    data[pos++] = ctx.rtp.vpxcc;
-    data[pos++] = ctx.rtp.mpt;
-    write_context_u16(data, pos, ctx.rtp.last_seq);
-    write_context_u32(data, pos, ctx.rtp.last_ts);
-    write_context_u32(data, pos, ctx.rtp.ssrc);
-    write_context_u32(data, pos, ctx.rtp.ts_stride);
-    return static_cast<uint8_t>(utils::crc7(data, pos) & 0x7FU);
 }
 
 bool build_rtp_packet_from_context(std::uint8_t* ip_packet,
@@ -304,7 +266,7 @@ int Decompressor::rfc4362_receive_ccp(const uint8_t* ccp_packet,
     Context* ctx = context_table_.get(cid_);
     if(!ctx || !lla_context_established(*ctx))
         return -1;
-    return ccp.crc7 == context_crc7(*ctx) ? 0 : -1;
+    return ccp.crc7 == detail::context_crc7(*ctx) ? 0 : -1;
 }
 
 } // namespace rohccxx

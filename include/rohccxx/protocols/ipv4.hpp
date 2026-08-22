@@ -25,6 +25,18 @@ struct Header
     wire::be32 dst;
 };
 
+inline bool is_fragmented(std::uint16_t flags_fragment) noexcept
+{
+    // RFC 5225 compresses only packets with MF == 0 and fragment offset == 0.
+    // The reserved flag is intentionally excluded, preserving existing behavior.
+    return (flags_fragment & 0x3FFFU) != 0U;
+}
+
+inline bool is_fragmented(const Header& header) noexcept
+{
+    return is_fragmented(wire::to_host(header.flags_fragment));
+}
+
 static inline bool parse(const uint8_t* data,
                          size_t len,
                          const Header*& hdr,

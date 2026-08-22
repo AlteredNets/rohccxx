@@ -23,6 +23,8 @@ inline Profile classify_packet(const uint8_t* pkt, size_t len)
     size_t ip_hlen = 0;
     if(ipv4::parse(pkt, len, ip4, ip_hlen))
     {
+        if(ipv4::is_fragmented(*ip4))
+            return Profile::Uncompressed;
         protocol = wire::to_host(ip4->protocol);
         transport = pkt + ip_hlen;
     }

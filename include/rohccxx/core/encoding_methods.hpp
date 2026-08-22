@@ -580,6 +580,32 @@ inline std::uint32_t decode_scaled_lsb(std::uint32_t scaled_lsb,
     return unscale_timestamp(decoded_scaled, stride, residue);
 }
 
+inline std::uint32_t decode_scaled_lsb_with_timestamp_prediction(
+    std::uint32_t scaled_lsb,
+    std::uint8_t width,
+    std::uint32_t predicted_timestamp,
+    std::uint32_t fallback_reference_timestamp,
+    std::uint32_t stride,
+    std::uint32_t residue)
+{
+    const auto predicted_scaled = scale_timestamp(predicted_timestamp, stride);
+    if(stride != 0U &&
+       encode_field_lsb(EncodedField::RtpTimestamp,
+                        predicted_scaled.scaled,
+                        width) == scaled_lsb)
+    {
+        // Predict in the modulo-2^32 timestamp domain. Scaling first loses
+        // wrap information when 2^32 is not divisible by the stride.
+        return predicted_timestamp;
+    }
+
+    return decode_scaled_lsb(scaled_lsb,
+                             width,
+                             fallback_reference_timestamp,
+                             stride,
+                             residue);
+}
+
 inline TimerScaledTimestamp decode_timer_scaled_lsb(std::uint32_t scaled_lsb,
                                                     std::uint8_t width,
                                                     std::uint32_t reference_timestamp,
@@ -590,7 +616,12 @@ inline TimerScaledTimestamp decode_timer_scaled_lsb(std::uint32_t scaled_lsb,
     const auto advanced = advance_timer_scaled_timestamp(reference_timestamp, timestamp_stride, elapsed_timer_ticks);
     if(!advanced.valid)
         return {};
-    return { true, decode_scaled_lsb(scaled_lsb, width, advanced.timestamp, timestamp_stride, residue) };
+    return { true, decode_scaled_lsb_with_timestamp_prediction(scaled_lsb,
+                                                                width,
+                                                                advanced.timestamp,
+                                                                advanced.timestamp,
+                                                                timestamp_stride,
+                                                                residue) };
 }
 
 } // namespace rohccxx::encoding
