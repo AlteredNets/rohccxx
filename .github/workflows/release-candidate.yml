@@ -1,0 +1,512 @@
+name: Release Candidate
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/release-candidate.yml"
+      - "VERSION"
+      - "CMakeLists.txt"
+      - "cmake/**"
+      - "packaging/**"
+      - "src/CMakeLists.txt"
+      - "tests/CMakeLists.txt"
+      - "tests/cmake/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-release-candidate:
+    name: Build and validate v0.2.1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      EXPECTED_VERSION: "0.2.1"
+      EXPECTED_ROHC_LIB_COMMIT: "70589cc2b8650f82453815c84ba41b0ab80a52a0"
+      CC: gcc
+      CXX: g++
+
+    steps:
+      - name: Check out exact workflow commit and submodules
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install release validation dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential \
+            cmake \
+            gcc \
+            g++ \
+            autoconf \
+            automake \
+            libtool \
+            pkg-config \
+            dpkg-dev \
+            binutils \
+            file
+
+      - name: Verify source identity and candidate version
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          main_commit="$(git rev-parse HEAD)"
+          test "${main_commit}" = "${GITHUB_SHA}"
+          test "$(uname -m)" = "x86_64"
+
+          rohc_lib_commit="$(git -C tests/third_party/rohc-lib rev-parse HEAD)"
+          test "${rohc_lib_commit}" = "${EXPECTED_ROHC_LIB_COMMIT}"
+
+          version="$(tr -d '\n' < VERSION)"
+          test "${version}" = "${EXPECTED_VERSION}"
+          test "$(wc -l < VERSION)" -eq 1
+
+          source_date_epoch="$(git show -s --format=%ct HEAD)"
+          case "${source_date_epoch}" in
+            ''|*[!0-9]*) exit 1 ;;
+          esac
+
+          printf 'main_commit=%s\n' "${main_commit}" >> "${GITHUB_OUTPUT}"
+          printf 'rohc_lib_commit=%s\n' "${rohc_lib_commit}" >> "${GITHUB_OUTPUT}"
+          printf 'source_date_epoch=%s\n' "${source_date_epoch}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build deterministic source artifact
+        id: artifact-paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${RUNNER_TEMP}"
+          case "${RUNNER_TEMP}" in
+            /*) ;;
+            *) echo "RUNNER_TEMP must be an absolute path" >&2; exit 1 ;;
+          esac
+
+          rc_root="$(mktemp -d "${RUNNER_TEMP}/rohccxx-release-candidate.XXXXXX")"
+          staging_first="$(mktemp -d "${RUNNER_TEMP}/rohccxx-source-first.XXXXXX")"
+          staging_second="$(mktemp -d "${RUNNER_TEMP}/rohccxx-source-second.XXXXXX")"
+          artifact_dir="${rc_root}/artifacts"
+          archive="${artifact_dir}/rohccxx-${EXPECTED_VERSION}-source-with-submodules.tar.gz"
+          archive_repeat="${rc_root}/rohccxx-${EXPECTED_VERSION}-repeat.tar.gz"
+          source_root="rohccxx-${EXPECTED_VERSION}"
+
+          mkdir -p "${artifact_dir}"
+
+          stage_source() {
+            local staging="$1"
+            git archive --format=tar --prefix="${source_root}/" HEAD \
+              | tar -xf - -C "${staging}"
+            mkdir -p "${staging}/${source_root}/tests/third_party/rohc-lib"
+            git -C tests/third_party/rohc-lib archive --format=tar HEAD \
+              | tar -xf - -C "${staging}/${source_root}/tests/third_party/rohc-lib"
+          }
+
+          stage_source "${staging_first}"
+          stage_source "${staging_second}"
+
+          if find "${staging_first}" "${staging_second}" -name .git -print -quit | grep -q .; then
+            echo "Git repository metadata entered source staging" >&2
+            exit 1
+          fi
+
+          build_archive() {
+            local staging="$1"
+            local output="$2"
+            tar \
+              --sort=name \
+              --mtime="@${{ steps.source.outputs.source_date_epoch }}" \
+              --owner=0 \
+              --group=0 \
+              --numeric-owner \
+              --format=posix \
+              --pax-option=delete=atime,delete=ctime \
+              -C "${staging}" \
+              -cf - "${source_root}" \
+              | gzip -n > "${output}"
+          }
+
+          build_archive "${staging_first}" "${archive}"
+          build_archive "${staging_second}" "${archive_repeat}"
+          cmp "${archive}" "${archive_repeat}"
+
+          printf 'rc_root=%s\n' "${rc_root}" >> "${GITHUB_OUTPUT}"
+          printf 'artifact_dir=%s\n' "${artifact_dir}" >> "${GITHUB_OUTPUT}"
+          printf 'archive=%s\n' "${archive}" >> "${GITHUB_OUTPUT}"
+
+      - name: Inspect and extract source artifact
+        id: extracted
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${{ steps.artifact-paths.outputs.archive }}"
+          rc_root="${{ steps.artifact-paths.outputs.rc_root }}"
+          extract_dir="${rc_root}/extracted"
+          listing="${rc_root}/source-contents.txt"
+          source_root="rohccxx-${EXPECTED_VERSION}"
+
+          tar -tzf "${archive}" | tee "${listing}"
+          test "$(cut -d/ -f1 "${listing}" | sort -u)" = "${source_root}"
+          grep -q "^${source_root}/tests/third_party/rohc-lib/README.md$" "${listing}"
+          if grep -Eq '(^|/)\.git(/|$)' "${listing}"; then
+            echo "Source archive contains Git repository metadata" >&2
+            exit 1
+          fi
+          if grep -Eq '(^|/)(build|_build|logs?|evidence|credentials?|tmp|temp)(/|$)' "${listing}"; then
+            echo "Source archive contains excluded generated or sensitive paths" >&2
+            exit 1
+          fi
+
+          mkdir -p "${extract_dir}"
+          tar -xzf "${archive}" -C "${extract_dir}"
+          source_dir="${extract_dir}/${source_root}"
+          test ! -e "${source_dir}/.git"
+          test "$(tr -d '\n' < "${source_dir}/VERSION")" = "${EXPECTED_VERSION}"
+
+          printf 'source_dir=%s\n' "${source_dir}" >> "${GITHUB_OUTPUT}"
+          printf 'listing=%s\n' "${listing}" >> "${GITHUB_OUTPUT}"
+
+      - name: Configure Git-free source archive
+        id: build-paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="${{ steps.extracted.outputs.source_dir }}"
+          rc_root="${{ steps.artifact-paths.outputs.rc_root }}"
+          build_dir="${rc_root}/build-release"
+          configure_log="${rc_root}/configure.log"
+
+          test ! -e "${source_dir}/.git"
+          cmake -S "${source_dir}" -B "${build_dir}" \
+            -G "Unix Makefiles" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DROHCCXX_BUILD_TESTS=ON \
+            -DROHCCXX_SANITIZERS=OFF \
+            2>&1 | tee "${configure_log}"
+
+          grep -Fq -- "-- rohccxx version: ${EXPECTED_VERSION}" "${configure_log}"
+          grep -Fq "#define ROHCCXX_VERSION_STRING \"${EXPECTED_VERSION}\"" \
+            "${build_dir}/generated/include/rohccxx/version.h"
+          grep -Fq "#define ROHCCXX_VERSION_MAJOR 0" \
+            "${build_dir}/generated/include/rohccxx/version.h"
+          grep -Fq "#define ROHCCXX_VERSION_MINOR 2" \
+            "${build_dir}/generated/include/rohccxx/version.h"
+          grep -Fq "#define ROHCCXX_VERSION_PATCH 1" \
+            "${build_dir}/generated/include/rohccxx/version.h"
+
+          printf 'build_dir=%s\n' "${build_dir}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build and run complete release test suite
+        id: tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_dir="${{ steps.build-paths.outputs.build_dir }}"
+          test_log="${{ steps.artifact-paths.outputs.rc_root }}/ctest.log"
+
+          cmake --build "${build_dir}" --parallel
+          test "$(ctest --test-dir "${build_dir}" -N | sed -n 's/^Total Tests: //p')" -eq 199
+          ctest --test-dir "${build_dir}" --output-on-failure 2>&1 | tee "${test_log}"
+
+          registered="$(grep -Eo '[0-9]+ tests failed out of [0-9]+' "${test_log}" | tail -1 | awk '{print $6}')"
+          failed="$(grep -Eo '[0-9]+ tests failed out of [0-9]+' "${test_log}" | tail -1 | awk '{print $1}')"
+          passed="$(grep -Ec 'Test +#[0-9]+:.* +Passed +' "${test_log}")"
+          skipped="$(grep -Ec '\*\*\*Skipped' "${test_log}")"
+
+          test "${registered}" -eq 199
+          test "${passed}" -eq 196
+          test "${failed}" -eq 0
+          test "${skipped}" -eq 3
+
+          expected_skips=(
+            interop_external_rohcv2_oracle_optional
+            interop_external_rfc5225_co_oracle_optional
+            interop_external_rfc4362_oracle_optional
+          )
+          for skipped_test in "${expected_skips[@]}"; do
+            test "$(grep -c "${skipped_test} (Skipped)" "${test_log}")" -eq 1
+          done
+          test "$(grep -Ec 'interop_external_.*_optional \(Skipped\)' "${test_log}")" -eq 3
+
+          printf 'registered=%s\n' "${registered}" >> "${GITHUB_OUTPUT}"
+          printf 'passed=%s\n' "${passed}" >> "${GITHUB_OUTPUT}"
+          printf 'failed=%s\n' "${failed}" >> "${GITHUB_OUTPUT}"
+          printf 'skipped=%s\n' "${skipped}" >> "${GITHUB_OUTPUT}"
+
+      - name: Generate and inspect Debian package
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_dir="${{ steps.build-paths.outputs.build_dir }}"
+          rc_root="${{ steps.artifact-paths.outputs.rc_root }}"
+          artifact_dir="${{ steps.artifact-paths.outputs.artifact_dir }}"
+          package_stage="${rc_root}/package-stage"
+          deb="${artifact_dir}/librohccxx-${EXPECTED_VERSION}.deb"
+          package_info="${rc_root}/debian-control.txt"
+          package_contents="${rc_root}/debian-contents.txt"
+
+          mkdir -p "${package_stage}"
+          cpack --config "${build_dir}/CPackConfig.cmake" -G DEB -B "${package_stage}"
+          mapfile -t generated_debs < <(find "${package_stage}" -maxdepth 1 -type f -name '*.deb' -print)
+          test "${#generated_debs[@]}" -eq 1
+          mv "${generated_debs[0]}" "${deb}"
+
+          dpkg-deb --info "${deb}" | tee "${package_info}"
+          dpkg-deb --contents "${deb}" | tee "${package_contents}"
+          test "$(dpkg-deb -f "${deb}" Package)" = "librohccxx"
+          test "$(dpkg-deb -f "${deb}" Version)" = "${EXPECTED_VERSION}"
+          test "$(dpkg-deb -f "${deb}" Architecture)" = "amd64"
+
+          printf 'deb=%s\n' "${deb}" >> "${GITHUB_OUTPUT}"
+          printf 'package_info=%s\n' "${package_info}" >> "${GITHUB_OUTPUT}"
+          printf 'package_contents=%s\n' "${package_contents}" >> "${GITHUB_OUTPUT}"
+
+      - name: Validate installed package contents and ELF metadata
+        id: install
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_dir="${{ steps.build-paths.outputs.build_dir }}"
+          rc_root="${{ steps.artifact-paths.outputs.rc_root }}"
+          deb="${{ steps.package.outputs.deb }}"
+          prefix="${rc_root}/install-prefix"
+          deb_root="${rc_root}/deb-root"
+
+          cmake --install "${build_dir}" --prefix "${prefix}"
+          dpkg-deb --extract "${deb}" "${deb_root}"
+
+          test -f "${prefix}/lib/librohccxx.a"
+          test -f "${prefix}/lib/librohccxx.so.${EXPECTED_VERSION}"
+          test -L "${prefix}/lib/librohccxx.so.0"
+          test "$(readlink "${prefix}/lib/librohccxx.so.0")" = "librohccxx.so.${EXPECTED_VERSION}"
+          test -L "${prefix}/lib/librohccxx.so"
+          test "$(readlink "${prefix}/lib/librohccxx.so")" = "librohccxx.so.0"
+          test -f "${prefix}/include/rohccxx.h"
+          test -f "${prefix}/include/rohccxx/version.h"
+          test -f "${prefix}/lib/cmake/rohccxx/rohccxxConfig.cmake"
+          test -f "${prefix}/lib/cmake/rohccxx/rohccxxConfigVersion.cmake"
+          test -f "${prefix}/lib/cmake/rohccxx/rohccxxTargets.cmake"
+          test -f "${prefix}/lib/cmake/rohccxx/rohccxxTargets-release.cmake"
+
+          mapfile -t installed_headers < <(
+            find "${prefix}/include" -type f -printf '%P\n' | sort
+          )
+          test "${installed_headers[*]}" = "rohccxx.h rohccxx/version.h"
+          if find "${prefix}" -type f \
+              \( -path '*/tests/*' -o -path '*/build/*' -o -path '*/_deps/*' \
+                 -o -iname '*catch2*' -o -iname '*rohc-lib*' \) \
+              -print -quit | grep -q .; then
+            echo "Installation contains tests, build output, or internal dependencies" >&2
+            exit 1
+          fi
+
+          readelf -d "${prefix}/lib/librohccxx.so.${EXPECTED_VERSION}" \
+            | tee "${rc_root}/readelf-dynamic.txt"
+          readelf -d "${prefix}/lib/librohccxx.so.${EXPECTED_VERSION}" \
+            | grep -Eq '\(SONAME\).*\[librohccxx\.so\.0\]'
+          ldd "${prefix}/lib/librohccxx.so.${EXPECTED_VERSION}" \
+            | tee "${rc_root}/shared-library-dependencies.txt"
+          if grep -q 'not found' "${rc_root}/shared-library-dependencies.txt"; then
+            exit 1
+          fi
+
+          test -f "${deb_root}/usr/lib/librohccxx.a"
+          test -f "${deb_root}/usr/lib/librohccxx.so.${EXPECTED_VERSION}"
+          test -L "${deb_root}/usr/lib/librohccxx.so.0"
+          test -L "${deb_root}/usr/lib/librohccxx.so"
+          test -f "${deb_root}/usr/include/rohccxx.h"
+          test -f "${deb_root}/usr/include/rohccxx/version.h"
+          test -f "${deb_root}/usr/lib/cmake/rohccxx/rohccxxConfig.cmake"
+          test -f "${deb_root}/usr/lib/cmake/rohccxx/rohccxxConfigVersion.cmake"
+          test -f "${deb_root}/usr/lib/cmake/rohccxx/rohccxxTargets.cmake"
+
+          printf 'prefix=%s\n' "${prefix}" >> "${GITHUB_OUTPUT}"
+          printf 'deb_root=%s\n' "${deb_root}" >> "${GITHUB_OUTPUT}"
+
+      - name: Compile and run direct and CMake consumers
+        shell: bash
+        run: |
+          set -euo pipefail
+          rc_root="${{ steps.artifact-paths.outputs.rc_root }}"
+          prefix="${{ steps.install.outputs.prefix }}"
+          deb_root="${{ steps.install.outputs.deb_root }}"
+          consumer_dir="${rc_root}/consumer"
+          mkdir -p "${consumer_dir}"
+
+          cat > "${consumer_dir}/consumer.c" <<'EOF'
+          #include <rohccxx.h>
+          #include <stdio.h>
+          #include <string.h>
+
+          int main(void)
+          {
+              if(strcmp(rohccxx_version_string(), "0.2.1") != 0 ||
+                 rohccxx_version_major() != 0 ||
+                 rohccxx_version_minor() != 2 ||
+                 rohccxx_version_patch() != 1)
+              {
+                  return 1;
+              }
+              puts(rohccxx_version_string());
+              return 0;
+          }
+          EOF
+
+          gcc -std=c11 -Wall -Wextra -Werror \
+            -I"${prefix}/include" \
+            "${consumer_dir}/consumer.c" \
+            -L"${prefix}/lib" \
+            -Wl,-rpath,"${prefix}/lib" \
+            -lrohccxx \
+            -o "${consumer_dir}/consumer-shared"
+          "${consumer_dir}/consumer-shared"
+
+          gcc -std=c11 -Wall -Wextra -Werror \
+            -I"${prefix}/include" \
+            -c "${consumer_dir}/consumer.c" \
+            -o "${consumer_dir}/consumer.o"
+          g++ "${consumer_dir}/consumer.o" \
+            "${prefix}/lib/librohccxx.a" \
+            -pthread \
+            -o "${consumer_dir}/consumer-static"
+          "${consumer_dir}/consumer-static"
+
+          cmake_source="${consumer_dir}/cmake-source"
+          mkdir -p "${cmake_source}"
+          cp "${consumer_dir}/consumer.c" "${cmake_source}/consumer.c"
+          cat > "${cmake_source}/CMakeLists.txt" <<'EOF'
+          cmake_minimum_required(VERSION 3.16)
+          project(rohccxx_consumer LANGUAGES C CXX)
+          find_package(rohccxx 0.2.1 CONFIG REQUIRED)
+          add_executable(consumer_shared consumer.c)
+          target_link_libraries(consumer_shared PRIVATE rohccxx::rohccxx)
+          set_property(TARGET consumer_shared PROPERTY LINKER_LANGUAGE CXX)
+          add_executable(consumer_static consumer.c)
+          target_link_libraries(consumer_static PRIVATE rohccxx::rohccxx_static)
+          set_property(TARGET consumer_static PROPERTY LINKER_LANGUAGE CXX)
+          EOF
+          cmake -S "${cmake_source}" -B "${consumer_dir}/cmake-build" \
+            -DCMAKE_PREFIX_PATH="${prefix}"
+          cmake --build "${consumer_dir}/cmake-build" --parallel
+          LD_LIBRARY_PATH="${prefix}/lib" \
+            "${consumer_dir}/cmake-build/consumer_shared"
+          "${consumer_dir}/cmake-build/consumer_static"
+
+          gcc -std=c11 -Wall -Wextra -Werror \
+            -I"${deb_root}/usr/include" \
+            "${consumer_dir}/consumer.c" \
+            -L"${deb_root}/usr/lib" \
+            -Wl,-rpath,"${deb_root}/usr/lib" \
+            -lrohccxx \
+            -o "${consumer_dir}/consumer-deb"
+          "${consumer_dir}/consumer-deb"
+
+      - name: Write build information and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          rc_root="${{ steps.artifact-paths.outputs.rc_root }}"
+          artifact_dir="${{ steps.artifact-paths.outputs.artifact_dir }}"
+          archive="${{ steps.artifact-paths.outputs.archive }}"
+          deb="${{ steps.package.outputs.deb }}"
+          buildinfo="${artifact_dir}/rohccxx-${EXPECTED_VERSION}-buildinfo.txt"
+          checksums="${artifact_dir}/SHA256SUMS"
+          package_info="${{ steps.package.outputs.package_info }}"
+
+          source_size="$(stat -c '%s' "${archive}")"
+          deb_size="$(stat -c '%s' "${deb}")"
+          buildinfo_placeholder="00000000000000000000"
+          checksums_placeholder="11111111111111111111"
+
+          {
+            printf 'rohccxx release candidate build information\n'
+            printf 'Main commit: %s\n' '${{ steps.source.outputs.main_commit }}'
+            printf 'rohc-lib commit: %s\n' '${{ steps.source.outputs.rohc_lib_commit }}'
+            printf 'VERSION: %s\n' "${EXPECTED_VERSION}"
+            printf 'SOURCE_DATE_EPOCH: %s\n' '${{ steps.source.outputs.source_date_epoch }}'
+            printf 'Ubuntu: %s\n' "$(. /etc/os-release; printf '%s' "${PRETTY_NAME}")"
+            printf 'Architecture: %s (%s)\n' "$(uname -m)" "$(dpkg --print-architecture)"
+            printf 'GCC: %s\n' "$(gcc --version | head -1)"
+            printf 'G++: %s\n' "$(g++ --version | head -1)"
+            printf 'CMake: %s\n' "$(cmake --version | head -1)"
+            printf 'CTest: %s\n' "$(ctest --version | head -1)"
+            printf 'CPack: %s\n' "$(cpack --version | head -1)"
+            printf 'Tests: registered=%s passed=%s failed=%s skipped=%s\n' \
+              '${{ steps.tests.outputs.registered }}' \
+              '${{ steps.tests.outputs.passed }}' \
+              '${{ steps.tests.outputs.failed }}' \
+              '${{ steps.tests.outputs.skipped }}'
+            printf 'Skipped tests:\n'
+            printf '  interop_external_rohcv2_oracle_optional\n'
+            printf '  interop_external_rfc5225_co_oracle_optional\n'
+            printf '  interop_external_rfc4362_oracle_optional\n'
+            printf 'Debian package metadata:\n'
+            sed 's/^/  /' "${package_info}"
+            printf 'Artifacts and exact byte sizes:\n'
+            printf '  %s %s\n' "$(basename "${archive}")" "${source_size}"
+            printf '  %s %s\n' "$(basename "${deb}")" "${deb_size}"
+            printf '  %s %s\n' "$(basename "${buildinfo}")" "${buildinfo_placeholder}"
+            printf '  %s %s\n' "$(basename "${checksums}")" "${checksums_placeholder}"
+          } > "${buildinfo}"
+
+          buildinfo_size="$(stat -c '%s' "${buildinfo}")"
+          buildinfo_size_fixed="$(printf '%020d' "${buildinfo_size}")"
+          sed -i "s/${buildinfo_placeholder}/${buildinfo_size_fixed}/" "${buildinfo}"
+          test "$(stat -c '%s' "${buildinfo}")" -eq "${buildinfo_size}"
+
+          (
+            cd "${artifact_dir}"
+            sha256sum \
+              "$(basename "${archive}")" \
+              "$(basename "${deb}")" \
+              "$(basename "${buildinfo}")" \
+              > "$(basename "${checksums}")"
+          )
+          checksums_size="$(stat -c '%s' "${checksums}")"
+          checksums_size_fixed="$(printf '%020d' "${checksums_size}")"
+          sed -i "s/${checksums_placeholder}/${checksums_size_fixed}/" "${buildinfo}"
+
+          # Updating fixed-width size fields does not change buildinfo length; hash it last.
+          (
+            cd "${artifact_dir}"
+            sha256sum \
+              "$(basename "${archive}")" \
+              "$(basename "${deb}")" \
+              "$(basename "${buildinfo}")" \
+              > "$(basename "${checksums}")"
+            sha256sum --check "$(basename "${checksums}")"
+          )
+          test "$(stat -c '%s' "${checksums}")" -eq "${checksums_size}"
+
+          mapfile -t artifacts < <(find "${artifact_dir}" -maxdepth 1 -type f -printf '%f\n' | sort)
+          expected=(
+            SHA256SUMS
+            "librohccxx-${EXPECTED_VERSION}.deb"
+            "rohccxx-${EXPECTED_VERSION}-buildinfo.txt"
+            "rohccxx-${EXPECTED_VERSION}-source-with-submodules.tar.gz"
+          )
+          test "${artifacts[*]}" = "${expected[*]}"
+
+      - name: Upload release candidate bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rohccxx-0.2.1-release-candidate-${{ github.sha }}
+          path: |
+            ${{ steps.artifact-paths.outputs.artifact_dir }}/rohccxx-0.2.1-source-with-submodules.tar.gz
+            ${{ steps.artifact-paths.outputs.artifact_dir }}/librohccxx-0.2.1.deb
+            ${{ steps.artifact-paths.outputs.artifact_dir }}/rohccxx-0.2.1-buildinfo.txt
+            ${{ steps.artifact-paths.outputs.artifact_dir }}/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
