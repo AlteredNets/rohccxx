@@ -6,6 +6,7 @@
 #include "../../src/core/compressor.h"
 #include "../../src/core/decompressor.h"
 #include "rohccxx/core/context.hpp"
+#include "rohccxx/core/context_crc.hpp"
 #include "rohccxx/core/cid.hpp"
 #include "rohccxx/core/emit_ir.hpp"
 #include "rohccxx/core/emit_ir_dyn.hpp"
@@ -1153,6 +1154,185 @@ TEST_CASE("ROHC RFC 4362 CSP and CCP synchronize and verify context")
     ccp[1] ^= 0x01;
     REQUIRE(rohc_decomp_rfc4362_receive_ccp(decomp, ccp, ccp_len) != 0);
     REQUIRE(rohc_decomp_has_feedback(decomp) == 1);
+
+    rohc_decomp_free(decomp);
+    rohc_comp_free(comp);
+}
+
+TEST_CASE("Context CRC covers IPv4 reconstruction state")
+{
+    rohccxx::Context baseline{};
+    baseline.profile = rohccxx::Profile::RTP;
+    baseline.cid = 4;
+    baseline.ip_version = 4;
+    baseline.ipv4_id = 0x1234;
+    baseline.rtp.last_seq = 0x4321;
+
+    auto changed = baseline;
+    changed.ipv4_flags = 0x02;
+    REQUIRE(rohccxx::detail::context_crc7(changed) !=
+            rohccxx::detail::context_crc7(baseline));
+
+    changed = baseline;
+    changed.ipv4_id_sequential = true;
+    REQUIRE(rohccxx::detail::context_crc7(changed) !=
+            rohccxx::detail::context_crc7(baseline));
+}
+
+TEST_CASE("IPv4 fragments use uncompressed fallback and round-trip exactly")
+{
+    constexpr std::uint16_t cases[] = {
+        0x0001, 0x2001, 0x4001, 0x6001,
+        0x1FFF, 0x3FFF, 0x5FFF, 0x7FFF,
+        0x2000
+    };
+
+    for(const auto flags_fragment : cases)
+    {
+        CAPTURE(flags_fragment);
+        rohc_comp* comp = rohc_comp_new2(0, ROHCCXX_DIRECTION_UPLINK);
+        rohc_decomp* decomp = rohc_decomp_new2(0, ROHCCXX_DIRECTION_UPLINK);
+        REQUIRE(comp != nullptr);
+        REQUIRE(decomp != nullptr);
+
+        std::uint8_t ip[64] = {};
+        make_valid_rtp(ip, 100, 16000, 0x12345678U);
+        set_ipv4_id_and_flags(ip, 7, flags_fragment);
+        std::uint8_t rohc[128] = {};
+        std::size_t rohc_len = sizeof(rohc);
+        std::uint8_t out[128] = {};
+        std::size_t out_len = sizeof(out);
+
+        REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
+        REQUIRE(rohc[0] == 0x00);
+        REQUIRE(rohc_decompress4(decomp, rohc, rohc_len, out, &out_len) == 0);
+        REQUIRE(out_len == sizeof(ip));
+        REQUIRE(std::memcmp(out, ip, sizeof(ip)) == 0);
+
+        rohc_decomp_free(decomp);
+        rohc_comp_free(comp);
+    }
+}
+
+TEST_CASE("DF-only IPv4 RTP remains compressible")
+{
+    rohc_comp* comp = rohc_comp_new2(0, ROHCCXX_DIRECTION_UPLINK);
+    rohc_decomp* decomp = rohc_decomp_new2(0, ROHCCXX_DIRECTION_UPLINK);
+    REQUIRE(comp != nullptr);
+    REQUIRE(decomp != nullptr);
+
+    std::uint8_t ip[64] = {};
+    make_valid_rtp(ip, 100, 16000, 0x12345678U);
+    set_ipv4_id_and_flags(ip, 7, 0x4000);
+    std::uint8_t rohc[128] = {};
+    std::size_t rohc_len = sizeof(rohc);
+    std::uint8_t out[128] = {};
+    std::size_t out_len = sizeof(out);
+    REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
+    REQUIRE(rohc[0] != 0x00);
+    REQUIRE(rohc_decompress4(decomp, rohc, rohc_len, out, &out_len) == 0);
+    REQUIRE(out_len == sizeof(ip));
+    REQUIRE(std::memcmp(out, ip, sizeof(ip)) == 0);
+
+    rohc_decomp_free(decomp);
+    rohc_comp_free(comp);
+}
+
+TEST_CASE("RTP-only C++ compressor rejects IPv4 fragments")
+{
+    constexpr std::uint16_t cases[] = {0x0001, 0x1FFF, 0x2000, 0x2001, 0x3FFF};
+    for(const auto flags_fragment : cases)
+    {
+        CAPTURE(flags_fragment);
+        rohccxx::Compressor comp(0);
+        std::uint8_t ip[64] = {};
+        make_valid_rtp(ip, 100, 16000, 0x12345678U);
+        set_ipv4_id_and_flags(ip, 7, flags_fragment);
+        std::uint8_t rohc[128] = {};
+        std::size_t rohc_len = sizeof(rohc);
+        REQUIRE(comp.compress(ip, sizeof(ip), rohc, &rohc_len) != 0);
+    }
+}
+
+TEST_CASE("RTP sequence boundaries and wraparound round-trip exactly")
+{
+    const std::vector<std::vector<std::uint16_t>> runs = {
+        {0xEFFF, 0xF000},
+        {0xFFFE, 0xFFFF, 0x0000}
+    };
+    for(const auto& sequences : runs)
+    {
+        rohc_comp* comp = rohc_comp_new2(0, ROHCCXX_DIRECTION_UPLINK);
+        rohc_decomp* decomp = rohc_decomp_new2(0, ROHCCXX_DIRECTION_UPLINK);
+        REQUIRE(comp != nullptr);
+        REQUIRE(decomp != nullptr);
+        std::uint32_t timestamp = 16000;
+        for(const auto sequence : sequences)
+        {
+            CAPTURE(sequence);
+            std::uint8_t ip[64] = {};
+            make_valid_rtp(ip, sequence, timestamp, 0x12345678U);
+            set_ipv4_id_and_flags(ip, sequence, 0x4000);
+            std::uint8_t rohc[128] = {};
+            std::size_t rohc_len = sizeof(rohc);
+            std::uint8_t out[128] = {};
+            std::size_t out_len = sizeof(out);
+            REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
+            REQUIRE(rohc_decompress4(decomp, rohc, rohc_len, out, &out_len) == 0);
+            REQUIRE(out_len == sizeof(ip));
+            REQUIRE((static_cast<std::uint16_t>(out[30]) << 8U | out[31]) == sequence);
+            REQUIRE(std::memcmp(out, ip, sizeof(ip)) == 0);
+            timestamp += 160;
+        }
+        rohc_decomp_free(decomp);
+        rohc_comp_free(comp);
+    }
+}
+
+TEST_CASE("RTP timestamps cross the high boundary and wrap with zero SSRC")
+{
+    constexpr std::uint32_t timestamps[] = {
+        0xFFFFFE00U,
+        0xFFFFFEA0U,
+        0xFFFFFF40U,
+        0xFFFFFFE0U,
+        0x00000080U
+    };
+    rohc_comp* comp = rohc_comp_new2(0, ROHCCXX_DIRECTION_UPLINK);
+    rohc_decomp* decomp = rohc_decomp_new2(0, ROHCCXX_DIRECTION_UPLINK);
+    REQUIRE(comp != nullptr);
+    REQUIRE(decomp != nullptr);
+
+    std::uint16_t sequence = 0x4000;
+    for(const auto timestamp : timestamps)
+    {
+        CAPTURE(sequence, timestamp);
+        std::uint8_t ip[64] = {};
+        make_valid_rtp(ip, sequence, timestamp, 0x00000000U);
+        set_ipv4_id_and_flags(ip, sequence, 0x4000);
+        std::uint8_t rohc[128] = {};
+        std::size_t rohc_len = sizeof(rohc);
+        std::uint8_t out[128] = {};
+        std::size_t out_len = sizeof(out);
+
+        REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
+        REQUIRE(rohc_decompress4(decomp, rohc, rohc_len, out, &out_len) == 0);
+        REQUIRE(out_len == sizeof(ip));
+        const auto reconstructed_timestamp =
+            (static_cast<std::uint32_t>(out[32]) << 24U) |
+            (static_cast<std::uint32_t>(out[33]) << 16U) |
+            (static_cast<std::uint32_t>(out[34]) << 8U) |
+            static_cast<std::uint32_t>(out[35]);
+        const auto reconstructed_ssrc =
+            (static_cast<std::uint32_t>(out[36]) << 24U) |
+            (static_cast<std::uint32_t>(out[37]) << 16U) |
+            (static_cast<std::uint32_t>(out[38]) << 8U) |
+            static_cast<std::uint32_t>(out[39]);
+        REQUIRE(reconstructed_timestamp == timestamp);
+        REQUIRE(reconstructed_ssrc == 0x00000000U);
+        REQUIRE(std::memcmp(out, ip, sizeof(ip)) == 0);
+        ++sequence;
+    }
 
     rohc_decomp_free(decomp);
     rohc_comp_free(comp);

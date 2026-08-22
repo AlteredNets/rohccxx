@@ -4,6 +4,7 @@
 #include <rohccxx.h>
 
 #include "rohccxx/core/context.hpp"
+#include "rohccxx/core/context_crc.hpp"
 #include "rohccxx/core/encoding_methods.hpp"
 #include "rohccxx/core/cid.hpp"
 #include "rohccxx/core/context_table.hpp"
@@ -40,8 +41,6 @@
 #include "rohccxx/utils/crc.hpp"
 
 #include "rohccxx/wire/convert.hpp"
-
-#include "rohccxx/core/context_assert.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -809,44 +808,6 @@ static bool lla_runtime_contract_valid(const rohccxx::lla::AssistingLayerContrac
 {
     return rohccxx::lla::validate_rfc3409_lower_layer_guidelines(contract).valid &&
            rohccxx::lla::validate_rfc3243_zero_byte_flow(contract, flow).valid;
-}
-
-static void write_context_u16(uint8_t* data, size_t& pos, uint16_t value)
-{
-    data[pos++] = static_cast<uint8_t>(value >> 8);
-    data[pos++] = static_cast<uint8_t>(value & 0xFFU);
-}
-
-static void write_context_u32(uint8_t* data, size_t& pos, uint32_t value)
-{
-    data[pos++] = static_cast<uint8_t>(value >> 24);
-    data[pos++] = static_cast<uint8_t>(value >> 16);
-    data[pos++] = static_cast<uint8_t>(value >> 8);
-    data[pos++] = static_cast<uint8_t>(value & 0xFFU);
-}
-
-static uint8_t context_crc7(const rohccxx::Context& ctx)
-{
-    uint8_t data[64] = {};
-    size_t pos = 0;
-    write_context_u16(data, pos, static_cast<uint16_t>(ctx.profile));
-    write_context_u32(data, pos, ctx.cid);
-    data[pos++] = static_cast<uint8_t>(ctx.ip_version);
-    data[pos++] = ctx.ipv4_tos;
-    data[pos++] = ctx.ipv4_ttl;
-    write_context_u16(data, pos, ctx.ipv4_id);
-    write_context_u32(data, pos, ctx.ipv4_saddr);
-    write_context_u32(data, pos, ctx.ipv4_daddr);
-    write_context_u16(data, pos, ctx.udp_sport);
-    write_context_u16(data, pos, ctx.udp_dport);
-    write_context_u16(data, pos, ctx.udp_check);
-    data[pos++] = ctx.rtp.vpxcc;
-    data[pos++] = ctx.rtp.mpt;
-    write_context_u16(data, pos, ctx.rtp.last_seq);
-    write_context_u32(data, pos, ctx.rtp.last_ts);
-    write_context_u32(data, pos, ctx.rtp.ssrc);
-    write_context_u32(data, pos, ctx.rtp.ts_stride);
-    return static_cast<uint8_t>(rohccxx::utils::crc7(data, pos) & 0x7FU);
 }
 
 static bool lla_context_established(const rohccxx::Context& ctx)
@@ -1734,7 +1695,7 @@ rohc_comp_rfc4362_emit_ccp(struct rohc_comp* c,
         return -1;
     rohccxx::lla::ContextCheckPacket ccp{};
     ccp.has_crc = true;
-    ccp.crc7 = context_crc7(*ctx);
+    ccp.crc7 = rohccxx::detail::context_crc7(*ctx);
     return rohccxx::lla::write_context_check_packet(ccp_packet, ccp_packet_len, ccp) ? 0 : -1;
 }
 
@@ -1844,9 +1805,10 @@ rohc_compress4(struct rohc_comp* comp,
     ParsedIpView ip_view{};
     if(!parse_ip_view(ip_packet, ip_packet_len, ip_view))
         return -1;
+    const bool ipv4_fragmented = ip_view.ip4 && ipv4::is_fragmented(*ip_view.ip4);
 
     const udp::Header* udp = nullptr;
-    if(ip_view.terminal_protocol == 17 || ip_view.terminal_protocol == 136)
+    if(!ipv4_fragmented && (ip_view.terminal_protocol == 17 || ip_view.terminal_protocol == 136))
     {
         // Malformed/truncated UDP-family transports remain valid IP packets and
         // should be carried by the RFC 5795 uncompressed profile fallback.
@@ -1867,7 +1829,7 @@ rohc_compress4(struct rohc_comp* comp,
         DBG("no UDP, skipping RTP parse");
     }
 
-    Profile profile = classify_packet(ip_packet, ip_packet_len);
+    Profile profile = ipv4_fragmented ? Profile::Uncompressed : classify_packet(ip_packet, ip_packet_len);
     DBG("profile=%u", static_cast<unsigned>(profile));
 
     uint32_t cid = comp->impl.current_cid;
@@ -2009,7 +1971,6 @@ rohc_compress4(struct rohc_comp* comp,
         ctx->rtp.last_seq = seq;
         ctx->rtp.last_ts = ts;
         ctx->rtp.ssrc = wire::to_host(rtp->ssrc);
-        assert_rtp_context_host_endian(*ctx);
         const size_t rtp_offset = ip_view.header_len + sizeof(*udp);
         RtpPayloadView rtp_payload{};
         if(ip_packet_len < rtp_offset ||
@@ -2438,7 +2399,7 @@ static int receive_ccp_for_cid_locked(rohccxx_internal::Decompressor& decomp,
         set_feedback(decomp, cid, rohccxx::FeedbackType::STATIC_NACK);
         return -1;
     }
-    if(ccp.crc7 != context_crc7(*ctx))
+    if(ccp.crc7 != rohccxx::detail::context_crc7(*ctx))
     {
         set_feedback(decomp, ctx->cid, rohccxx::FeedbackType::STATIC_NACK);
         return -1;

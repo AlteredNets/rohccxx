@@ -4,6 +4,7 @@
 #include "compressor.h"
 
 #include <rohccxx/core/context.hpp>
+#include <rohccxx/core/context_crc.hpp>
 #include <rohccxx/core/context_init.hpp>
 #include <rohccxx/core/context_table.hpp>
 #include <rohccxx/core/emit_ir.hpp>
@@ -11,7 +12,7 @@
 #include <rohccxx/core/encoding_methods.hpp>
 #include <rohccxx/core/packet_type.hpp>
 #include <rohccxx/core/lla.hpp>
-#include <rohccxx/utils/crc.hpp>
+#include <rohccxx/protocols/ipv4.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -55,49 +56,13 @@ inline bool lla_context_ready(const Context& ctx)
     return lla_context_established(ctx) && ctx.rohc_state == RohcState::DynamicEstablished;
 }
 
-inline void write_context_u16(uint8_t* data, size_t& pos, uint16_t value)
-{
-    data[pos++] = static_cast<uint8_t>(value >> 8);
-    data[pos++] = static_cast<uint8_t>(value & 0xFFU);
-}
-
-inline void write_context_u32(uint8_t* data, size_t& pos, uint32_t value)
-{
-    data[pos++] = static_cast<uint8_t>(value >> 24);
-    data[pos++] = static_cast<uint8_t>(value >> 16);
-    data[pos++] = static_cast<uint8_t>(value >> 8);
-    data[pos++] = static_cast<uint8_t>(value & 0xFFU);
-}
-
-uint8_t context_crc7(const Context& ctx)
-{
-    uint8_t data[64] = {};
-    size_t pos = 0;
-    write_context_u16(data, pos, static_cast<uint16_t>(ctx.profile));
-    write_context_u32(data, pos, ctx.cid);
-    data[pos++] = static_cast<uint8_t>(ctx.ip_version);
-    data[pos++] = ctx.ipv4_tos;
-    data[pos++] = ctx.ipv4_ttl;
-    write_context_u16(data, pos, ctx.ipv4_id);
-    write_context_u32(data, pos, ctx.ipv4_saddr);
-    write_context_u32(data, pos, ctx.ipv4_daddr);
-    write_context_u16(data, pos, ctx.udp_sport);
-    write_context_u16(data, pos, ctx.udp_dport);
-    write_context_u16(data, pos, ctx.udp_check);
-    data[pos++] = ctx.rtp.vpxcc;
-    data[pos++] = ctx.rtp.mpt;
-    write_context_u16(data, pos, ctx.rtp.last_seq);
-    write_context_u32(data, pos, ctx.rtp.last_ts);
-    write_context_u32(data, pos, ctx.rtp.ssrc);
-    write_context_u32(data, pos, ctx.rtp.ts_stride);
-    return static_cast<uint8_t>(utils::crc7(data, pos) & 0x7FU);
-}
-
 inline bool capture_rtp_packet(Context& ctx,
                               const uint8_t* ip_packet,
                               size_t ip_len)
 {
     if(ip_len < 40)
+        return false;
+    if(ipv4::is_fragmented(read_u16(ip_packet + 6)))
         return false;
 
     const bool had_ipv4_rtp_context = ctx.rtp.initialized != 0;
@@ -288,7 +253,7 @@ int Compressor::rfc4362_emit_ccp(uint8_t* ccp_packet,
         return -1;
     lla::ContextCheckPacket ccp{};
     ccp.has_crc = true;
-    ccp.crc7 = context_crc7(*ctx);
+    ccp.crc7 = detail::context_crc7(*ctx);
     return lla::write_context_check_packet(ccp_packet, ccp_len, ccp) ? 0 : -1;
 }
 

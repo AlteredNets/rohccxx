@@ -94,11 +94,16 @@ inline bool decode_fo_rtp(const uint8_t* in,
     }
     else
     {
-        ts = encoding::decode_scaled_lsb(ts_lsb,
-                                         8,
-                                         ctx.rtp.last_ts,
-                                         ctx.rtp.ts_stride,
-                                         ctx.rtp.ts_residue);
+        const auto seq_delta = static_cast<std::uint16_t>(seq - previous_seq);
+        const auto predicted_timestamp = static_cast<std::uint32_t>(
+            ctx.rtp.last_ts + ctx.rtp.ts_stride * seq_delta);
+        ts = encoding::decode_scaled_lsb_with_timestamp_prediction(
+            ts_lsb,
+            8,
+            predicted_timestamp,
+            ctx.rtp.last_ts,
+            ctx.rtp.ts_stride,
+            ctx.rtp.ts_residue);
     }
 
     ctx.rtp.seq_window.update(seq);

@@ -101,8 +101,8 @@ TEST_CASE("Sprint 8: FO sequence number wrap-around")
     ctx.rtp.seq_window.init(65534);
     ctx.rtp.ts_window.init(100000);
 
-    uint8_t pkt[16];
-    size_t len = 0;
+    uint8_t pkt[16] = {};
+    size_t len = sizeof(pkt);
 
     uint16_t seq;
     uint32_t ts;
@@ -127,6 +127,7 @@ TEST_CASE("Sprint 8: FO sequence number wrap-around")
 
     txctx.rtp.last_seq = 0;
     txctx.rtp.last_ts  = 100320;
+    len = sizeof(pkt);
     emit_rtp_fo(pkt, &len, txctx);
     REQUIRE(len > 0);
     REQUIRE(decode_fo_rtp(pkt, len, ctx, seq, ts));
@@ -147,8 +148,8 @@ TEST_CASE("Sprint 8: FO timestamp drift is reconstructed correctly")
     ctx.rtp.seq_window.init(1000);
     ctx.rtp.ts_window.init(100000);
 
-    uint8_t pkt[16];
-    size_t len = 0;
+    uint8_t pkt[16] = {};
+    size_t len = sizeof(pkt);
 
     uint16_t seq;
     uint32_t ts;
@@ -173,6 +174,7 @@ TEST_CASE("Sprint 8: FO timestamp drift is reconstructed correctly")
 
     txctx.rtp.last_seq = 1002;
     txctx.rtp.last_ts  = 350000;
+    len = sizeof(pkt);
     emit_rtp_fo(pkt, &len, txctx);
     REQUIRE(len > 0);
     REQUIRE(decode_fo_rtp(pkt, len, ctx, seq, ts));
