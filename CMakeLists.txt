@@ -3,10 +3,11 @@
 
 cmake_minimum_required(VERSION 3.16)
 
-set(ROHCCXX_DEFAULT_VERSION "0.1.0")
-set(ROHCCXX_VERSION "" CACHE STRING "Override the rohccxx release version; otherwise an exact git tag is used")
+set(ROHCCXX_VERSION "" CACHE STRING "Override the rohccxx release version; otherwise use an exact git tag or VERSION file")
+set(_rohccxx_version_source "explicit ROHCCXX_VERSION override")
 
 if(ROHCCXX_VERSION STREQUAL "")
+    set(_rohccxx_version_source "")
     find_package(Git QUIET)
     if(GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
         execute_process(
@@ -22,6 +23,7 @@ if(ROHCCXX_VERSION STREQUAL "")
             string(REGEX REPLACE "^v" "" _rohccxx_git_version "${_rohccxx_git_tag}")
             if(_rohccxx_git_version MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
                 set(ROHCCXX_VERSION "${_rohccxx_git_version}")
+                set(_rohccxx_version_source "exact git tag '${_rohccxx_git_tag}'")
             else()
                 message(WARNING "Ignoring non-semver rohccxx git tag '${_rohccxx_git_tag}'")
             endif()
@@ -29,12 +31,27 @@ if(ROHCCXX_VERSION STREQUAL "")
     endif()
 
     if(ROHCCXX_VERSION STREQUAL "")
-        set(ROHCCXX_VERSION "${ROHCCXX_DEFAULT_VERSION}")
+        set(_rohccxx_version_file "${CMAKE_CURRENT_SOURCE_DIR}/VERSION")
+        if(EXISTS "${_rohccxx_version_file}")
+            file(READ "${_rohccxx_version_file}" ROHCCXX_VERSION)
+            string(STRIP "${ROHCCXX_VERSION}" ROHCCXX_VERSION)
+            set(_rohccxx_version_source "top-level VERSION file")
+        endif()
+    endif()
+
+    if(ROHCCXX_VERSION STREQUAL "")
+        message(FATAL_ERROR
+            "Unable to determine rohccxx version: provide -DROHCCXX_VERSION=X.Y.Z, "
+            "an exact semantic version git tag at HEAD, or a valid top-level VERSION file"
+        )
     endif()
 endif()
 
 if(NOT ROHCCXX_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
-    message(FATAL_ERROR "ROHCCXX_VERSION must be in X.Y.Z numeric semantic-version form")
+    message(FATAL_ERROR
+        "Invalid rohccxx version '${ROHCCXX_VERSION}' from ${_rohccxx_version_source}; "
+        "expected numeric semantic version X.Y.Z"
+    )
 endif()
 
 project(rohccxx VERSION ${ROHCCXX_VERSION} LANGUAGES C CXX)

@@ -39,6 +39,17 @@ add_subdirectory(interop)
 add_subdirectory(compat)
 add_subdirectory(rfc3243)
 
+add_test(NAME version_resolution_and_source_package_metadata
+    COMMAND ${CMAKE_COMMAND}
+        -DROHCCXX_SOURCE_DIR=${PROJECT_SOURCE_DIR}
+        -DROHCCXX_TEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/version-resolution
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_version_resolution.cmake
+)
+set_tests_properties(version_resolution_and_source_package_metadata PROPERTIES
+    LABELS "version;packaging"
+    TIMEOUT 120
+)
+
 
 # -----------------------------
 # Quality Gates: TSAN and Valgrind
