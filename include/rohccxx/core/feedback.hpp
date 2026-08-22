@@ -177,7 +177,8 @@ inline bool write_feedback_packet(std::uint8_t* out, size_t* out_len, const Feed
 
 inline bool read_feedback_packet(const std::uint8_t* in, size_t len, Feedback& feedback, size_t* consumed = nullptr)
 {
-    feedback = {};
+    const Feedback empty_feedback{};
+    feedback = empty_feedback;
     if(!in || len < 2 || !is_feedback_packet_start(in[0]))
         return false;
 

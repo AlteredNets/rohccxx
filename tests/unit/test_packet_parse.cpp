@@ -84,6 +84,17 @@ void finish_ipv4_checksum(std::uint8_t* packet)
     packet[11] = static_cast<std::uint8_t>(csum & 0xFF);
 }
 
+void set_ipv4_id_and_flags(std::uint8_t* packet,
+                           std::uint16_t id,
+                           std::uint16_t flags_fragment)
+{
+    packet[4] = static_cast<std::uint8_t>(id >> 8);
+    packet[5] = static_cast<std::uint8_t>(id & 0xFF);
+    packet[6] = static_cast<std::uint8_t>(flags_fragment >> 8);
+    packet[7] = static_cast<std::uint8_t>(flags_fragment & 0xFF);
+    finish_ipv4_checksum(packet);
+}
+
 
 rohccxx_lla_contract_t complete_c_lla_contract()
 {
@@ -422,6 +433,48 @@ TEST_CASE("ROHC packet parser identifies current RFC 5225 packet families")
     malformed_uncompressed[4] = 0x18;
     REQUIRE(rohccxx::parse_rohc_packet(malformed_uncompressed, sizeof(malformed_uncompressed), parsed));
     REQUIRE(parsed.type == rohccxx::RohcPacketType::FO_RTP);
+}
+
+
+TEST_CASE("RTP FO round-trips sequential IPv4 IDs and DF flags")
+{
+    rohc_comp* comp = rohc_comp_new2(4, ROHCCXX_DIRECTION_UPLINK);
+    rohc_decomp* decomp = rohc_decomp_new2(4, ROHCCXX_DIRECTION_DOWNLINK);
+    REQUIRE(comp != nullptr);
+    REQUIRE(decomp != nullptr);
+    REQUIRE(rohc_comp_set_cid(comp, 0) == 0);
+
+    for(std::uint16_t i = 0; i < 4; ++i)
+    {
+        std::uint8_t ip[64] = {};
+        make_valid_rtp(ip,
+                       static_cast<std::uint16_t>(1000U + i),
+                       160000U + static_cast<std::uint32_t>(i) * 160U,
+                       0x11223344U);
+        set_ipv4_id_and_flags(ip, i, 0x4000U);
+
+        std::uint8_t rohc[128] = {};
+        std::size_t rohc_len = sizeof(rohc);
+        REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
+
+        rohccxx::ParsedRohcPacket parsed{};
+        REQUIRE(rohccxx::parse_rohc_packet(rohc, rohc_len, parsed));
+        if(i >= 2)
+            REQUIRE(parsed.type == rohccxx::RohcPacketType::FO_RTP);
+
+        std::uint8_t out[128] = {};
+        std::size_t out_len = sizeof(out);
+        REQUIRE(rohc_decompress4(decomp, rohc, rohc_len, out, &out_len) == 0);
+        REQUIRE(out_len == sizeof(ip));
+        REQUIRE(out[4] == ip[4]);
+        REQUIRE(out[5] == ip[5]);
+        REQUIRE(out[6] == ip[6]);
+        REQUIRE(out[7] == ip[7]);
+        REQUIRE(std::memcmp(out, ip, sizeof(ip)) == 0);
+    }
+
+    rohc_decomp_free(decomp);
+    rohc_comp_free(comp);
 }
 
 
@@ -2661,7 +2714,10 @@ TEST_CASE("ROHC large-CID channels round-trip remaining compressed profiles")
         out_len = sizeof(out);
         REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
         if(item.with_rtp)
-            REQUIRE((rohc[0] & 0x80) == 0x00);
+        {
+            // This packet changes IP-ID behavior, so IR-DYN must refresh context.
+            REQUIRE(rohc[0] == 0xF8);
+        }
         else
             REQUIRE(rohc[0] == item.fo_type);
         REQUIRE(rohc[1] == 0x92);

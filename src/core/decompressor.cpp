@@ -106,6 +106,7 @@ bool build_rtp_packet_from_context(std::uint8_t* ip_packet,
     ip_packet[3] = static_cast<std::uint8_t>(total & 0xFFU);
     ip_packet[4] = static_cast<std::uint8_t>(ctx.ipv4_id >> 8);
     ip_packet[5] = static_cast<std::uint8_t>(ctx.ipv4_id & 0xFFU);
+    ip_packet[6] = static_cast<std::uint8_t>((ctx.ipv4_flags & 0x07U) << 5U);
     ip_packet[8] = ctx.ipv4_ttl;
     ip_packet[9] = 17;
     ip_packet[12] = static_cast<std::uint8_t>(ctx.ipv4_saddr >> 24);
@@ -266,6 +267,8 @@ int Decompressor::rfc4362_receive_nhp(const uint8_t* payload,
     if(!ctx || !lla_context_ready(*ctx))
         return -1;
     ++ctx->rtp.last_seq;
+    if(ctx->ip_version == 4 && ctx->ipv4_id_sequential)
+        ++ctx->ipv4_id;
     if(ctx->rtp.ts_stride > 0)
         ctx->rtp.last_ts += ctx->rtp.ts_stride;
     return build_rtp_packet_from_context(ip_packet, ip_len, *ctx, payload, payload_len) ? 0 : -1;

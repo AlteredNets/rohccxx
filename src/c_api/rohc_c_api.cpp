@@ -146,7 +146,8 @@ static bool capture_ip_context(rohccxx::Context& ctx,
         ctx.ipv4_tos = rohccxx::wire::to_host(view.ip4->tos);
         ctx.ipv4_ttl = rohccxx::wire::to_host(view.ip4->ttl);
         ctx.ipv4_id = rohccxx::wire::to_host(view.ip4->identification);
-        ctx.ipv4_flags = 0;
+        ctx.ipv4_flags = static_cast<std::uint8_t>(
+            (rohccxx::wire::to_host(view.ip4->flags_fragment) >> 13U) & 0x07U);
         ctx.ipv4_saddr = rohccxx::wire::to_host(view.ip4->src);
         ctx.ipv4_daddr = rohccxx::wire::to_host(view.ip4->dst);
         return capture_ipv4_options(ctx, packet, view.header_len);
@@ -258,6 +259,31 @@ static bool prepend_small_cid(uint8_t* packet,
     return true;
 }
 
+
+static bool update_rtp_ipv4_id_behavior(rohccxx::Context& ctx,
+                                        bool had_ipv4_rtp_context,
+                                        std::uint16_t previous_ipv4_id,
+                                        std::uint16_t previous_ipv4_flags,
+                                        bool previous_ipv4_id_sequential,
+                                        std::uint16_t previous_rtp_seq,
+                                        std::uint16_t seq)
+{
+    if(ctx.ip_version != 4 || !had_ipv4_rtp_context)
+    {
+        ctx.ipv4_id_sequential = false;
+        return true;
+    }
+
+    const auto id_delta = static_cast<std::uint16_t>(ctx.ipv4_id - previous_ipv4_id);
+    const auto seq_delta = static_cast<std::uint16_t>(seq - previous_rtp_seq);
+    ctx.ipv4_id_sequential = id_delta != 0U && id_delta == seq_delta;
+
+    const bool flags_unchanged = ctx.ipv4_flags == previous_ipv4_flags;
+    // Compact RTP FO has no room to signal IPv4 ID/flag behavior changes.
+    const bool behavior_unchanged = ctx.ipv4_id_sequential == previous_ipv4_id_sequential;
+    const bool id_fo_safe = ctx.ipv4_id == previous_ipv4_id || ctx.ipv4_id_sequential;
+    return flags_unchanged && behavior_unchanged && id_fo_safe;
+}
 
 static void update_rtp_timestamp_stride(rohccxx::Context& ctx,
                                         std::uint16_t seq,
@@ -839,7 +865,10 @@ static void set_feedback(rohccxx_internal::Decompressor& decomp,
                          uint32_t cid,
                          rohccxx::FeedbackType type)
 {
-    decomp.last_feedback = {cid, type};
+    rohccxx::Feedback feedback{};
+    feedback.cid = cid;
+    feedback.type = type;
+    decomp.last_feedback = feedback;
     decomp.has_feedback = true;
 }
 
@@ -1891,6 +1920,11 @@ rohc_compress4(struct rohc_comp* comp,
     {
         ctx->profile = Profile::RTP_UDP_Lite;
         ctx->mode = comp->impl.mode;
+        const bool had_ipv4_rtp_context = ctx->ip_version == 4 && ctx->tx_count > 0;
+        const std::uint16_t previous_ipv4_id = ctx->ipv4_id;
+        const std::uint16_t previous_ipv4_flags = ctx->ipv4_flags;
+        const bool previous_ipv4_id_sequential = ctx->ipv4_id_sequential;
+        const std::uint16_t previous_rtp_seq = ctx->rtp.last_seq;
         if(!capture_common())
             return -1;
         ctx->udp_sport = wire::to_host(udp->src_port);
@@ -1899,6 +1933,13 @@ rohc_compress4(struct rohc_comp* comp,
         ctx->udp_check = wire::to_host(udp->checksum);
         const uint16_t seq = wire::to_host(rtp->sequence);
         const uint32_t ts = wire::to_host(rtp->timestamp);
+        const bool rtp_fo_ipv4_safe = update_rtp_ipv4_id_behavior(*ctx,
+                                                                  had_ipv4_rtp_context,
+                                                                  previous_ipv4_id,
+                                                                  previous_ipv4_flags,
+                                                                  previous_ipv4_id_sequential,
+                                                                  previous_rtp_seq,
+                                                                  seq);
         update_rtp_timestamp_stride(*ctx, seq, ts);
         ctx->rtp.vpxcc = wire::to_host(rtp->vpxcc);
         ctx->rtp.mpt = wire::to_host(rtp->mpt);
@@ -1920,7 +1961,7 @@ rohc_compress4(struct rohc_comp* comp,
             if(!emit_ir_rtp_udp_lite(rohc_packet, rohc_packet_len, *ctx))
                 return -1;
         }
-        else if(should_emit_ir_dyn(*ctx))
+        else if(should_emit_ir_dyn(*ctx) || !rtp_fo_ipv4_safe)
         {
             ctx->rohc_state = RohcState::DynamicEstablished;
             if(!emit_ir_dyn_rtp_udp_lite(rohc_packet, rohc_packet_len, *ctx))
@@ -1942,6 +1983,11 @@ rohc_compress4(struct rohc_comp* comp,
     {
         ctx->profile = Profile::RTP;
         ctx->mode = comp->impl.mode;
+        const bool had_ipv4_rtp_context = ctx->ip_version == 4 && ctx->tx_count > 0;
+        const std::uint16_t previous_ipv4_id = ctx->ipv4_id;
+        const std::uint16_t previous_ipv4_flags = ctx->ipv4_flags;
+        const bool previous_ipv4_id_sequential = ctx->ipv4_id_sequential;
+        const std::uint16_t previous_rtp_seq = ctx->rtp.last_seq;
         if(!capture_common())
             return -1;
         ctx->udp_sport = wire::to_host(udp->src_port);
@@ -1950,6 +1996,13 @@ rohc_compress4(struct rohc_comp* comp,
         ctx->udp_check = wire::to_host(udp->checksum);
         const uint16_t seq = wire::to_host(rtp->sequence);
         const uint32_t ts = wire::to_host(rtp->timestamp);
+        const bool rtp_fo_ipv4_safe = update_rtp_ipv4_id_behavior(*ctx,
+                                                                  had_ipv4_rtp_context,
+                                                                  previous_ipv4_id,
+                                                                  previous_ipv4_flags,
+                                                                  previous_ipv4_id_sequential,
+                                                                  previous_rtp_seq,
+                                                                  seq);
         update_rtp_timestamp_stride(*ctx, seq, ts);
         ctx->rtp.vpxcc = wire::to_host(rtp->vpxcc);
         ctx->rtp.mpt = wire::to_host(rtp->mpt);
@@ -1983,7 +2036,7 @@ rohc_compress4(struct rohc_comp* comp,
             if(!emit_ir_rtp(rohc_packet, rohc_packet_len, *ctx))
                 return -1;
         }
-        else if(should_emit_ir_dyn(*ctx))
+        else if(should_emit_ir_dyn(*ctx) || !rtp_fo_ipv4_safe)
         {
             ctx->rohc_state = RohcState::DynamicEstablished;
             if(!emit_ir_dyn_rtp(rohc_packet, rohc_packet_len, *ctx))
@@ -2303,6 +2356,8 @@ static int receive_nhp_for_cid_locked(rohccxx_internal::Decompressor& decomp,
     if(!ctx || !lla_context_ready(*ctx))
         return -1;
     ++ctx->rtp.last_seq;
+    if(ctx->ip_version == 4 && ctx->ipv4_id_sequential)
+        ++ctx->ipv4_id;
     ctx->rtp.last_ts += ctx->rtp.ts_stride != 0 ? ctx->rtp.ts_stride : 160U;
     const bool built = ctx->ip_version == 6
         ? build_ipv6_rtp_packet(ip_packet, ip_packet_len, *ctx, payload, payload_len)
@@ -2502,7 +2557,10 @@ rohc_decompress4(struct rohc_decomp* decomp,
 
     auto fail_with_feedback = [&](uint32_t feedback_cid) -> int
     {
-        decomp->impl.last_feedback = { feedback_cid, FeedbackType::NACK };
+        Feedback feedback{};
+        feedback.cid = feedback_cid;
+        feedback.type = FeedbackType::NACK;
+        decomp->impl.last_feedback = feedback;
         decomp->impl.has_feedback = true;
         return -1;
     };

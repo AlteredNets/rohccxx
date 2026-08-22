@@ -73,6 +73,7 @@ inline bool decode_fo_rtp(const uint8_t* in,
         return false;
 
     // Sliding-window reconstruction
+    const std::uint16_t previous_seq = ctx.rtp.last_seq;
     uint16_t seq = static_cast<std::uint16_t>(
         encoding::decode_field_lsb(encoding::EncodedField::RtpSequence,
                                    seq_lsb,
@@ -102,6 +103,11 @@ inline bool decode_fo_rtp(const uint8_t* in,
 
     ctx.rtp.seq_window.update(seq);
     ctx.rtp.ts_window.update(ts);
+    if(ctx.ip_version == 4 && ctx.ipv4_id_sequential)
+    {
+        const auto seq_delta = static_cast<std::uint16_t>(seq - previous_seq);
+        ctx.ipv4_id = static_cast<std::uint16_t>(ctx.ipv4_id + seq_delta);
+    }
     ctx.rtp.last_seq = seq;
     ctx.rtp.last_ts  = ts;
 

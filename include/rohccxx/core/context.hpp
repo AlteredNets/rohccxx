@@ -83,6 +83,7 @@ struct Context
     uint8_t   ipv4_ttl = 0;
     uint16_t  ipv4_id = 0;
     uint8_t   ipv4_flags = 0;
+    bool      ipv4_id_sequential = false;
     uint8_t   ipv4_protocol = 0;
     uint32_t  ipv4_saddr = 0;
     uint32_t  ipv4_daddr = 0;
