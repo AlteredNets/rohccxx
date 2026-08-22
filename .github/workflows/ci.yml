@@ -1,0 +1,79 @@
+name: Linux CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: GCC Debug
+            cc: gcc
+            cxx: g++
+            build_type: Debug
+            sanitizers: "OFF"
+            build_dir: build-gcc-debug
+          - name: GCC Release
+            cc: gcc
+            cxx: g++
+            build_type: Release
+            sanitizers: "OFF"
+            build_dir: build-gcc-release
+          - name: Clang Debug ASan UBSan
+            cc: clang
+            cxx: clang++
+            build_type: Debug
+            sanitizers: "ON"
+            build_dir: build-clang-debug-sanitized
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+    steps:
+      - name: Check out source and submodules
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential \
+            cmake \
+            gcc \
+            g++ \
+            clang \
+            autoconf \
+            automake \
+            libtool \
+            pkg-config
+
+      - name: Configure
+        run: |
+          cmake -S . -B "${{ matrix.build_dir }}" \
+            -DCMAKE_BUILD_TYPE="${{ matrix.build_type }}" \
+            -DROHCCXX_BUILD_TESTS=ON \
+            -DROHCCXX_SANITIZERS="${{ matrix.sanitizers }}"
+
+      - name: Build
+        run: cmake --build "${{ matrix.build_dir }}" --parallel
+
+      - name: Test
+        run: ctest --test-dir "${{ matrix.build_dir }}" --output-on-failure
