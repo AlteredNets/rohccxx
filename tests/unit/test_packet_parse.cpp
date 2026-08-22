@@ -881,7 +881,10 @@ TEST_CASE("ROHC framework packets expose feedback and segmentation helpers")
 {
     std::uint8_t feedback_wire[16] = {};
     size_t feedback_len = sizeof(feedback_wire);
-    REQUIRE(rohccxx::write_feedback_packet(feedback_wire, &feedback_len, {3, rohccxx::FeedbackType::STATIC_NACK}));
+    rohccxx::Feedback static_nack{};
+    static_nack.cid = 3;
+    static_nack.type = rohccxx::FeedbackType::STATIC_NACK;
+    REQUIRE(rohccxx::write_feedback_packet(feedback_wire, &feedback_len, static_nack));
     REQUIRE(feedback_len == 4);
     REQUIRE(feedback_wire[0] == 0xF3);
     REQUIRE(feedback_wire[1] == 0xE3);
