@@ -85,6 +85,121 @@ void finish_ipv4_checksum(std::uint8_t* packet)
     packet[11] = static_cast<std::uint8_t>(csum & 0xFF);
 }
 
+std::vector<std::uint8_t> make_collision_regression_packet(std::uint32_t ordinal,
+                                                           bool zero_payload)
+{
+    constexpr std::size_t header_size = 40;
+    constexpr std::size_t payload_size = 1200;
+    constexpr std::uint64_t seed = 0x524F484343585832ULL;
+    std::vector<std::uint8_t> packet(header_size + payload_size);
+    auto* p = packet.data();
+    p[0] = 0x45;
+    p[2] = static_cast<std::uint8_t>(packet.size() >> 8U);
+    p[3] = static_cast<std::uint8_t>(packet.size());
+    p[4] = static_cast<std::uint8_t>(ordinal >> 8U);
+    p[5] = static_cast<std::uint8_t>(ordinal);
+    p[6] = 0x40;
+    p[8] = 64;
+    p[9] = 17;
+    p[12] = 10;
+    p[15] = 1;
+    p[16] = 10;
+    p[19] = 2;
+    p[20] = 0x27;
+    p[21] = 0x10;
+    p[22] = 0x4E;
+    p[23] = 0x20;
+    p[24] = 0x04;
+    p[25] = 0xC4;
+    p[28] = 0x80;
+    p[29] = 96;
+    const std::uint16_t sequence = static_cast<std::uint16_t>(0x1000U + ordinal);
+    p[30] = static_cast<std::uint8_t>(sequence >> 8U);
+    p[31] = static_cast<std::uint8_t>(sequence);
+    const std::uint32_t timestamp = 0x01000000U + ordinal * 160U;
+    p[32] = static_cast<std::uint8_t>(timestamp >> 24U);
+    p[33] = static_cast<std::uint8_t>(timestamp >> 16U);
+    p[34] = static_cast<std::uint8_t>(timestamp >> 8U);
+    p[35] = static_cast<std::uint8_t>(timestamp);
+    p[36] = 0x10;
+    p[37] = 0x20;
+    p[38] = 0x30;
+    p[39] = 0x40;
+
+    std::uint64_t state = seed ^ ordinal;
+    for(std::size_t i = header_size; i < packet.size(); ++i)
+    {
+        state ^= state << 13U;
+        state ^= state >> 7U;
+        state ^= state << 17U;
+        p[i] = zero_payload ? 0 : static_cast<std::uint8_t>(state);
+    }
+    finish_ipv4_checksum(p);
+    return packet;
+}
+
+void require_collision_regression_round_trips(bool zero_payload)
+{
+    constexpr std::size_t packet_count = 49017;
+    rohc_comp* comp = rohc_comp_new2(0, ROHCCXX_DIRECTION_UPLINK);
+    rohc_decomp* decomp = rohc_decomp_new2(0, ROHCCXX_DIRECTION_UPLINK);
+    REQUIRE(comp != nullptr);
+    REQUIRE(decomp != nullptr);
+    REQUIRE(rohc_comp_set_cid(comp, 0) == 0);
+
+    std::vector<std::uint8_t> compressed(2048);
+    std::vector<std::uint8_t> output(2048);
+    std::uint64_t incorrect_round_trips = 0;
+    std::uint64_t guard_failures = 0;
+    for(std::uint32_t i = 0; i < packet_count; ++i)
+    {
+        const auto input = make_collision_regression_packet(i, zero_payload);
+        std::size_t compressed_len = compressed.size();
+        const int compress_status = rohc_compress4(comp,
+                                                   input.data(),
+                                                   input.size(),
+                                                   compressed.data(),
+                                                   &compressed_len);
+        if(compress_status != 0)
+        {
+            ++guard_failures;
+            continue;
+        }
+
+        if(!zero_payload && (i == 41095U || i == 49016U))
+        {
+            REQUIRE(compressed_len == 1205);
+            REQUIRE(compressed[0] == 0x00);
+        }
+
+        std::size_t output_len = output.size();
+        const int api_status = rohc_decompress4(decomp,
+                                                compressed.data(),
+                                                compressed_len,
+                                                output.data(),
+                                                &output_len);
+        if(api_status != 0)
+            ++guard_failures;
+        if(api_status != 0 || output_len != input.size() ||
+           std::memcmp(output.data(), input.data(), input.size()) != 0)
+        {
+            ++incorrect_round_trips;
+        }
+
+        if(!zero_payload && (i == 41095U || i == 49016U))
+        {
+            REQUIRE(api_status == 0);
+            REQUIRE(output_len == 1240);
+            REQUIRE(std::memcmp(output.data(), input.data(), input.size()) == 0);
+        }
+    }
+
+    REQUIRE(incorrect_round_trips == 0);
+    REQUIRE(guard_failures == 0);
+    rohc_decomp_free(decomp);
+    rohc_comp_free(comp);
+}
+
 void set_ipv4_id_and_flags(std::uint8_t* packet,
                            std::uint16_t id,
                            std::uint16_t flags_fragment)
@@ -434,6 +549,39 @@ TEST_CASE("ROHC packet parser identifies current RFC 5225 packet families")
     malformed_uncompressed[4] = 0x18;
     REQUIRE(rohccxx::parse_rohc_packet(malformed_uncompressed, sizeof(malformed_uncompressed), parsed));
     REQUIRE(parsed.type == rohccxx::RohcPacketType::FO_RTP);
+}
+
+TEST_CASE("CID 0 FO-RTP packets cannot be mistaken for uncompressed IPv6")
+{
+    SECTION("patterned payload crosses both known collision indices")
+    {
+        require_collision_regression_round_trips(false);
+    }
+
+    SECTION("zero-filled payload remains correct")
+    {
+        require_collision_regression_round_trips(true);
+    }
+}
+
+TEST_CASE("CID 0 genuine uncompressed IPv6 works without an RTP context")
+{
+    std::array<std::uint8_t, 48> rohc{};
+    rohc[0] = 0x00;
+    make_valid_ipv6_udp_without_transport(rohc.data() + 1, rohc.size() - 1);
+
+    rohc_decomp* decomp = rohc_decomp_new2(0, ROHCCXX_DIRECTION_UPLINK);
+    REQUIRE(decomp != nullptr);
+    std::array<std::uint8_t, 64> output{};
+    std::size_t output_len = output.size();
+    REQUIRE(rohc_decompress4(decomp,
+                             rohc.data(),
+                             rohc.size(),
+                             output.data(),
+                             &output_len) == 0);
+    REQUIRE(output_len == rohc.size() - 1);
+    REQUIRE(std::memcmp(output.data(), rohc.data() + 1, output_len) == 0);
+    rohc_decomp_free(decomp);
 }
 
 

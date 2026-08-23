@@ -2592,6 +2592,22 @@ rohc_decompress4(struct rohc_decomp* decomp,
     if(ctx->tx_count == 0 && ctx->rohc_state == RohcState::NoContext)
         ctx->mode = decomp->impl.mode;
 
+    // In the small-CID space, CID 0 FO-RTP and the uncompressed profile both
+    // start with 0x00.  Payload bytes in a valid FO-RTP packet may therefore
+    // accidentally satisfy the uncompressed IPv4/IPv6 length heuristic.  An
+    // established RTP context resolves that ambiguity; the FO decoder below
+    // still validates the packet structure and fails closed if it is invalid.
+    const bool established_rtp_context =
+        ctx->rohc_state == RohcState::DynamicEstablished &&
+        (ctx->profile == Profile::RTP || ctx->profile == Profile::RTP_UDP_Lite);
+    if(!decomp->impl.large_cid_space && parsed.cid == 0 &&
+       parsed.type == RohcPacketType::Uncompressed &&
+       parsed.packet_len > 0 && parsed.packet[0] == 0x00 &&
+       established_rtp_context)
+    {
+        parsed.type = RohcPacketType::FO_RTP;
+    }
+
     bool ok = false;
     size_t header_len = 0;
     const uint8_t* packet = parsed.packet;
