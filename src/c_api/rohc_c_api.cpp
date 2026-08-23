@@ -2771,6 +2771,8 @@ rohc_decompress4(struct rohc_decomp* decomp,
     const bool stage_authenticated_output =
         decomp->impl.rohcoipsec_enabled && received_icv_len > 0;
     std::unique_ptr<uint8_t[]> authenticated_output;
+    std::unique_ptr<uint8_t[]> formal_co_output;
+    bool stage_formal_co_output = false;
     if(stage_authenticated_output)
     {
         authenticated_output.reset(new(std::nothrow) uint8_t[max_reconstructed_ip_packet]);
@@ -2802,6 +2804,19 @@ rohc_decompress4(struct rohc_decomp* decomp,
         return 0;
     };
 
+    // A small-CID-0 formal PT-0 byte carries MSN bits where the legacy RTP FO
+    // parser expects an embedded CID. Resolve that ambiguity from the CID-0
+    // context before looking up any CID inferred from those bits.
+    if(!decomp->impl.large_cid_space && !parsed.has_add_cid &&
+       parsed.type == RohcPacketType::FO_RTP && parsed.packet_len > 0 &&
+       (parsed.packet[0] & 0x80U) == 0)
+    {
+        Context* const cid_zero = decomp->impl.contexts.get(0);
+        if(cid_zero && rfc5225::live_pt0_context_supported(*cid_zero, false, 0, false))
+        {
+            parsed.cid = 0;
+        }
+    }
     uint32_t cid = parsed.cid;
     Context* ctx = decomp->impl.contexts.get(cid);
     if(parsed.type == RohcPacketType::FO_RTP && !parsed.has_add_cid &&
@@ -2831,8 +2846,8 @@ rohc_decompress4(struct rohc_decomp* decomp,
         }
         else
         {
-            if(stage_authenticated_output)
-                std::memcpy(ip_packet, authenticated_output.get(), reconstruction_len);
+            if(stage_authenticated_output || stage_formal_co_output)
+                std::memcpy(ip_packet, reconstruction_packet, reconstruction_len);
             *ip_packet_len = reconstruction_len;
         }
         return output_length_guard.finish(rc);
@@ -2993,15 +3008,26 @@ rohc_decompress4(struct rohc_decomp* decomp,
         }
     }
     else if(parsed.type == RohcPacketType::FO_RTP &&
-            ctx->rohc_state == RohcState::DynamicEstablished &&
-            ctx->profile != Profile::Uncompressed &&
             ctx->profile != Profile::RTP && ctx->profile != Profile::RTP_UDP_Lite &&
-            packet_len > 0 && (packet[0] & 0x80U) == 0)
+            ctx->profile != Profile::Uncompressed && packet_len > 0 &&
+            (packet[0] & 0x80U) == 0)
     {
+        const bool supported_context = rfc5225::live_pt0_context_supported(
+            *ctx, decomp->impl.large_cid_space, cid, parsed.has_add_cid);
         rfc5225::FormalCoPacket formal{};
-        if(rfc5225::read_formal_co_base(packet, 1U, ctx->profile,
+        if(supported_context &&
+           rfc5225::read_formal_co_base(packet, 1U, ctx->profile,
                                         rfc5225::FormalCoVariant::Pt0Crc3, formal))
         {
+            if(!stage_authenticated_output)
+            {
+                reconstruction_len = std::min(reconstruction_len, max_reconstructed_ip_packet);
+                formal_co_output.reset(new(std::nothrow) uint8_t[reconstruction_len]);
+                if(!formal_co_output)
+                    return fail_with_feedback(cid);
+                reconstruction_packet = formal_co_output.get();
+                stage_formal_co_output = true;
+            }
             std::uint16_t next_msn = ctx->msn;
             for(std::uint16_t delta = 1; delta <= 15U; ++delta)
             {
@@ -3030,7 +3056,7 @@ rohc_decompress4(struct rohc_decomp* decomp,
                     ctx->rtp.last_seq = next_msn;
                     ctx->rtp.last_ts += ctx->rtp.ts_stride * msn_delta;
                 }
-                header_len = 1U + (ctx->large_cid ? cid::encoded_len(ctx->cid) : 0U);
+                header_len = 1U;
                 if(ctx->profile == Profile::UDP && ctx->udp_checksum_used)
                 {
                     if(packet_len < header_len + 2U)

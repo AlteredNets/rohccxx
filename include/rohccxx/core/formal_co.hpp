@@ -120,6 +120,18 @@ inline bool is_supported_formal_co_profile(Profile profile)
     return false;
 }
 
+inline bool live_pt0_context_supported(const Context& ctx,
+                                       bool large_cid_space,
+                                       std::uint32_t cid_value,
+                                       bool has_add_cid)
+{
+    return ctx.rohc_state == RohcState::DynamicEstablished &&
+           ctx.ip_version == 4 && ctx.ipv4_id_behavior == 0U &&
+           !large_cid_space && !ctx.large_cid && cid_value == 0U && !has_add_cid &&
+           (ctx.profile == Profile::UDP || ctx.profile == Profile::ESP ||
+            ctx.profile == Profile::IP);
+}
+
 inline bool formal_co_variant_valid_for_profile(Profile profile, FormalCoVariant variant)
 {
     if(!is_supported_formal_co_profile(profile))

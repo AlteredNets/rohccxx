@@ -108,6 +108,7 @@ int decode()
 int decode_co()
 {
     std::array<rohc_decomp*, rfc5225_interop::profile_count> decompressors{};
+    std::array<rohc_comp*, rfc5225_interop::profile_count> collision_compressors{};
     std::array<std::size_t, rfc5225_interop::profile_count> decoded_co{};
     std::array<rfc5225_interop::CorpusCase, rfc5225_interop::profile_count> reordered{};
     for(auto& decompressor : decompressors)
@@ -124,10 +125,53 @@ int decode_co()
                std::memcmp(output, item.ip.data(), item.ip.size()) == 0;
     };
     auto reject = [&](std::size_t index, const std::uint8_t* packet, std::size_t length) {
-        std::uint8_t output[rfc5225_interop::packet_size + 64] = {};
-        std::size_t output_length = sizeof(output);
-        return rohc_decompress4(decompressors[index], packet, length, output, &output_length) != 0 &&
-               output_length == 0;
+        std::array<std::uint8_t, rfc5225_interop::packet_size + 96> guarded{};
+        guarded.fill(0xa5U);
+        const auto before = guarded;
+        std::size_t output_length = rfc5225_interop::packet_size + 64U;
+        return rohc_decompress4(decompressors[index], packet, length, guarded.data() + 16U,
+                                &output_length) != 0 &&
+               output_length == 0 && guarded == before;
+    };
+    auto reject_capacity = [&](std::size_t index, const rfc5225_interop::CorpusCase& item) {
+        std::array<std::uint8_t, rfc5225_interop::packet_size + 32> guarded{};
+        guarded.fill(0x5aU);
+        const auto before = guarded;
+        std::size_t output_length = item.ip.size() - 1U;
+        return rohc_decompress4(decompressors[index], item.rohc.data(), item.rohc_length,
+                                guarded.data() + 16U, &output_length) != 0 &&
+               output_length == 0 && guarded == before;
+    };
+    auto establish_collision_context = [&](std::size_t index,
+                                           const rfc5225_interop::ProfileSpec& profile) {
+        rohc_comp*& compressor = collision_compressors[index];
+        compressor = rohc_comp_new2(15, ROHCCXX_DIRECTION_UPLINK);
+        if(!compressor || rohc_comp_set_cid(compressor, 1U) != 0) return false;
+        for(int step = 0; step < 2; ++step)
+        {
+            rfc5225_interop::CorpusCase collision{};
+            collision.profile = &profile;
+            collision.step = step;
+            rfc5225_interop::make_co_packet(profile.profile, step, collision.ip.data());
+            collision.rohc_length = collision.rohc.size();
+            if(rohc_compress4(compressor, collision.ip.data(), collision.ip.size(),
+                              collision.rohc.data(), &collision.rohc_length) != 0 ||
+               !decode_exact(index, collision))
+                return false;
+        }
+        return true;
+    };
+    auto verify_collision_context = [&](std::size_t index,
+                                        const rfc5225_interop::ProfileSpec& profile) {
+        rfc5225_interop::CorpusCase collision{};
+        collision.profile = &profile;
+        collision.step = 2;
+        rfc5225_interop::make_co_packet(profile.profile, 2, collision.ip.data());
+        collision.rohc_length = collision.rohc.size();
+        return collision_compressors[index] &&
+               rohc_compress4(collision_compressors[index], collision.ip.data(), collision.ip.size(),
+                              collision.rohc.data(), &collision.rohc_length) == 0 &&
+               decode_exact(index, collision);
     };
 
     const bool ok = rfc5225_interop::consume_co_corpus([&](const rfc5225_interop::CorpusCase& item) {
@@ -141,7 +185,8 @@ int decode_co()
         if(transition)
         {
             // CO-COMMON/CO-REPAIR currently collide with the assisting-layer
-            // namespace. Assert deterministic rejection and preserve context.
+            // namespace. This is an unsupported-family rejection, not a test
+            // of the RFC 5225 reserved bits inside either packet family.
             return reject(index, item.rohc.data(), item.rohc_length);
         }
         if(is_ir)
@@ -171,18 +216,16 @@ int decode_co()
 
         if(decoded_co[index] == 0)
         {
+            if(!establish_collision_context(index, *item.profile)) return false;
             auto malformed = item.rohc;
             malformed[0] ^= 0x01U; // CRC-3 corruption
             std::array<std::uint8_t, rfc5225_interop::max_rohc_size> bad_cid{};
             bad_cid[0] = 0xe1U;
             std::memcpy(bad_cid.data() + 1U, item.rohc.data(), item.rohc_length);
-            const std::uint8_t reserved_repair[] = {0xfbU, 0x80U, 0xf8U};
-            const std::uint8_t reserved_common[] = {0xfaU, 0x00U, 0x04U};
             if(!reject(index, malformed.data(), item.rohc_length) ||
                !reject(index, item.rohc.data(), item.rohc_length - 1U) ||
+               !reject_capacity(index, item) ||
                !reject(index, bad_cid.data(), item.rohc_length + 1U) ||
-               !reject(index, reserved_repair, sizeof(reserved_repair)) ||
-               !reject(index, reserved_common, sizeof(reserved_common)) ||
                rohc_decomp_has_feedback(decompressors[index]) != 1)
             {
                 std::fprintf(stderr, "rohccxx CO malformed check failed profile=%s step=%d\n", item.profile->name, item.step);
@@ -207,6 +250,12 @@ int decode_co()
             return false;
         }
         ++decoded_co[index];
+        if(decoded_co[index] == 1 && !verify_collision_context(index, *item.profile))
+        {
+            std::fprintf(stderr, "rohccxx CID-0 PT-0 collision check failed profile=%s\n",
+                         item.profile->name);
+            return false;
+        }
         if(decoded_co[index] == 1 && !reject(index, item.rohc.data(), item.rohc_length))
         {
             std::fprintf(stderr, "rohccxx CO duplicate check failed profile=%s step=%d\n", item.profile->name, item.step);
@@ -215,6 +264,7 @@ int decode_co()
         return true;
     });
     for(auto* decompressor : decompressors) if(decompressor) rohc_decomp_free(decompressor);
+    for(auto* compressor : collision_compressors) if(compressor) rohc_comp_free(compressor);
     const bool coverage =
         decoded_co[static_cast<std::size_t>(rfc5225_interop::Profile::Udp)] > 0 &&
         decoded_co[static_cast<std::size_t>(rfc5225_interop::Profile::Esp)] > 0 &&

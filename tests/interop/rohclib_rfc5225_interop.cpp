@@ -174,13 +174,12 @@ int decode_co()
         const std::size_t index = static_cast<std::size_t>(item.profile->profile);
         const bool is_ir = item.rohc[0] == 0xfdU ||
             ((item.rohc[0] & 0xf0U) == 0xe0U && item.rohc_length > 1U && item.rohc[1] == 0xfdU);
-        if(!is_ir) ++co_packets[index];
-
         // The pinned rohc-lib RTP decompressor detects PT packets but its parser
-        // deliberately rejects them ("TODO: handle other CO packets"). Keep the
-        // generated CO evidence visible without claiming an unavailable oracle.
+        // deliberately rejects them ("TODO: handle other CO packets"). Record
+        // no success for RTP: the private rohccxx FO packet is unvalidated.
         if(item.profile->profile == rfc5225_interop::Profile::Rtp && !is_ir)
             return true;
+        if(!is_ir) ++co_packets[index];
 
         std::uint8_t output[rfc5225_interop::packet_size + 64] = {};
         std::size_t output_length = sizeof(output);
@@ -205,13 +204,12 @@ int decode_co()
         return true;
     });
     for(auto* decompressor : decompressors) if(decompressor) rohc_decomp_free(decompressor);
-    const std::size_t rtp = static_cast<std::size_t>(rfc5225_interop::Profile::Rtp);
-    const bool coverage = co_packets[rtp] > 0 &&
+    const bool coverage =
         co_packets[static_cast<std::size_t>(rfc5225_interop::Profile::Udp)] > 0 &&
         co_packets[static_cast<std::size_t>(rfc5225_interop::Profile::Esp)] > 0 &&
         co_packets[static_cast<std::size_t>(rfc5225_interop::Profile::Ip)] > 0;
     if(ok && coverage)
-        std::fprintf(stderr, "external CO: RTP generated/oracle-parser-unavailable; UDP, ESP, IP exact decode\n");
+        std::fprintf(stderr, "external CO: UDP, ESP, IP exact; RTP private FO unvalidated\n");
     return ok && coverage ? 0 : 3;
 }
 
