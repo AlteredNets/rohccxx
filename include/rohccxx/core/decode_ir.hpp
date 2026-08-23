@@ -64,6 +64,19 @@ inline bool available(size_t len, size_t pos, size_t required)
     return pos <= len && required <= len - pos;
 }
 
+inline bool payload_after_header(const uint8_t* base,
+                                 size_t len,
+                                 size_t header_len,
+                                 const uint8_t*& payload,
+                                 size_t& payload_len)
+{
+    if(base == nullptr || header_len > len)
+        return false;
+    payload = base + header_len;
+    payload_len = len - header_len;
+    return true;
+}
+
 
 
 inline bool ipv4_options_extra_len(const uint8_t* in,

@@ -42,6 +42,8 @@
 
 #include "rohccxx/wire/convert.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -597,6 +599,11 @@ static bool build_esp_packet(uint8_t* out,
        esp_len + payload_len > std::numeric_limits<size_t>::max() - ip_len)
         return false;
     const size_t esp_payload_len = esp_len + payload_len;
+    const size_t protocol_payload_limit = ctx.ip_version == 6
+        ? 0xFFFFU - ctx.ipv6_extension_len
+        : 0xFFFFU - ip_len;
+    if(esp_payload_len > protocol_payload_limit)
+        return false;
     if(*out_len < ip_len + esp_payload_len)
         return false;
     std::unique_ptr<uint8_t[]> esp_payload(new(std::nothrow) uint8_t[esp_payload_len]);
@@ -652,12 +659,15 @@ static bool build_ipv6_ip_packet(uint8_t* out,
 {
     const size_t ip_len = 40U + ctx.ipv6_extension_len;
     size_t total = 0;
-    if(!checked_packet_size(ip_len, payload_len, total))
+    size_t upper_len = 0;
+    if(!checked_packet_size(ctx.ipv6_extension_len, payload_len, upper_len) ||
+       upper_len > 0xFFFFU ||
+       !checked_packet_size(ip_len, payload_len, total))
         return false;
     if(*out_len < total)
         return false;
     std::memset(out, 0, total);
-    if(!build_ipv6_header(out, total, ctx, ctx.ipv6_extension_len + payload_len))
+    if(!build_ipv6_header(out, total, ctx, upper_len))
         return false;
     if(payload_len > 0)
         std::memcpy(out + ip_len, payload, payload_len);
@@ -674,12 +684,15 @@ static bool build_ipv6_udp_packet(uint8_t* out,
     constexpr size_t udp_len = 8;
     const size_t ip_len = 40U + ctx.ipv6_extension_len;
     size_t total = 0;
-    if(!checked_packet_size(ip_len + udp_len, payload_len, total))
+    size_t upper_len = 0;
+    if(!checked_packet_size(ctx.ipv6_extension_len + udp_len, payload_len, upper_len) ||
+       upper_len > 0xFFFFU ||
+       !checked_packet_size(ip_len + udp_len, payload_len, total))
         return false;
     if(*out_len < total)
         return false;
     std::memset(out, 0, total);
-    if(!build_ipv6_header(out, total, ctx, ctx.ipv6_extension_len + udp_len + payload_len))
+    if(!build_ipv6_header(out, total, ctx, upper_len))
         return false;
     uint8_t* udp_out = out + ip_len;
     udp_out[0] = static_cast<uint8_t>(ctx.udp_sport >> 8);
@@ -717,12 +730,15 @@ static bool build_ipv6_rtp_packet(uint8_t* out,
     const size_t rtp_wire_len = rtp_header_len + payload_len + padding_len;
     const size_t ip_len = 40U + ctx.ipv6_extension_len;
     size_t total = 0;
-    if(!checked_packet_size(ip_len + udp_len, rtp_wire_len, total))
+    size_t upper_len = 0;
+    if(!checked_packet_size(ctx.ipv6_extension_len + udp_len, rtp_wire_len, upper_len) ||
+       upper_len > 0xFFFFU ||
+       !checked_packet_size(ip_len + udp_len, rtp_wire_len, total))
         return false;
     if(*out_len < total)
         return false;
     std::memset(out, 0, total);
-    if(!build_ipv6_header(out, total, ctx, ctx.ipv6_extension_len + udp_len + rtp_wire_len))
+    if(!build_ipv6_header(out, total, ctx, upper_len))
         return false;
     uint8_t* udp_out = out + ip_len;
     uint8_t* rtp_out = udp_out + udp_len;
@@ -2706,6 +2722,21 @@ rohc_decompress4(struct rohc_decomp* decomp,
             return fail_with_feedback(0);
     }
 
+    constexpr size_t max_reconstructed_ip_packet = 40U + 0xFFFFU;
+    const bool stage_authenticated_output =
+        decomp->impl.rohcoipsec_enabled && received_icv_len > 0;
+    std::unique_ptr<uint8_t[]> authenticated_output;
+    if(stage_authenticated_output)
+    {
+        authenticated_output.reset(new(std::nothrow) uint8_t[max_reconstructed_ip_packet]);
+        if(!authenticated_output)
+            return fail_with_feedback(parsed.cid);
+    }
+    uint8_t* reconstruction_packet = stage_authenticated_output
+        ? authenticated_output.get() : ip_packet;
+    size_t reconstruction_len = stage_authenticated_output
+        ? std::min(*ip_packet_len, max_reconstructed_ip_packet) : *ip_packet_len;
+
     auto verify_rohcoipsec_icv = [&](int rc) -> int
     {
         if(rc != 0 || !decomp->impl.rohcoipsec_enabled || received_icv_len == 0)
@@ -2715,8 +2746,8 @@ rohc_decompress4(struct rohc_decomp* decomp,
         if(!rohccxx::rohcoipsec::compute_icv(decomp->impl.rohcoipsec_algorithm,
                                              decomp->impl.rohcoipsec_key,
                                              decomp->impl.rohcoipsec_key_len,
-                                             ip_packet,
-                                             *ip_packet_len,
+                                             reconstruction_packet,
+                                             reconstruction_len,
                                              computed,
                                              &computed_len) ||
            !rohccxx::rohcoipsec::detail::constant_time_equal(computed, received_icv, received_icv_len))
@@ -2730,15 +2761,25 @@ rohc_decompress4(struct rohc_decomp* decomp,
     Context* ctx = decomp->impl.contexts.get(cid);
     if (!ctx)
         return fail_with_feedback(cid);
+    const Context context_before_decode = *ctx;
+    const Mode decompressor_mode_before = decomp->impl.mode;
     ctx->cid = cid;
     ctx->large_cid = decomp->impl.large_cid_space;
     if(ctx->tx_count == 0 && ctx->rohc_state == RohcState::NoContext)
         ctx->mode = decomp->impl.mode;
-    const Context context_before_decode = *ctx;
     auto finish_decoding = [&](int rc) -> int
     {
         if(rc != 0)
+        {
             *ctx = context_before_decode;
+            decomp->impl.mode = decompressor_mode_before;
+        }
+        else
+        {
+            if(stage_authenticated_output)
+                std::memcpy(ip_packet, authenticated_output.get(), reconstruction_len);
+            *ip_packet_len = reconstruction_len;
+        }
         return output_length_guard.finish(rc);
     };
 
@@ -2825,11 +2866,11 @@ rohc_decompress4(struct rohc_decomp* decomp,
        is_uncompressed_ip_payload(packet + 1, packet_len - 1))
     {
         const size_t original_len = packet_len - 1;
-        if(*ip_packet_len < original_len)
+        if(reconstruction_len < original_len)
             return fail_with_feedback(cid);
 
-        std::memcpy(ip_packet, packet + 1, original_len);
-        *ip_packet_len = original_len;
+        std::memcpy(reconstruction_packet, packet + 1, original_len);
+        reconstruction_len = original_len;
         ctx->profile = Profile::Uncompressed;
         ctx->mode = Mode::Uncompressed;
         ctx->rohc_state = RohcState::DynamicEstablished;
@@ -2935,13 +2976,19 @@ rohc_decompress4(struct rohc_decomp* decomp,
     }
     const uint8_t* payload_base = (decode_packet == parsed.wire) ? decode_packet : packet;
     const size_t payload_base_len = (decode_packet == parsed.wire) ? decode_packet_len : packet_len;
-    const uint8_t* payload = payload_base + header_len;
-    const size_t payload_len = (payload_base_len > header_len) ? (payload_base_len - header_len) : 0;
+    const uint8_t* payload = nullptr;
+    size_t payload_len = 0;
+    if(!detail::payload_after_header(payload_base, payload_base_len, header_len,
+                                     payload, payload_len))
+    {
+        *ctx = context_before_decode;
+        return fail_with_feedback(cid);
+    }
     if(ctx->profile == Profile::UDP || ctx->profile == Profile::UDP_Lite)
     {
         const bool built = ctx->ip_version == 6
-            ? build_ipv6_udp_packet(ip_packet, ip_packet_len, *ctx, payload, payload_len)
-            : build_udp_packet(ip_packet, ip_packet_len, *ctx, payload, payload_len);
+            ? build_ipv6_udp_packet(reconstruction_packet, &reconstruction_len, *ctx, payload, payload_len)
+            : build_udp_packet(reconstruction_packet, &reconstruction_len, *ctx, payload, payload_len);
         if(built) { decomp->impl.mode = ctx->mode; return finish_decoding(verify_rohcoipsec_icv(0)); }
         *ctx = context_before_decode;
         return fail_with_feedback(cid);
@@ -2951,9 +2998,9 @@ rohc_decompress4(struct rohc_decomp* decomp,
     {
         const bool built = ctx->legacy_esp_payload_includes_header
             ? (ctx->ip_version == 6
-                ? build_ipv6_ip_packet(ip_packet, ip_packet_len, *ctx, payload, payload_len)
-                : build_ip_packet(ip_packet, ip_packet_len, *ctx, payload, payload_len))
-            : build_esp_packet(ip_packet, ip_packet_len, *ctx, payload, payload_len);
+                ? build_ipv6_ip_packet(reconstruction_packet, &reconstruction_len, *ctx, payload, payload_len)
+                : build_ip_packet(reconstruction_packet, &reconstruction_len, *ctx, payload, payload_len))
+            : build_esp_packet(reconstruction_packet, &reconstruction_len, *ctx, payload, payload_len);
         if(built) { decomp->impl.mode = ctx->mode; return finish_decoding(verify_rohcoipsec_icv(0)); }
         *ctx = context_before_decode;
         return fail_with_feedback(cid);
@@ -2962,16 +3009,16 @@ rohc_decompress4(struct rohc_decomp* decomp,
     if(ctx->profile == Profile::IP)
     {
         const bool built = ctx->ip_version == 6
-            ? build_ipv6_ip_packet(ip_packet, ip_packet_len, *ctx, payload, payload_len)
-            : build_ip_packet(ip_packet, ip_packet_len, *ctx, payload, payload_len);
+            ? build_ipv6_ip_packet(reconstruction_packet, &reconstruction_len, *ctx, payload, payload_len)
+            : build_ip_packet(reconstruction_packet, &reconstruction_len, *ctx, payload, payload_len);
         if(built) { decomp->impl.mode = ctx->mode; return finish_decoding(verify_rohcoipsec_icv(0)); }
         *ctx = context_before_decode;
         return fail_with_feedback(cid);
     }
 
     const bool built = ctx->ip_version == 6
-        ? build_ipv6_rtp_packet(ip_packet, ip_packet_len, *ctx, payload, payload_len)
-        : build_rtp_packet(ip_packet, ip_packet_len, *ctx, payload, payload_len);
+        ? build_ipv6_rtp_packet(reconstruction_packet, &reconstruction_len, *ctx, payload, payload_len)
+        : build_rtp_packet(reconstruction_packet, &reconstruction_len, *ctx, payload, payload_len);
     if(built) { decomp->impl.mode = ctx->mode; return finish_decoding(verify_rohcoipsec_icv(0)); }
     *ctx = context_before_decode;
     return fail_with_feedback(cid);

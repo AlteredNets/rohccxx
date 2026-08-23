@@ -46,6 +46,71 @@ inline bool emit_ir_prefix(uint8_t*& p,
     return true;
 }
 
+inline bool legacy_ir_lengths(const Context& ctx,
+                              bool with_rtp,
+                              size_t transport_static_len,
+                              size_t transport_dynamic_len,
+                              size_t& static_len,
+                              size_t& dynamic_len)
+{
+    if(ctx.ip_version == 4)
+    {
+        if(ctx.ipv4_options_len > ctx.ipv4_options.size())
+            return false;
+        static_len = 10U + transport_static_len;
+        dynamic_len = 6U + ctx.ipv4_options_len + transport_dynamic_len;
+    }
+    else if(ctx.ip_version == 6)
+    {
+        if(ctx.ipv6_extension_len > 127U ||
+           ctx.ipv6_extension_len > ctx.ipv6_extensions.size())
+            return false;
+        static_len = 34U + transport_static_len;
+        dynamic_len = 7U + ctx.ipv6_extension_len + transport_dynamic_len;
+    }
+    else
+    {
+        return false;
+    }
+
+    if(with_rtp)
+    {
+        uint32_t body_len = 0;
+        if(!rfc5225::rtp_extras_body_len(ctx, body_len))
+            return false;
+        const size_t extras_len = body_len == 0U
+            ? 1U : 1U + cid::encoded_len(body_len) + body_len;
+        dynamic_len += 8U + extras_len;
+    }
+    return true;
+}
+
+inline bool legacy_ir_capacity_ok(const uint8_t* out,
+                                  const size_t* out_len,
+                                  const Context& ctx,
+                                  bool dynamic_only,
+                                  bool with_rtp,
+                                  size_t transport_static_len,
+                                  size_t transport_dynamic_len,
+                                  bool trailing_mode)
+{
+    if(out == nullptr || out_len == nullptr)
+        return false;
+    if((ctx.large_cid && ctx.cid > cid::large_cid_max) ||
+       (!ctx.large_cid && !cid::is_small(ctx.cid)))
+        return false;
+    size_t static_len = 0;
+    size_t dynamic_len = 0;
+    if(!legacy_ir_lengths(ctx, with_rtp, transport_static_len,
+                          transport_dynamic_len, static_len, dynamic_len))
+        return false;
+    const size_t cid_len = ctx.large_cid ? cid::encoded_len(ctx.cid)
+        : ((!ctx.large_cid && ctx.cid > 0U) ? 1U : 0U);
+    const size_t required = cid_len + 3U + (dynamic_only ? 0U : static_len) +
+                            dynamic_len + (trailing_mode ? 1U : 0U);
+    return *out_len >= required;
+}
+
 inline bool emit_ir_esp_into(uint8_t* out,
                         size_t* out_len,
                         const Context& ctx)
@@ -95,6 +160,8 @@ inline bool emit_ir_udp_lite_into(uint8_t* out,
                              size_t* out_len,
                              const Context& ctx)
 {
+    if(!legacy_ir_capacity_ok(out, out_len, ctx, false, false, 4U, 4U, true))
+        return false;
     std::memset(out, 0, *out_len);
 
     uint8_t* p = out;
@@ -150,6 +217,8 @@ inline bool emit_ir_rtp_udp_lite_into(uint8_t* out,
                                  size_t* out_len,
                                  const Context& ctx)
 {
+    if(!legacy_ir_capacity_ok(out, out_len, ctx, false, true, 8U, 4U, true))
+        return false;
     std::memset(out, 0, *out_len);
 
     uint8_t* p = out;

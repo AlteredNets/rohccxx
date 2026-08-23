@@ -37,6 +37,8 @@ inline bool emit_ir_dyn_udp_lite_into(uint8_t* out,
                                  size_t* out_len,
                                  const Context& ctx)
 {
+    if(!legacy_ir_capacity_ok(out, out_len, ctx, true, false, 0U, 4U, false))
+        return false;
     std::memset(out, 0, *out_len);
 
     uint8_t* p = out;
@@ -69,6 +71,8 @@ inline bool emit_ir_dyn_rtp_udp_lite_into(uint8_t* out,
                                      size_t* out_len,
                                      const Context& ctx)
 {
+    if(!legacy_ir_capacity_ok(out, out_len, ctx, true, true, 0U, 4U, false))
+        return false;
     std::memset(out, 0, *out_len);
 
     uint8_t* p = out;

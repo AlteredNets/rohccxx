@@ -3513,11 +3513,39 @@ TEST_CASE("ROHCoIPsec enabled C API appends ICV after compression and verifies a
     REQUIRE(out_len == sizeof(ip));
     REQUIRE(std::memcmp(out, ip, sizeof(ip)) == 0);
 
+    rohc_decomp* retry_decomp = rohc_decomp_new2(4, ROHCCXX_DIRECTION_UPLINK);
+    REQUIRE(retry_decomp != nullptr);
+    REQUIRE(rohc_decomp_set_rohcoipsec_integrity(retry_decomp,
+                                                 ROHCCXX_ROHCOIPSEC_INTEGRITY_HMAC_SHA256,
+                                                 key,
+                                                 sizeof(key),
+                                                 12) == 0);
+    REQUIRE(rohc_decomp_set_mode(retry_decomp, ROHCCXX_MODE_R) == 0);
     rohc[rohc_len - 1] ^= 0x80;
+    std::array<std::uint8_t, 96> guarded{};
+    guarded.fill(0xA5);
     out_len = sizeof(out);
-    REQUIRE(rohc_decompress4(decomp, rohc, rohc_len, out, &out_len) != 0);
-    REQUIRE(rohc_decomp_has_feedback(decomp) == 1);
+    REQUIRE(rohc_decompress4(retry_decomp, rohc, rohc_len, guarded.data(), &out_len) != 0);
+    REQUIRE(out_len == 0);
+    REQUIRE(std::all_of(guarded.begin(), guarded.end(),
+                        [](std::uint8_t value) { return value == 0xA5; }));
+    REQUIRE(rohc_decomp_has_feedback(retry_decomp) == 1);
+    rohccxx_mode_t mode = ROHCCXX_MODE_U;
+    REQUIRE(rohc_decomp_get_mode(retry_decomp, &mode) == 0);
+    REQUIRE(mode == ROHCCXX_MODE_R);
 
+    rohc[rohc_len - 1] ^= 0x80;
+    guarded.fill(0xA5);
+    out_len = sizeof(out);
+    REQUIRE(rohc_decompress4(retry_decomp, rohc, rohc_len, guarded.data(), &out_len) == 0);
+    REQUIRE(out_len == sizeof(ip));
+    REQUIRE(std::memcmp(guarded.data(), ip, sizeof(ip)) == 0);
+    REQUIRE(std::all_of(guarded.begin() + sizeof(ip), guarded.end(),
+                        [](std::uint8_t value) { return value == 0xA5; }));
+    REQUIRE(rohc_decomp_get_mode(retry_decomp, &mode) == 0);
+    REQUIRE(mode == ROHCCXX_MODE_R);
+
+    rohc_decomp_free(retry_decomp);
     rohc_decomp_free(decomp);
     rohc_comp_free(comp);
 }
@@ -3660,6 +3688,90 @@ TEST_CASE("ROHC ESP reconstruction supports large payloads without duplicating l
     REQUIRE(rohc_decompress4(decomp, legacy_rohc.data(), legacy_rohc_len, output.data(), &output_len) == 0);
     REQUIRE(output_len == ip.size());
     REQUIRE(std::memcmp(output.data(), ip.data(), ip.size()) == 0);
+    rohc_decomp_free(decomp);
+}
+
+TEST_CASE("ROHC IPv6 and ESP reconstruction enforce wire limits before output mutation")
+{
+    rohccxx::Context esp{};
+    esp.profile = rohccxx::Profile::ESP;
+    esp.mode = rohccxx::Mode::Optimistic;
+    esp.ip_version = 6;
+    esp.ipv6_next_header = 50;
+    esp.ipv6_hop_limit = 64;
+    esp.esp_spi = 0xDEADBEEFU;
+    esp.esp_sequence = 0x01020304U;
+    for(size_t i = 0; i < esp.ipv6_saddr.size(); ++i)
+    {
+        esp.ipv6_saddr[i] = static_cast<std::uint8_t>(i);
+        esp.ipv6_daddr[i] = static_cast<std::uint8_t>(0xF0U + i);
+    }
+
+    constexpr size_t max_esp_data_len = 0xFFFFU - 8U;
+    auto make_esp_rohc = [&](size_t data_len) {
+        std::vector<std::uint8_t> packet(data_len + 128U, 0);
+        size_t header_len = packet.size();
+        REQUIRE(rohccxx::emit_ir_esp(packet.data(), &header_len, esp));
+        for(size_t i = 0; i < data_len; ++i)
+            packet[header_len + i] = static_cast<std::uint8_t>(i * 29U);
+        packet.resize(header_len + data_len);
+        return packet;
+    };
+
+    const auto maximum = make_esp_rohc(max_esp_data_len);
+    rohc_decomp* decomp = rohc_decomp_new2(0, ROHCCXX_DIRECTION_UPLINK);
+    REQUIRE(decomp != nullptr);
+    std::vector<std::uint8_t> output(40U + 0xFFFFU + 16U, 0xA5);
+    size_t output_len = 40U + 0xFFFFU;
+    REQUIRE(rohc_decompress4(decomp, maximum.data(), maximum.size(),
+                             output.data(), &output_len) == 0);
+    REQUIRE(output_len == 40U + 0xFFFFU);
+    REQUIRE(output[4] == 0xFF);
+    REQUIRE(output[5] == 0xFF);
+    REQUIRE(output[6] == 50);
+    REQUIRE(output[40] == 0xDE);
+    REQUIRE(output[41] == 0xAD);
+    REQUIRE(output[42] == 0xBE);
+    REQUIRE(output[43] == 0xEF);
+    REQUIRE(output[44] == 0x01);
+    REQUIRE(output[45] == 0x02);
+    REQUIRE(output[46] == 0x03);
+    REQUIRE(output[47] == 0x04);
+    REQUIRE(std::memcmp(output.data() + 48U,
+                        maximum.data() + (maximum.size() - max_esp_data_len),
+                        max_esp_data_len) == 0);
+    REQUIRE(std::all_of(output.begin() + static_cast<std::ptrdiff_t>(output_len), output.end(),
+                        [](std::uint8_t value) { return value == 0xA5; }));
+    rohc_decomp_free(decomp);
+
+    const auto oversized_esp = make_esp_rohc(max_esp_data_len + 1U);
+    decomp = rohc_decomp_new2(0, ROHCCXX_DIRECTION_UPLINK);
+    REQUIRE(decomp != nullptr);
+    output.assign(40U + 0xFFFFU + 16U, 0xA5);
+    output_len = output.size();
+    REQUIRE(rohc_decompress4(decomp, oversized_esp.data(), oversized_esp.size(),
+                             output.data(), &output_len) != 0);
+    REQUIRE(output_len == 0);
+    REQUIRE(std::all_of(output.begin(), output.end(),
+                        [](std::uint8_t value) { return value == 0xA5; }));
+    rohc_decomp_free(decomp);
+
+    rohccxx::Context ip = esp;
+    ip.profile = rohccxx::Profile::IP;
+    ip.ipv6_next_header = 6;
+    std::vector<std::uint8_t> oversized_ip(0x10000U + 128U, 0x3C);
+    size_t ip_header_len = oversized_ip.size();
+    REQUIRE(rohccxx::emit_ir_ip(oversized_ip.data(), &ip_header_len, ip));
+    oversized_ip.resize(ip_header_len + 0x10000U, 0x3C);
+    decomp = rohc_decomp_new2(0, ROHCCXX_DIRECTION_UPLINK);
+    REQUIRE(decomp != nullptr);
+    output.assign(40U + 0x10000U + 16U, 0xA5);
+    output_len = output.size();
+    REQUIRE(rohc_decompress4(decomp, oversized_ip.data(), oversized_ip.size(),
+                             output.data(), &output_len) != 0);
+    REQUIRE(output_len == 0);
+    REQUIRE(std::all_of(output.begin(), output.end(),
+                        [](std::uint8_t value) { return value == 0xA5; }));
     rohc_decomp_free(decomp);
 }
 

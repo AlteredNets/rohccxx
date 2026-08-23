@@ -2690,6 +2690,57 @@ TEST_CASE("RFC 5225 IR emitters preserve undersized destinations for every profi
     }
 }
 
+TEST_CASE("RFC 5225 legacy UDP-Lite into emitters are directly capacity safe")
+{
+    using Emitter = bool (*)(std::uint8_t*, size_t*, const rohccxx::Context&);
+    struct Case
+    {
+        rohccxx::Profile profile;
+        std::uint8_t protocol;
+        Emitter emitter;
+    };
+    const Case cases[] = {
+        {rohccxx::Profile::UDP_Lite, 136, rohccxx::emit_ir_udp_lite_into},
+        {rohccxx::Profile::RTP_UDP_Lite, 136, rohccxx::emit_ir_rtp_udp_lite_into},
+        {rohccxx::Profile::UDP_Lite, 136, rohccxx::emit_ir_dyn_udp_lite_into},
+        {rohccxx::Profile::RTP_UDP_Lite, 136, rohccxx::emit_ir_dyn_rtp_udp_lite_into},
+    };
+
+    for(const auto& item : cases)
+    {
+        rohccxx::Context ctx = grammar_context(item.profile, item.protocol);
+        std::array<std::uint8_t, 512> complete{};
+        size_t complete_len = complete.size();
+        REQUIRE(item.emitter(complete.data(), &complete_len, ctx));
+        for(size_t capacity = 0; capacity < complete_len; ++capacity)
+        {
+            std::array<std::uint8_t, 512> guarded{};
+            guarded.fill(0xA5);
+            size_t attempted_len = capacity;
+            REQUIRE_FALSE(item.emitter(guarded.data(), &attempted_len, ctx));
+            REQUIRE(attempted_len == capacity);
+            REQUIRE(std::all_of(guarded.begin(), guarded.end(),
+                                [](std::uint8_t value) { return value == 0xA5; }));
+        }
+    }
+}
+
+TEST_CASE("RFC 5225 payload boundary helper rejects invalid consumed lengths")
+{
+    const std::array<std::uint8_t, 4> packet = {1, 2, 3, 4};
+    const std::uint8_t* payload = packet.data();
+    size_t payload_len = 99;
+    REQUIRE_FALSE(rohccxx::detail::payload_after_header(packet.data(), packet.size(),
+                                                        packet.size() + 1U,
+                                                        payload, payload_len));
+    REQUIRE(payload == packet.data());
+    REQUIRE(payload_len == 99);
+    REQUIRE(rohccxx::detail::payload_after_header(packet.data(), packet.size(),
+                                                  packet.size(), payload, payload_len));
+    REQUIRE(payload == packet.data() + packet.size());
+    REQUIRE(payload_len == 0);
+}
+
 TEST_CASE("RFC 5225 legacy profile parsers reject IPv4 and IPv6 truncation at every boundary")
 {
     for(const auto& item : grammar_profile_cases)
