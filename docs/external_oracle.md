@@ -15,6 +15,32 @@ The mandatory bidirectional result is deliberately limited to the tested RTP,
 UDP, ESP, and IP-only IPv4/small-CID subset. It is not evidence for UDP-Lite,
 RFC 4362, IPv6, other CID modes, or any other untested variant.
 
+## Context-complete CO interoperability
+
+The `interop_rfc5225_co_*` tests add twenty-packet, small-CID-0 IPv4 flows with
+complete IR context establishment followed by externally generated formal CO.
+UDP/IP, ESP/IP, and IP-only exercise PT-0 in both directions with byte-exact IP
+reconstruction. The reverse path also covers a deliberate lost packet,
+out-of-order delivery, sequence-number wrap (ESP), duplicate rejection,
+CRC corruption, truncation, no-context rejection, and successful decoding after
+each failed transaction. The forward path independently checks rohc-lib's CRC
+rejection without treating a rejected packet as context advancement.
+
+The pinned rohc-lib revision has two RTP limitations that are asserted and
+reported by the harness rather than skipped: its RTP compressor remains in IR
+for the deterministic flow, and its RTP decompressor detects PT packets but its
+parser contains `TODO: handle other CO packets` and rejects them. Accordingly,
+the tests prove RTP context establishment and rohccxx RTP CO generation, but do
+not claim external RTP PT decode in either direction. CO-COMMON (`0xFA`) and
+CO-REPAIR (`0xFB`) also remain unavailable in the live rohccxx decoder because
+those octets collide with the existing assisting-layer CSP/CCP namespace. Those
+refresh/repair paths, feedback exchange with the external compressor, nonzero
+and large CIDs, reserved-bit validation in CO-COMMON/CO-REPAIR, UDP-Lite,
+RFC 4362, IPv6, IP options, and all other untested variants remain explicit gaps.
+
+The 364-case internal grammar/CRC corpus is unchanged and remains broader
+byte-grammar evidence, not external context interoperability evidence.
+
 A second ROHCv2-capable implementation can optionally be added as corroborating evidence by consuming the generated corpus from `rohccxx_oracle_corpus` or `rfc5225_co_corpus`. This is useful for commercial acceptance testing or independent validation, but it is not required for the in-tree conformance suite to pass. See `docs/external_oracle_gap_register.md` for optional third-party corroboration targets.
 
 ## Corpus Format

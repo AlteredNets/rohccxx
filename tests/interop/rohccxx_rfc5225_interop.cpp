@@ -44,6 +44,27 @@ int emit()
     return std::fflush(stdout) == 0 ? 0 : 4;
 }
 
+int emit_co()
+{
+    rfc5225_interop::emit_co_header();
+    for(const auto& profile : rfc5225_interop::profiles)
+    {
+        rohc_comp* compressor = rohc_comp_new2(15, ROHCCXX_DIRECTION_UPLINK);
+        if(!compressor || rohc_comp_set_mode(compressor, ROHCCXX_MODE_O) != 0) return 2;
+        for(int step = 0; step < static_cast<int>(rfc5225_interop::co_packets_per_profile); ++step)
+        {
+            std::uint8_t ip[rfc5225_interop::packet_size] = {};
+            std::uint8_t rohc[rfc5225_interop::max_rohc_size] = {};
+            std::size_t rohc_length = sizeof(rohc);
+            rfc5225_interop::make_co_packet(profile.profile, step, ip);
+            if(rohc_compress4(compressor, ip, sizeof(ip), rohc, &rohc_length) != 0) return 3;
+            rfc5225_interop::emit_case(profile, step, ip, rohc, rohc_length);
+        }
+        rohc_comp_free(compressor);
+    }
+    return std::fflush(stdout) == 0 ? 0 : 4;
+}
+
 int decode()
 {
     std::array<rohc_decomp*, rfc5225_interop::profile_count> decompressors{};
@@ -84,16 +105,137 @@ int decode()
     return ok ? 0 : 3;
 }
 
+int decode_co()
+{
+    std::array<rohc_decomp*, rfc5225_interop::profile_count> decompressors{};
+    std::array<std::size_t, rfc5225_interop::profile_count> decoded_co{};
+    std::array<rfc5225_interop::CorpusCase, rfc5225_interop::profile_count> reordered{};
+    for(auto& decompressor : decompressors)
+    {
+        decompressor = rohc_decomp_new2(15, ROHCCXX_DIRECTION_UPLINK);
+        if(!decompressor) return 2;
+    }
+    auto decode_exact = [&](std::size_t index, const rfc5225_interop::CorpusCase& item) {
+        std::uint8_t output[rfc5225_interop::packet_size + 64] = {};
+        std::size_t output_length = sizeof(output);
+        return rohc_decompress4(decompressors[index], item.rohc.data(), item.rohc_length,
+                                output, &output_length) == 0 &&
+               output_length == item.ip.size() &&
+               std::memcmp(output, item.ip.data(), item.ip.size()) == 0;
+    };
+    auto reject = [&](std::size_t index, const std::uint8_t* packet, std::size_t length) {
+        std::uint8_t output[rfc5225_interop::packet_size + 64] = {};
+        std::size_t output_length = sizeof(output);
+        return rohc_decompress4(decompressors[index], packet, length, output, &output_length) != 0 &&
+               output_length == 0;
+    };
+
+    const bool ok = rfc5225_interop::consume_co_corpus([&](const rfc5225_interop::CorpusCase& item) {
+        const std::size_t index = static_cast<std::size_t>(item.profile->profile);
+        const bool is_ir = item.rohc[0] == 0xfdU ||
+            ((item.rohc[0] & 0xf0U) == 0xe0U && item.rohc_length > 1U && item.rohc[1] == 0xfdU);
+        if(item.profile->profile == rfc5225_interop::Profile::Rtp)
+            return decode_exact(index, item); // pinned rohc-lib emits IR only for this stream
+
+        const bool transition = item.rohc[0] == 0xfaU || item.rohc[0] == 0xfbU;
+        if(transition)
+        {
+            // CO-COMMON/CO-REPAIR currently collide with the assisting-layer
+            // namespace. Assert deterministic rejection and preserve context.
+            return reject(index, item.rohc.data(), item.rohc_length);
+        }
+        if(is_ir)
+        {
+            const bool exact = decode_exact(index, item);
+            if(!exact) std::fprintf(stderr, "rohccxx CO context decode failed profile=%s step=%d\n", item.profile->name, item.step);
+            return exact;
+        }
+
+        if(item.step == 8) return true; // deliberate loss
+        if(item.step == 12)
+        {
+            reordered[index] = item;
+            return true;
+        }
+        if(item.step == 13)
+        {
+            if(!decode_exact(index, item) ||
+               !reject(index, reordered[index].rohc.data(), reordered[index].rohc_length))
+            {
+                std::fprintf(stderr, "rohccxx CO reorder check failed profile=%s step=%d\n", item.profile->name, item.step);
+                return false;
+            }
+            ++decoded_co[index];
+            return true;
+        }
+
+        if(decoded_co[index] == 0)
+        {
+            auto malformed = item.rohc;
+            malformed[0] ^= 0x01U; // CRC-3 corruption
+            std::array<std::uint8_t, rfc5225_interop::max_rohc_size> bad_cid{};
+            bad_cid[0] = 0xe1U;
+            std::memcpy(bad_cid.data() + 1U, item.rohc.data(), item.rohc_length);
+            const std::uint8_t reserved_repair[] = {0xfbU, 0x80U, 0xf8U};
+            const std::uint8_t reserved_common[] = {0xfaU, 0x00U, 0x04U};
+            if(!reject(index, malformed.data(), item.rohc_length) ||
+               !reject(index, item.rohc.data(), item.rohc_length - 1U) ||
+               !reject(index, bad_cid.data(), item.rohc_length + 1U) ||
+               !reject(index, reserved_repair, sizeof(reserved_repair)) ||
+               !reject(index, reserved_common, sizeof(reserved_common)) ||
+               rohc_decomp_has_feedback(decompressors[index]) != 1)
+            {
+                std::fprintf(stderr, "rohccxx CO malformed check failed profile=%s step=%d\n", item.profile->name, item.step);
+                return false;
+            }
+            rohc_decomp* fresh = rohc_decomp_new2(15, ROHCCXX_DIRECTION_UPLINK);
+            if(!fresh) return false;
+            std::uint8_t output[rfc5225_interop::packet_size + 64] = {};
+            std::size_t output_length = sizeof(output);
+            const bool no_context = rohc_decompress4(fresh, item.rohc.data(), item.rohc_length,
+                                                     output, &output_length) != 0 && output_length == 0;
+            rohc_decomp_free(fresh);
+            if(!no_context)
+            {
+                std::fprintf(stderr, "rohccxx CO no-context check failed profile=%s step=%d\n", item.profile->name, item.step);
+                return false;
+            }
+        }
+        if(!decode_exact(index, item))
+        {
+            std::fprintf(stderr, "rohccxx CO exact decode failed profile=%s step=%d\n", item.profile->name, item.step);
+            return false;
+        }
+        ++decoded_co[index];
+        if(decoded_co[index] == 1 && !reject(index, item.rohc.data(), item.rohc_length))
+        {
+            std::fprintf(stderr, "rohccxx CO duplicate check failed profile=%s step=%d\n", item.profile->name, item.step);
+            return false; // duplicate is rejected without advancing context
+        }
+        return true;
+    });
+    for(auto* decompressor : decompressors) if(decompressor) rohc_decomp_free(decompressor);
+    const bool coverage =
+        decoded_co[static_cast<std::size_t>(rfc5225_interop::Profile::Udp)] > 0 &&
+        decoded_co[static_cast<std::size_t>(rfc5225_interop::Profile::Esp)] > 0 &&
+        decoded_co[static_cast<std::size_t>(rfc5225_interop::Profile::Ip)] > 0;
+    if(ok && coverage)
+        std::fprintf(stderr, "external CO reverse: UDP, ESP, IP exact; RTP emitter and FA/FB transitions unavailable\n");
+    return ok && coverage ? 0 : 3;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
 {
     if(argc != 2)
     {
-        std::fprintf(stderr, "usage: %s emit|decode\n", argv[0]);
+        std::fprintf(stderr, "usage: %s emit|decode|emit-co|decode-co\n", argv[0]);
         return 1;
     }
     if(std::strcmp(argv[1], "emit") == 0) return emit();
+    if(std::strcmp(argv[1], "emit-co") == 0) return emit_co();
     if(std::strcmp(argv[1], "decode") == 0) return decode();
+    if(std::strcmp(argv[1], "decode-co") == 0) return decode_co();
     return 1;
 }

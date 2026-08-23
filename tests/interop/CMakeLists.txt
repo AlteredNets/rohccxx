@@ -66,6 +66,14 @@ add_test(NAME interop_rfc5225_rohclib_to_rohccxx
     COMMAND sh -c "$<TARGET_FILE:rohclib_rfc5225_interop> emit | $<TARGET_FILE:rohccxx_rfc5225_interop> decode"
 )
 
+add_test(NAME interop_rfc5225_co_rohccxx_to_rohclib
+    COMMAND sh -c "set -o pipefail; $<TARGET_FILE:rohccxx_rfc5225_interop> emit-co | $<TARGET_FILE:rohclib_rfc5225_interop> decode-co"
+)
+
+add_test(NAME interop_rfc5225_co_rohclib_to_rohccxx
+    COMMAND sh -c "set -o pipefail; $<TARGET_FILE:rohclib_rfc5225_interop> emit-co | $<TARGET_FILE:rohccxx_rfc5225_interop> decode-co"
+)
+
 add_executable(rohccxx_oracle_corpus rohccxx_oracle_corpus.cpp)
 target_link_libraries(rohccxx_oracle_corpus rohccxx)
 target_include_directories(rohccxx_oracle_corpus PRIVATE

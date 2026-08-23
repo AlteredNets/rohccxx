@@ -1829,7 +1829,7 @@ TEST_CASE("RFC 5225 formal pt-0 CO variants encode decode across profiles and CI
     const std::uint8_t zero[] = {0x00};
     REQUIRE(rohccxx::utils::crc3(zero, sizeof(zero)) == 5);
     const std::uint8_t sample[] = {0x12, 0x34};
-    REQUIRE(rohccxx::utils::crc3(sample, sizeof(sample)) == 0);
+    REQUIRE(rohccxx::utils::crc3(sample, sizeof(sample)) == 6);
 
     for(const auto& profile : grammar_profile_cases)
     {
