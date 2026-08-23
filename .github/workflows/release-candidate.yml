@@ -22,11 +22,11 @@ concurrency:
 
 jobs:
   build-release-candidate:
-    name: Build and validate v0.3.0
+    name: Build and validate v0.4.0
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      EXPECTED_VERSION: "0.3.0"
+      EXPECTED_VERSION: "0.4.0"
       EXPECTED_ROHC_LIB_COMMIT: "70589cc2b8650f82453815c84ba41b0ab80a52a0"
       CC: gcc
       CXX: g++
@@ -199,7 +199,7 @@ jobs:
             "${build_dir}/generated/include/rohccxx/version.h"
           grep -Fq "#define ROHCCXX_VERSION_MAJOR 0" \
             "${build_dir}/generated/include/rohccxx/version.h"
-          grep -Fq "#define ROHCCXX_VERSION_MINOR 3" \
+          grep -Fq "#define ROHCCXX_VERSION_MINOR 4" \
             "${build_dir}/generated/include/rohccxx/version.h"
           grep -Fq "#define ROHCCXX_VERSION_PATCH 0" \
             "${build_dir}/generated/include/rohccxx/version.h"
@@ -237,6 +237,14 @@ jobs:
             test "$(grep -c "${skipped_test} (Skipped)" "${test_log}")" -eq 1
           done
           test "$(grep -Ec 'interop_external_.*_optional \(Skipped\)' "${test_log}")" -eq 3
+
+          mandatory_co_tests=(
+            interop_rfc5225_co_rohccxx_to_rohclib
+            interop_rfc5225_co_rohclib_to_rohccxx
+          )
+          for mandatory_test in "${mandatory_co_tests[@]}"; do
+            test "$(grep -Ec "Test +#[0-9]+: ${mandatory_test} .* +Passed +" "${test_log}")" -eq 1
+          done
 
           printf 'registered=%s\n' "${registered}" >> "${GITHUB_OUTPUT}"
           printf 'passed=%s\n' "${passed}" >> "${GITHUB_OUTPUT}"
@@ -351,9 +359,9 @@ jobs:
 
           int main(void)
           {
-              if(strcmp(rohccxx_version_string(), "0.3.0") != 0 ||
+              if(strcmp(rohccxx_version_string(), "0.4.0") != 0 ||
                  rohccxx_version_major() != 0 ||
-                 rohccxx_version_minor() != 3 ||
+                 rohccxx_version_minor() != 4 ||
                  rohccxx_version_patch() != 0)
               {
                   return 1;
@@ -388,7 +396,7 @@ jobs:
           cat > "${cmake_source}/CMakeLists.txt" <<'EOF'
           cmake_minimum_required(VERSION 3.16)
           project(rohccxx_consumer LANGUAGES C CXX)
-          find_package(rohccxx 0.3.0 CONFIG REQUIRED)
+          find_package(rohccxx 0.4.0 CONFIG REQUIRED)
           add_executable(consumer_shared consumer.c)
           target_link_libraries(consumer_shared PRIVATE rohccxx::rohccxx)
           set_property(TARGET consumer_shared PROPERTY LINKER_LANGUAGE CXX)
@@ -501,11 +509,11 @@ jobs:
       - name: Upload release candidate bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: rohccxx-0.3.0-release-candidate-${{ github.sha }}
+          name: rohccxx-0.4.0-release-candidate-${{ github.sha }}
           path: |
-            ${{ steps.artifact-paths.outputs.artifact_dir }}/rohccxx-0.3.0-source-with-submodules.tar.gz
-            ${{ steps.artifact-paths.outputs.artifact_dir }}/librohccxx-0.3.0.deb
-            ${{ steps.artifact-paths.outputs.artifact_dir }}/rohccxx-0.3.0-buildinfo.txt
+            ${{ steps.artifact-paths.outputs.artifact_dir }}/rohccxx-0.4.0-source-with-submodules.tar.gz
+            ${{ steps.artifact-paths.outputs.artifact_dir }}/librohccxx-0.4.0.deb
+            ${{ steps.artifact-paths.outputs.artifact_dir }}/rohccxx-0.4.0-buildinfo.txt
             ${{ steps.artifact-paths.outputs.artifact_dir }}/SHA256SUMS
           if-no-files-found: error
           retention-days: 14
