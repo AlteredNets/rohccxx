@@ -21,6 +21,7 @@
 #include "rohccxx/core/decode_udp_fo.hpp"
 #include "rohccxx/core/decode_udplite_fo.hpp"
 #include "rohccxx/core/packet_type.hpp"
+#include "rohccxx/core/rfc5225_chains.hpp"
 #include "rohccxx/core/lla.hpp"
 #include "rohccxx/core/ppp.hpp"
 #include "rohccxx/core/feedback.hpp"
@@ -39,6 +40,8 @@
 #include "rohccxx/protocols/rtp.hpp"
 #include "rohccxx/wire/types.hpp"
 #include "rohccxx/wire/convert.hpp"
+#include "rohccxx/utils/crc.hpp"
+#include <array>
 
 
 namespace
@@ -2023,7 +2026,7 @@ TEST_CASE("ROHC decompressor selects Add-CID context for IR packets")
 
 
 
-TEST_CASE("ROHC decompressor selects Add-CID context for IR-DYN packets")
+TEST_CASE("ROHC decompressor selects Add-CID context for IR refresh packets")
 {
     rohccxx::Context ctx{};
     ctx.cid = 3;
@@ -2056,7 +2059,7 @@ TEST_CASE("ROHC decompressor selects Add-CID context for IR-DYN packets")
     rohc_len = sizeof(rohc);
     REQUIRE(rohccxx::emit_ir_dyn_udp(rohc, &rohc_len, ctx));
     REQUIRE(rohc[0] == 0xE3);
-    REQUIRE(rohc[1] == 0xF8);
+    REQUIRE(rohc[1] == 0xFD);
 
     const std::uint8_t payload[] = {0xAA, 0xBB, 0xCC, 0xDD};
     REQUIRE(rohc_len + sizeof(payload) <= sizeof(rohc));
@@ -2234,6 +2237,8 @@ TEST_CASE("ROHC decompressor selects Add-CID context for ESP FO packets")
     ctx.ipv4_ttl = 64;
     ctx.ipv4_saddr = 0xC0000201;
     ctx.ipv4_daddr = 0xC6336402;
+    ctx.esp_spi = 0x01020304;
+    ctx.esp_sequence = 7;
 
     std::uint8_t rohc[128] = {};
     size_t rohc_len = sizeof(rohc);
@@ -2255,10 +2260,12 @@ TEST_CASE("ROHC decompressor selects Add-CID context for ESP FO packets")
 
     out_len = sizeof(out);
     REQUIRE(rohc_decompress4(decomp, rohc, rohc_len, out, &out_len) == 0);
-    REQUIRE(out_len == 24);
+    REQUIRE(out_len == 32);
     require_ip_header_id(out, 0x5678);
     REQUIRE(out[9] == 50);
-    REQUIRE(std::memcmp(out + 20, payload, sizeof(payload)) == 0);
+    REQUIRE((out[20] == 0x01 && out[21] == 0x02 && out[22] == 0x03 && out[23] == 0x04));
+    REQUIRE((out[24] == 0 && out[25] == 0 && out[26] == 0 && out[27] == 7));
+    REQUIRE(std::memcmp(out + 28, payload, sizeof(payload)) == 0);
 
     rohc_decomp_free(decomp);
 }
@@ -2721,7 +2728,7 @@ TEST_CASE("ROHC compressor emits selected nonzero CID across UDP IR IR-DYN and F
     out_len = sizeof(out);
     REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
     REQUIRE(rohc[0] == 0xE3);
-    REQUIRE(rohc[1] == 0xF8);
+    REQUIRE(rohc[1] == 0xFD);
     REQUIRE(rohc_decompress4(decomp, rohc, rohc_len, out, &out_len) == 0);
     REQUIRE(std::memcmp(out, ip, sizeof(ip)) == 0);
 
@@ -2853,7 +2860,7 @@ TEST_CASE("ROHC large-CID RTP channel round-trips IR IR-DYN and FO packets")
     rohc_len = sizeof(rohc);
     out_len = sizeof(out);
     REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
-    REQUIRE(rohc[0] == 0xF8);
+    REQUIRE(rohc[0] == 0xFD);
     REQUIRE(rohc[1] == 0x92);
     REQUIRE(rohc[2] == 0x34);
     REQUIRE(rohc[3] == 0x01);
@@ -2934,7 +2941,7 @@ TEST_CASE("ROHC large-CID UDP channel round-trips IR IR-DYN and FO packets")
     rohc_len = sizeof(rohc);
     out_len = sizeof(out);
     REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
-    REQUIRE(rohc[0] == 0xF8);
+    REQUIRE(rohc[0] == 0xFD);
     REQUIRE(rohc[1] == 0x92);
     REQUIRE(rohc[2] == 0x34);
     REQUIRE(rohc[3] == 0x02);
@@ -3020,7 +3027,10 @@ TEST_CASE("ROHC large-CID channels round-trip remaining compressed profiles")
         rohc_len = sizeof(rohc);
         out_len = sizeof(out);
         REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
-        REQUIRE(rohc[0] == 0xF8);
+        REQUIRE(rohc[0] == (item.profile == rohccxx::Profile::UDP_Lite ||
+                                    item.profile == rohccxx::Profile::RTP_UDP_Lite
+                                ? 0xF8
+                                : 0xFD));
         REQUIRE(rohc[1] == 0x92);
         REQUIRE(rohc[2] == 0x34);
         REQUIRE(rohc[3] == item.ir_profile_id);
@@ -3049,6 +3059,8 @@ TEST_CASE("ROHC large-CID channels round-trip remaining compressed profiles")
             // This packet changes IP-ID behavior, so IR-DYN must refresh context.
             REQUIRE(rohc[0] == 0xF8);
         }
+        else if(item.profile == rohccxx::Profile::ESP)
+            REQUIRE(rohc[0] == 0xFD);
         else
             REQUIRE(rohc[0] == item.fo_type);
         REQUIRE(rohc[1] == 0x92);
@@ -3501,13 +3513,301 @@ TEST_CASE("ROHCoIPsec enabled C API appends ICV after compression and verifies a
     REQUIRE(out_len == sizeof(ip));
     REQUIRE(std::memcmp(out, ip, sizeof(ip)) == 0);
 
+    rohc_decomp* retry_decomp = rohc_decomp_new2(4, ROHCCXX_DIRECTION_UPLINK);
+    REQUIRE(retry_decomp != nullptr);
+    REQUIRE(rohc_decomp_set_rohcoipsec_integrity(retry_decomp,
+                                                 ROHCCXX_ROHCOIPSEC_INTEGRITY_HMAC_SHA256,
+                                                 key,
+                                                 sizeof(key),
+                                                 12) == 0);
+    REQUIRE(rohc_decomp_set_mode(retry_decomp, ROHCCXX_MODE_R) == 0);
     rohc[rohc_len - 1] ^= 0x80;
+    std::array<std::uint8_t, 96> guarded{};
+    guarded.fill(0xA5);
     out_len = sizeof(out);
-    REQUIRE(rohc_decompress4(decomp, rohc, rohc_len, out, &out_len) != 0);
-    REQUIRE(rohc_decomp_has_feedback(decomp) == 1);
+    REQUIRE(rohc_decompress4(retry_decomp, rohc, rohc_len, guarded.data(), &out_len) != 0);
+    REQUIRE(out_len == 0);
+    REQUIRE(std::all_of(guarded.begin(), guarded.end(),
+                        [](std::uint8_t value) { return value == 0xA5; }));
+    REQUIRE(rohc_decomp_has_feedback(retry_decomp) == 1);
+    rohccxx_mode_t mode = ROHCCXX_MODE_U;
+    REQUIRE(rohc_decomp_get_mode(retry_decomp, &mode) == 0);
+    REQUIRE(mode == ROHCCXX_MODE_R);
 
+    rohc[rohc_len - 1] ^= 0x80;
+    guarded.fill(0xA5);
+    out_len = sizeof(out);
+    REQUIRE(rohc_decompress4(retry_decomp, rohc, rohc_len, guarded.data(), &out_len) == 0);
+    REQUIRE(out_len == sizeof(ip));
+    REQUIRE(std::memcmp(guarded.data(), ip, sizeof(ip)) == 0);
+    REQUIRE(std::all_of(guarded.begin() + sizeof(ip), guarded.end(),
+                        [](std::uint8_t value) { return value == 0xA5; }));
+    REQUIRE(rohc_decomp_get_mode(retry_decomp, &mode) == 0);
+    REQUIRE(mode == ROHCCXX_MODE_R);
+
+    rohc_decomp_free(retry_decomp);
     rohc_decomp_free(decomp);
     rohc_comp_free(comp);
+}
+
+TEST_CASE("ROHC C and C++ decompressors preserve guards and zero failure length for every output capacity")
+{
+    std::uint8_t ip[64] = {};
+    make_valid_rtp(ip, 1000, 1234, 0xCAFEBABEU);
+
+    rohc_comp* c_comp = rohc_comp_new2(0, ROHCCXX_DIRECTION_UPLINK);
+    REQUIRE(c_comp != nullptr);
+    std::array<std::uint8_t, 256> c_rohc{};
+    size_t c_rohc_len = c_rohc.size();
+    REQUIRE(rohc_compress4(c_comp, ip, sizeof(ip), c_rohc.data(), &c_rohc_len) == 0);
+    for(size_t capacity = 0; capacity < sizeof(ip); ++capacity)
+    {
+        rohc_decomp* decomp = rohc_decomp_new2(0, ROHCCXX_DIRECTION_UPLINK);
+        REQUIRE(decomp != nullptr);
+        std::array<std::uint8_t, 96> guarded{};
+        guarded.fill(0xA5);
+        size_t out_len = capacity;
+        REQUIRE(rohc_decompress4(decomp, c_rohc.data(), c_rohc_len, guarded.data(), &out_len) != 0);
+        REQUIRE(out_len == 0);
+        REQUIRE(std::all_of(guarded.begin(), guarded.end(),
+                            [](std::uint8_t value) { return value == 0xA5; }));
+        guarded.fill(0xA5);
+        out_len = guarded.size();
+        REQUIRE(rohc_decompress4(decomp, c_rohc.data(), c_rohc_len,
+                                 guarded.data(), &out_len) == 0);
+        REQUIRE(out_len == sizeof(ip));
+        REQUIRE(std::memcmp(guarded.data(), ip, sizeof(ip)) == 0);
+        REQUIRE(std::all_of(guarded.begin() + sizeof(ip), guarded.end(),
+                            [](std::uint8_t value) { return value == 0xA5; }));
+        rohc_decomp_free(decomp);
+    }
+
+    rohc_decomp* malformed_decomp = rohc_decomp_new2(0, ROHCCXX_DIRECTION_UPLINK);
+    REQUIRE(malformed_decomp != nullptr);
+    std::array<std::uint8_t, 96> malformed_guarded{};
+    malformed_guarded.fill(0xA5);
+    const std::array<std::uint8_t, 1> malformed_ir = {0xFD};
+    size_t malformed_len = malformed_guarded.size();
+    REQUIRE(rohc_decompress4(malformed_decomp, malformed_ir.data(), malformed_ir.size(),
+                             malformed_guarded.data(), &malformed_len) != 0);
+    REQUIRE(malformed_len == 0);
+    REQUIRE(std::all_of(malformed_guarded.begin(), malformed_guarded.end(),
+                        [](std::uint8_t value) { return value == 0xA5; }));
+    rohc_decomp_free(malformed_decomp);
+    rohc_comp_free(c_comp);
+
+    rohccxx::Compressor cpp_comp(0);
+    std::array<std::uint8_t, 256> cpp_rohc{};
+    size_t cpp_rohc_len = cpp_rohc.size();
+    REQUIRE(cpp_comp.compress(ip, sizeof(ip), cpp_rohc.data(), &cpp_rohc_len) == 0);
+    for(size_t capacity = 0; capacity < sizeof(ip); ++capacity)
+    {
+        rohccxx::Decompressor decomp(0);
+        std::array<std::uint8_t, 96> guarded{};
+        guarded.fill(0xA5);
+        size_t out_len = capacity;
+        REQUIRE(decomp.decompress(cpp_rohc.data(), cpp_rohc_len, guarded.data(), &out_len) != 0);
+        REQUIRE(out_len == 0);
+        REQUIRE(std::all_of(guarded.begin(), guarded.end(),
+                            [](std::uint8_t value) { return value == 0xA5; }));
+        guarded.fill(0xA5);
+        out_len = guarded.size();
+        REQUIRE(decomp.decompress(cpp_rohc.data(), cpp_rohc_len,
+                                  guarded.data(), &out_len) == 0);
+        REQUIRE(out_len == sizeof(ip));
+        REQUIRE(std::memcmp(guarded.data(), ip, sizeof(ip)) == 0);
+        REQUIRE(std::all_of(guarded.begin() + sizeof(ip), guarded.end(),
+                            [](std::uint8_t value) { return value == 0xA5; }));
+    }
+
+    rohccxx::Decompressor cpp_decomp(0);
+    std::array<std::uint8_t, 96> output{};
+    size_t output_len = output.size();
+    REQUIRE(cpp_decomp.decompress(cpp_rohc.data(), cpp_rohc_len, output.data(), &output_len) == 0);
+    REQUIRE(output_len == sizeof(ip));
+    REQUIRE(std::memcmp(output.data(), ip, sizeof(ip)) == 0);
+}
+
+TEST_CASE("ROHC ESP reconstruction supports large payloads without duplicating legacy ESP headers")
+{
+    constexpr size_t payload_len = 3000;
+    std::vector<std::uint8_t> ip(20U + 8U + payload_len, 0);
+    ip[0] = 0x45;
+    ip[2] = static_cast<std::uint8_t>(ip.size() >> 8U);
+    ip[3] = static_cast<std::uint8_t>(ip.size());
+    ip[4] = 0x12; ip[5] = 0x34; ip[6] = 0x40; ip[8] = 64; ip[9] = 50;
+    ip[12] = 192; ip[13] = 0; ip[14] = 2; ip[15] = 1;
+    ip[16] = 198; ip[17] = 51; ip[18] = 100; ip[19] = 2;
+    ip[20] = 0xDE; ip[21] = 0xAD; ip[22] = 0xBE; ip[23] = 0xEF;
+    ip[24] = 0x01; ip[25] = 0x02; ip[26] = 0x03; ip[27] = 0x04;
+    for(size_t i = 28; i < ip.size(); ++i)
+        ip[i] = static_cast<std::uint8_t>(i * 37U);
+    finish_ipv4_checksum(ip.data());
+
+    rohc_comp* comp = rohc_comp_new2(0, ROHCCXX_DIRECTION_UPLINK);
+    rohc_decomp* decomp = rohc_decomp_new2(0, ROHCCXX_DIRECTION_UPLINK);
+    REQUIRE(comp != nullptr);
+    REQUIRE(decomp != nullptr);
+    std::vector<std::uint8_t> rohc(ip.size() + 128U);
+    size_t rohc_len = rohc.size();
+    REQUIRE(rohc_compress4(comp, ip.data(), ip.size(), rohc.data(), &rohc_len) == 0);
+    std::vector<std::uint8_t> output(ip.size() + 32U, 0xA5);
+    size_t output_len = ip.size();
+    REQUIRE(rohc_decompress4(decomp, rohc.data(), rohc_len, output.data(), &output_len) == 0);
+    REQUIRE(output_len == ip.size());
+    REQUIRE(std::memcmp(output.data(), ip.data(), ip.size()) == 0);
+    REQUIRE(std::all_of(output.begin() + static_cast<std::ptrdiff_t>(ip.size()), output.end(),
+                        [](std::uint8_t value) { return value == 0xA5; }));
+    rohc_decomp_free(decomp);
+    rohc_comp_free(comp);
+
+    rohccxx::Context legacy{};
+    legacy.profile = rohccxx::Profile::ESP;
+    legacy.mode = rohccxx::Mode::Optimistic;
+    legacy.ip_version = 4;
+    legacy.ipv4_protocol = 50;
+    legacy.ipv4_ttl = 64;
+    legacy.ipv4_id = 0x1234;
+    legacy.ipv4_flags = 2;
+    legacy.ipv4_saddr = 0xC0000201U;
+    legacy.ipv4_daddr = 0xC6336402U;
+    std::vector<std::uint8_t> legacy_rohc(ip.size() + 128U, 0);
+    std::uint8_t* p = legacy_rohc.data();
+    *p++ = 0xFD; *p++ = 0x03; std::uint8_t* crc = p++;
+    rohccxx::rfc5225::write_ip_static_with_protocol(p, legacy, 50);
+    rohccxx::rfc5225::write_ip_dynamic(p, legacy);
+    *crc = rohccxx::utils::crc8(legacy_rohc.data(), static_cast<size_t>(p - legacy_rohc.data()));
+    *p++ = 0x04;
+    std::memcpy(p, ip.data() + 20U, ip.size() - 20U);
+    p += ip.size() - 20U;
+    const size_t legacy_rohc_len = static_cast<size_t>(p - legacy_rohc.data());
+    decomp = rohc_decomp_new2(0, ROHCCXX_DIRECTION_UPLINK);
+    REQUIRE(decomp != nullptr);
+    output.assign(ip.size() + 32U, 0xA5);
+    output_len = ip.size();
+    REQUIRE(rohc_decompress4(decomp, legacy_rohc.data(), legacy_rohc_len, output.data(), &output_len) == 0);
+    REQUIRE(output_len == ip.size());
+    REQUIRE(std::memcmp(output.data(), ip.data(), ip.size()) == 0);
+    rohc_decomp_free(decomp);
+}
+
+TEST_CASE("ROHC IPv6 and ESP reconstruction enforce wire limits before output mutation")
+{
+    rohccxx::Context esp{};
+    esp.profile = rohccxx::Profile::ESP;
+    esp.mode = rohccxx::Mode::Optimistic;
+    esp.ip_version = 6;
+    esp.ipv6_next_header = 50;
+    esp.ipv6_hop_limit = 64;
+    esp.esp_spi = 0xDEADBEEFU;
+    esp.esp_sequence = 0x01020304U;
+    for(size_t i = 0; i < esp.ipv6_saddr.size(); ++i)
+    {
+        esp.ipv6_saddr[i] = static_cast<std::uint8_t>(i);
+        esp.ipv6_daddr[i] = static_cast<std::uint8_t>(0xF0U + i);
+    }
+
+    constexpr size_t max_esp_data_len = 0xFFFFU - 8U;
+    auto make_esp_rohc = [&](size_t data_len) {
+        std::vector<std::uint8_t> packet(data_len + 128U, 0);
+        size_t header_len = packet.size();
+        REQUIRE(rohccxx::emit_ir_esp(packet.data(), &header_len, esp));
+        for(size_t i = 0; i < data_len; ++i)
+            packet[header_len + i] = static_cast<std::uint8_t>(i * 29U);
+        packet.resize(header_len + data_len);
+        return packet;
+    };
+
+    const auto maximum = make_esp_rohc(max_esp_data_len);
+    rohc_decomp* decomp = rohc_decomp_new2(0, ROHCCXX_DIRECTION_UPLINK);
+    REQUIRE(decomp != nullptr);
+    std::vector<std::uint8_t> output(40U + 0xFFFFU + 16U, 0xA5);
+    size_t output_len = 40U + 0xFFFFU;
+    REQUIRE(rohc_decompress4(decomp, maximum.data(), maximum.size(),
+                             output.data(), &output_len) == 0);
+    REQUIRE(output_len == 40U + 0xFFFFU);
+    REQUIRE(output[4] == 0xFF);
+    REQUIRE(output[5] == 0xFF);
+    REQUIRE(output[6] == 50);
+    REQUIRE(output[40] == 0xDE);
+    REQUIRE(output[41] == 0xAD);
+    REQUIRE(output[42] == 0xBE);
+    REQUIRE(output[43] == 0xEF);
+    REQUIRE(output[44] == 0x01);
+    REQUIRE(output[45] == 0x02);
+    REQUIRE(output[46] == 0x03);
+    REQUIRE(output[47] == 0x04);
+    REQUIRE(std::memcmp(output.data() + 48U,
+                        maximum.data() + (maximum.size() - max_esp_data_len),
+                        max_esp_data_len) == 0);
+    REQUIRE(std::all_of(output.begin() + static_cast<std::ptrdiff_t>(output_len), output.end(),
+                        [](std::uint8_t value) { return value == 0xA5; }));
+    rohc_decomp_free(decomp);
+
+    const auto oversized_esp = make_esp_rohc(max_esp_data_len + 1U);
+    decomp = rohc_decomp_new2(0, ROHCCXX_DIRECTION_UPLINK);
+    REQUIRE(decomp != nullptr);
+    output.assign(40U + 0xFFFFU + 16U, 0xA5);
+    output_len = output.size();
+    REQUIRE(rohc_decompress4(decomp, oversized_esp.data(), oversized_esp.size(),
+                             output.data(), &output_len) != 0);
+    REQUIRE(output_len == 0);
+    REQUIRE(std::all_of(output.begin(), output.end(),
+                        [](std::uint8_t value) { return value == 0xA5; }));
+    rohc_decomp_free(decomp);
+
+    rohccxx::Context ip = esp;
+    ip.profile = rohccxx::Profile::IP;
+    ip.ipv6_next_header = 6;
+    std::vector<std::uint8_t> oversized_ip(0x10000U + 128U, 0x3C);
+    size_t ip_header_len = oversized_ip.size();
+    REQUIRE(rohccxx::emit_ir_ip(oversized_ip.data(), &ip_header_len, ip));
+    oversized_ip.resize(ip_header_len + 0x10000U, 0x3C);
+    decomp = rohc_decomp_new2(0, ROHCCXX_DIRECTION_UPLINK);
+    REQUIRE(decomp != nullptr);
+    output.assign(40U + 0x10000U + 16U, 0xA5);
+    output_len = output.size();
+    REQUIRE(rohc_decompress4(decomp, oversized_ip.data(), oversized_ip.size(),
+                             output.data(), &output_len) != 0);
+    REQUIRE(output_len == 0);
+    REQUIRE(std::all_of(output.begin(), output.end(),
+                        [](std::uint8_t value) { return value == 0xA5; }));
+    rohc_decomp_free(decomp);
+}
+
+TEST_CASE("ROHC UDP ESP and IP-only IR track canonical IPv4 ID behavior")
+{
+    struct Case { std::uint8_t protocol; std::uint8_t profile_id; size_t control_offset; };
+    const Case cases[] = {{17, 0x02, 17}, {50, 0x03, 17}, {6, 0x04, 13}};
+    for(const auto& item : cases)
+    {
+        CAPTURE(item.profile_id);
+        for(const std::uint16_t first_id : {std::uint16_t{0}, std::uint16_t{0x1234}})
+        {
+            rohc_comp* comp = rohc_comp_new2(0, ROHCCXX_DIRECTION_UPLINK);
+            REQUIRE(comp != nullptr);
+            std::uint8_t ip[64] = {};
+            if(item.protocol == 17)
+                make_valid_udp_family_packet(ip, 17, first_id, 0x2222, false);
+            else
+                make_valid_ip_packet(ip, item.protocol, first_id);
+            std::uint8_t rohc[128] = {};
+            size_t rohc_len = sizeof(rohc);
+            REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
+            REQUIRE(rohc[1] == item.profile_id);
+            REQUIRE((rohc[item.control_offset] & 0x03U) == (first_id == 0 ? 3U : 2U));
+
+            if(item.protocol == 17)
+                make_valid_udp_family_packet(ip, 17, static_cast<std::uint16_t>(first_id + 1U), 0x2222, false);
+            else
+                make_valid_ip_packet(ip, item.protocol, static_cast<std::uint16_t>(first_id + 1U));
+            rohc_len = sizeof(rohc);
+            REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
+            REQUIRE(rohc[1] == item.profile_id);
+            REQUIRE((rohc[item.control_offset] & 0x03U) == 0U);
+            rohc_comp_free(comp);
+        }
+    }
 }
 
 
@@ -3709,7 +4009,7 @@ TEST_CASE("ROHCCXX C++ API supports independent instances on concurrent threads"
                 std::size_t out_len = sizeof(out);
                 if(comp.compress(ip, sizeof(ip), rohc, &rohc_len) != 0 ||
                    decomp.decompress(rohc, rohc_len, out, &out_len) != 0 ||
-                   out_len != 40 || std::memcmp(out + 28, ip + 28, 12) != 0)
+                   out_len != sizeof(ip) || std::memcmp(out, ip, sizeof(ip)) != 0)
                 {
                     failures.fetch_add(1);
                     break;
@@ -3755,7 +4055,7 @@ TEST_CASE("ROHCCXX C++ API serializes shared compressor and decompressor instanc
                 std::size_t out_len = sizeof(out);
                 if(comp.compress(ip, sizeof(ip), rohc, &rohc_len) != 0 ||
                    decomp.decompress(rohc, rohc_len, out, &out_len) != 0 ||
-                   out_len != 40)
+                   out_len != sizeof(ip) || std::memcmp(out, ip, sizeof(ip)) != 0)
                 {
                     failures.fetch_add(1);
                     break;
@@ -3819,7 +4119,7 @@ TEST_CASE("ROHC thread safety handles one independent traffic source per CPU cor
                 std::size_t cpp_out_len = sizeof(cpp_out);
                 const bool cpp_ok = cpp_comp.compress(ip, sizeof(ip), cpp_rohc, &cpp_rohc_len) == 0 &&
                                     cpp_decomp.decompress(cpp_rohc, cpp_rohc_len, cpp_out, &cpp_out_len) == 0 &&
-                                    cpp_out_len == 40 && std::memcmp(cpp_out + 28, ip + 28, 12) == 0;
+                                    cpp_out_len == sizeof(ip) && std::memcmp(cpp_out, ip, sizeof(ip)) == 0;
 
                 if(!c_ok || !cpp_ok)
                 {

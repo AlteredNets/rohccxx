@@ -102,6 +102,119 @@ inline void write_rtp_static(uint8_t*& p, const Context& ctx)
     write_u32(p, ctx.rtp.ssrc);
 }
 
+// RFC 5225 section 6.7 formal static and dynamic chains.  The older helpers
+// below are retained only for the decode-only legacy wire format.
+inline bool write_standard_ip_static(uint8_t*& p, const uint8_t* end, const Context& ctx)
+{
+    if(ctx.ip_version == 4)
+    {
+        if(ctx.ipv4_options_len != 0 || static_cast<size_t>(end - p) < 10U)
+            return false;
+        write_ipv4_static_with_protocol(p, ctx, ctx.ipv4_protocol);
+        return true;
+    }
+    if(ctx.ip_version != 6 || ctx.ipv6_extension_len != 0 ||
+       ctx.ipv6_flow_label != 0 || static_cast<size_t>(end - p) < 34U)
+    {
+        return false;
+    }
+
+    // version_flag=1, innermost_ip=1, reserved=0, fl_zero=0, reserved=0000
+    *p++ = 0xC0;
+    *p++ = ctx.ipv6_next_header;
+    std::memcpy(p, ctx.ipv6_saddr.data(), ctx.ipv6_saddr.size());
+    p += ctx.ipv6_saddr.size();
+    std::memcpy(p, ctx.ipv6_daddr.data(), ctx.ipv6_daddr.size());
+    p += ctx.ipv6_daddr.size();
+    return true;
+}
+
+inline bool write_standard_ip_dynamic(uint8_t*& p,
+                                      const uint8_t* end,
+                                      const Context& ctx,
+                                      bool endpoint)
+{
+    if(ctx.ip_version == 6)
+    {
+        const size_t required = endpoint ? 5U : 2U;
+        if(ctx.ipv6_extension_len != 0 || static_cast<size_t>(end - p) < required)
+            return false;
+        *p++ = ctx.ipv6_traffic_class;
+        *p++ = ctx.ipv6_hop_limit;
+        if(endpoint)
+        {
+            *p++ = static_cast<uint8_t>(ctx.reorder_ratio & 0x03U);
+            write_u16(p, ctx.msn);
+        }
+        return true;
+    }
+    if(ctx.ip_version != 4 || ctx.ipv4_options_len != 0)
+        return false;
+
+    const uint8_t behavior = static_cast<uint8_t>(ctx.ipv4_id_behavior & 0x03U);
+    const bool id_present = behavior != 3U;
+    const size_t required = 3U + (id_present ? 2U : 0U) + (endpoint ? 2U : 0U);
+    if(static_cast<size_t>(end - p) < required)
+        return false;
+    const uint8_t df = static_cast<uint8_t>((ctx.ipv4_flags >> 1U) & 0x01U);
+    if(endpoint)
+        *p++ = static_cast<uint8_t>(((ctx.reorder_ratio & 0x03U) << 3U) | (df << 2U) | behavior);
+    else
+        *p++ = static_cast<uint8_t>((df << 2U) | behavior);
+    *p++ = ctx.ipv4_tos;
+    *p++ = ctx.ipv4_ttl;
+    if(id_present)
+        write_u16(p, ctx.ipv4_id);
+    if(endpoint)
+        write_u16(p, ctx.msn);
+    return true;
+}
+
+inline bool write_standard_udp_endpoint_dynamic(uint8_t*& p, const uint8_t* end, const Context& ctx)
+{
+    if(static_cast<size_t>(end - p) < 5U)
+        return false;
+    write_u16(p, ctx.udp_check);
+    write_u16(p, ctx.msn);
+    *p++ = static_cast<uint8_t>(ctx.reorder_ratio & 0x03U);
+    return true;
+}
+
+inline bool write_standard_esp_static(uint8_t*& p, const uint8_t* end, const Context& ctx)
+{
+    if(static_cast<size_t>(end - p) < 4U)
+        return false;
+    write_u32(p, ctx.esp_spi);
+    return true;
+}
+
+inline bool write_standard_esp_dynamic(uint8_t*& p, const uint8_t* end, const Context& ctx)
+{
+    if(static_cast<size_t>(end - p) < 5U)
+        return false;
+    write_u32(p, ctx.esp_sequence);
+    *p++ = static_cast<uint8_t>(ctx.reorder_ratio & 0x03U);
+    return true;
+}
+
+inline bool write_standard_rtp_dynamic(uint8_t*& p, const uint8_t* end, const Context& ctx)
+{
+    const uint8_t cc = static_cast<uint8_t>(ctx.rtp.vpxcc & 0x0FU);
+    const bool padding = (ctx.rtp.vpxcc & 0x20U) != 0;
+    const bool extension = (ctx.rtp.vpxcc & 0x10U) != 0;
+    if(cc != 0 || padding || extension || ctx.rtp.csrc_list_len != 0 ||
+       ctx.rtp.extension_len != 0 || ctx.rtp.padding_len != 0 ||
+       static_cast<size_t>(end - p) < 8U)
+    {
+        return false;
+    }
+    *p++ = static_cast<uint8_t>((ctx.reorder_ratio & 0x03U) << 5U);
+    *p++ = ctx.rtp.mpt;
+    write_u16(p, ctx.rtp.last_seq);
+    write_u32(p, ctx.rtp.last_ts);
+    return true;
+}
+
 inline bool write_ipv4_options_list(uint8_t*& p, const uint8_t* end, const Context& ctx)
 {
     if(ctx.ipv4_options_len == 0)

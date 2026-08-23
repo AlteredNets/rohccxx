@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 
 namespace
 {
@@ -86,9 +87,11 @@ bool emit_case(const ProfileSpec& profile,
         return false;
     if(parsed.cid != cid.cid || parsed.profile_id != profile.profile_id)
         return false;
-    if(packet[0] == 'i' && packet[1] == 'r' && packet[2] == '\0' && parsed.type != rohccxx::RohcPacketType::IR)
+    if(std::strcmp(packet, "ir") == 0 && parsed.type != rohccxx::RohcPacketType::IR)
         return false;
-    if(packet[0] == 'i' && packet[1] == 'r' && packet[2] == '_' && parsed.type != rohccxx::RohcPacketType::IR_DYN)
+    if(std::strcmp(packet, "ir_refresh") == 0 && parsed.type != rohccxx::RohcPacketType::IR)
+        return false;
+    if(std::strcmp(packet, "ir_dyn") == 0 && parsed.type != rohccxx::RohcPacketType::IR_DYN)
         return false;
 
     std::printf("case id=5225-%s-%s-current.cid-%s profile=%s packet=%s cid=%u cid_mode=%s rohc_len=%zu rohc=",
@@ -137,7 +140,11 @@ int main()
         {
             if(!emit_case(profile, cid, "ir", profile.emit_ir))
                 return 1;
-            if(!emit_case(profile, cid, "ir_dyn", profile.emit_ir_dyn))
+            const char* refresh_kind = profile.profile == rohccxx::Profile::RTP_UDP_Lite ||
+                                               profile.profile == rohccxx::Profile::UDP_Lite
+                                           ? "ir_dyn"
+                                           : "ir_refresh";
+            if(!emit_case(profile, cid, refresh_kind, profile.emit_ir_dyn))
                 return 1;
         }
     }

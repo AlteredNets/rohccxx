@@ -42,6 +42,30 @@ add_test(NAME interop_rohclib_to_rohcxx
     COMMAND sh -c "$<TARGET_FILE:rohclib_emit> | $<TARGET_FILE:rohccxx_decode>"
 )
 
+add_executable(rohccxx_rfc5225_interop rohccxx_rfc5225_interop.cpp)
+target_link_libraries(rohccxx_rfc5225_interop rohccxx)
+target_include_directories(rohccxx_rfc5225_interop PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/tests/unit
+)
+
+add_executable(rohclib_rfc5225_interop rohclib_rfc5225_interop.cpp)
+target_include_directories(rohclib_rfc5225_interop PRIVATE
+    ${PROJECT_SOURCE_DIR}/tests
+    ${PROJECT_SOURCE_DIR}/tests/unit
+    ${ROHC_LIB_INCLUDE_DIR}
+)
+target_link_libraries(rohclib_rfc5225_interop ${ROHC_LIB_ARCHIVE})
+add_dependencies(rohclib_rfc5225_interop rohc_lib)
+
+add_test(NAME interop_rfc5225_rohccxx_to_rohclib
+    COMMAND sh -c "$<TARGET_FILE:rohccxx_rfc5225_interop> emit | $<TARGET_FILE:rohclib_rfc5225_interop> decode"
+)
+
+add_test(NAME interop_rfc5225_rohclib_to_rohccxx
+    COMMAND sh -c "$<TARGET_FILE:rohclib_rfc5225_interop> emit | $<TARGET_FILE:rohccxx_rfc5225_interop> decode"
+)
+
 add_executable(rohccxx_oracle_corpus rohccxx_oracle_corpus.cpp)
 target_link_libraries(rohccxx_oracle_corpus rohccxx)
 target_include_directories(rohccxx_oracle_corpus PRIVATE

@@ -28,6 +28,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <array>
+#include <algorithm>
 
 namespace
 {
@@ -42,6 +44,8 @@ rohccxx::Context grammar_context(rohccxx::Profile profile, std::uint8_t protocol
     ctx.ipv4_ttl = 63;
     ctx.ipv4_id = 0x1234;
     ctx.ipv4_flags = 0x02;
+    ctx.ipv4_id_behavior = 0;
+    ctx.ipv4_id_sequential = true;
     ctx.ipv4_protocol = protocol;
     ctx.ipv4_saddr = 0xC0000201;
     ctx.ipv4_daddr = 0xC6336402;
@@ -54,6 +58,10 @@ rohccxx::Context grammar_context(rohccxx::Profile profile, std::uint8_t protocol
     ctx.rtp.last_seq = 0x2345;
     ctx.rtp.last_ts = 0x01020304;
     ctx.rtp.ssrc = 0x11223344;
+    ctx.msn = ctx.rtp.last_seq;
+    ctx.udp_checksum_used = true;
+    ctx.esp_spi = 0xDEADBEEF;
+    ctx.esp_sequence = 0x00002345;
     return ctx;
 }
 
@@ -127,6 +135,23 @@ void require_ipv4_dynamic(const std::uint8_t* packet, size_t pos, const rohccxx:
     REQUIRE(packet[pos + 5] == rohccxx::rfc5225::generic_extension_list_empty);
 }
 
+void require_standard_ipv4_dynamic(const std::uint8_t* packet,
+                                   size_t pos,
+                                   const rohccxx::Context& ctx,
+                                   bool endpoint)
+{
+    const std::uint8_t expected = static_cast<std::uint8_t>(
+        (endpoint ? ((ctx.reorder_ratio & 0x03U) << 3U) : 0U) |
+        (((ctx.ipv4_flags >> 1U) & 0x01U) << 2U) |
+        (ctx.ipv4_id_behavior & 0x03U));
+    REQUIRE(packet[pos] == expected);
+    REQUIRE(packet[pos + 1] == ctx.ipv4_tos);
+    REQUIRE(packet[pos + 2] == ctx.ipv4_ttl);
+    REQUIRE(read_u16(packet + pos + 3) == ctx.ipv4_id);
+    if(endpoint)
+        REQUIRE(read_u16(packet + pos + 5) == ctx.msn);
+}
+
 void require_udp_dynamic(const std::uint8_t* packet, size_t pos, const rohccxx::Context& ctx)
 {
     REQUIRE(read_u16(packet + pos) == ctx.udp_check);
@@ -139,6 +164,14 @@ void require_udp_lite_dynamic(const std::uint8_t* packet, size_t pos, const rohc
 }
 
 void require_rtp_dynamic(const std::uint8_t* packet, size_t pos, const rohccxx::Context& ctx)
+{
+    REQUIRE(packet[pos] == static_cast<std::uint8_t>((ctx.reorder_ratio & 0x03U) << 5U));
+    REQUIRE(packet[pos + 1] == ctx.rtp.mpt);
+    REQUIRE(read_u16(packet + pos + 2) == ctx.rtp.last_seq);
+    REQUIRE(read_u32(packet + pos + 4) == ctx.rtp.last_ts);
+}
+
+void require_legacy_rtp_dynamic(const std::uint8_t* packet, size_t pos, const rohccxx::Context& ctx)
 {
     REQUIRE(packet[pos] == ctx.rtp.vpxcc);
     REQUIRE(packet[pos + 1] == ctx.rtp.mpt);
@@ -166,13 +199,65 @@ struct GrammarProfileCase
 };
 
 const GrammarProfileCase grammar_profile_cases[] = {
-    {rohccxx::Profile::RTP, 17, 0x01, false, rohccxx::emit_ir_rtp, rohccxx::emit_ir_dyn_rtp, rohccxx::decode_ir_rtp, rohccxx::decode_ir_dyn_rtp},
-    {rohccxx::Profile::UDP, 17, 0x02, false, rohccxx::emit_ir_udp, rohccxx::emit_ir_dyn_udp, rohccxx::decode_ir_udp, rohccxx::decode_ir_dyn_udp},
-    {rohccxx::Profile::ESP, 50, 0x03, false, rohccxx::emit_ir_esp, rohccxx::emit_ir_dyn_esp, rohccxx::decode_ir_esp, rohccxx::decode_ir_dyn_esp},
-    {rohccxx::Profile::IP, 6, 0x04, false, rohccxx::emit_ir_ip, rohccxx::emit_ir_dyn_ip, rohccxx::decode_ir_ip, rohccxx::decode_ir_dyn_ip},
+    {rohccxx::Profile::RTP, 17, 0x01, false, rohccxx::emit_ir_rtp, rohccxx::emit_ir_dyn_rtp, rohccxx::decode_ir_rtp, rohccxx::decode_ir_rtp},
+    {rohccxx::Profile::UDP, 17, 0x02, false, rohccxx::emit_ir_udp, rohccxx::emit_ir_dyn_udp, rohccxx::decode_ir_udp, rohccxx::decode_ir_udp},
+    {rohccxx::Profile::ESP, 50, 0x03, false, rohccxx::emit_ir_esp, rohccxx::emit_ir_dyn_esp, rohccxx::decode_ir_esp, rohccxx::decode_ir_esp},
+    {rohccxx::Profile::IP, 6, 0x04, false, rohccxx::emit_ir_ip, rohccxx::emit_ir_dyn_ip, rohccxx::decode_ir_ip, rohccxx::decode_ir_ip},
     {rohccxx::Profile::RTP_UDP_Lite, 136, 0x07, true, rohccxx::emit_ir_rtp_udp_lite, rohccxx::emit_ir_dyn_rtp_udp_lite, rohccxx::decode_ir_rtp_udp_lite, rohccxx::decode_ir_dyn_rtp_udp_lite},
     {rohccxx::Profile::UDP_Lite, 136, 0x08, true, rohccxx::emit_ir_udp_lite, rohccxx::emit_ir_dyn_udp_lite, rohccxx::decode_ir_udp_lite, rohccxx::decode_ir_dyn_udp_lite},
 };
+
+size_t emit_legacy_ir_fixture(std::uint8_t* out,
+                              size_t capacity,
+                              const rohccxx::Context& ctx,
+                              std::uint8_t profile_id)
+{
+    REQUIRE(capacity >= 256U);
+    std::uint8_t* p = out;
+    *p++ = 0xFD;
+    *p++ = profile_id;
+    std::uint8_t* crc = p++;
+    rohccxx::rfc5225::write_ip_static_with_protocol(p, ctx, ctx.ipv4_protocol);
+    if(ctx.profile == rohccxx::Profile::UDP || ctx.profile == rohccxx::Profile::UDP_Lite ||
+       ctx.profile == rohccxx::Profile::RTP || ctx.profile == rohccxx::Profile::RTP_UDP_Lite)
+        rohccxx::rfc5225::write_udp_static(p, ctx);
+    if(ctx.profile == rohccxx::Profile::RTP || ctx.profile == rohccxx::Profile::RTP_UDP_Lite)
+        rohccxx::rfc5225::write_rtp_static(p, ctx);
+    rohccxx::rfc5225::write_ip_dynamic(p, ctx);
+    if(ctx.profile == rohccxx::Profile::UDP || ctx.profile == rohccxx::Profile::RTP)
+        rohccxx::rfc5225::write_udp_dynamic(p, ctx);
+    else if(ctx.profile == rohccxx::Profile::UDP_Lite || ctx.profile == rohccxx::Profile::RTP_UDP_Lite)
+        rohccxx::rfc5225::write_udp_lite_dynamic(p, ctx);
+    if(ctx.profile == rohccxx::Profile::RTP || ctx.profile == rohccxx::Profile::RTP_UDP_Lite)
+        REQUIRE(rohccxx::rfc5225::write_rtp_dynamic(p, out + capacity, ctx));
+    *crc = rohccxx::utils::crc8(out, static_cast<size_t>(p - out));
+    *p++ = static_cast<std::uint8_t>(static_cast<std::uint8_t>(ctx.mode) << 2U);
+    return static_cast<size_t>(p - out);
+}
+
+bool decode_legacy_fixture(const GrammarProfileCase& item,
+                           const std::uint8_t* packet,
+                           size_t packet_len,
+                           rohccxx::Context& ctx)
+{
+    switch(item.profile)
+    {
+    case rohccxx::Profile::RTP:
+        return rohccxx::decode_ir_rtp_legacy(packet, packet_len, ctx, nullptr);
+    case rohccxx::Profile::UDP:
+        return rohccxx::decode_ir_udp_legacy(packet, packet_len, ctx, nullptr);
+    case rohccxx::Profile::ESP:
+        return rohccxx::decode_ir_esp_legacy(packet, packet_len, ctx, nullptr);
+    case rohccxx::Profile::IP:
+        return rohccxx::decode_ir_ip_legacy(packet, packet_len, ctx, nullptr);
+    case rohccxx::Profile::RTP_UDP_Lite:
+        return rohccxx::decode_ir_rtp_udp_lite_legacy(packet, packet_len, ctx, nullptr);
+    case rohccxx::Profile::UDP_Lite:
+        return rohccxx::decode_ir_udp_lite_legacy(packet, packet_len, ctx, nullptr);
+    default:
+        return false;
+    }
+}
 
 enum class CoDecoderKind
 {
@@ -846,27 +931,26 @@ TEST_CASE("RFC 5225 RTP packet grammar is pinned for current IR IR-DYN and FO")
     std::uint8_t out[128] = {};
     size_t len = sizeof(out);
     REQUIRE(rohccxx::emit_ir_rtp(out, &len, ctx));
-    REQUIRE(len == 39);
+    REQUIRE(len == 36);
     REQUIRE(out[0] == 0xFD);
     REQUIRE(out[1] == 0x01);
-    require_crc8_at(out, 38, 2);
+    require_crc8_at(out, len, 2);
     require_ipv4_static(out, 3, ctx, 17);
     require_udp_static(out, 13, ctx);
     REQUIRE(read_u32(out + 17) == ctx.rtp.ssrc);
-    require_ipv4_dynamic(out, 21, ctx);
-    require_udp_dynamic(out, 27, ctx);
-    require_rtp_dynamic(out, 29, ctx);
-    require_mode_byte(out, 38, ctx);
+    require_standard_ipv4_dynamic(out, 21, ctx, false);
+    require_udp_dynamic(out, 26, ctx);
+    require_rtp_dynamic(out, 28, ctx);
 
     len = sizeof(out);
     REQUIRE(rohccxx::emit_ir_dyn_rtp(out, &len, ctx));
-    REQUIRE(len == 20);
-    REQUIRE(out[0] == 0xF8);
+    REQUIRE(len == 36);
+    REQUIRE(out[0] == 0xFD);
     REQUIRE(out[1] == 0x01);
     require_crc8_at(out, len, 2);
-    require_ipv4_dynamic(out, 3, ctx);
-    require_udp_dynamic(out, 9, ctx);
-    require_rtp_dynamic(out, 11, ctx);
+    require_standard_ipv4_dynamic(out, 21, ctx, false);
+    require_udp_dynamic(out, 26, ctx);
+    require_rtp_dynamic(out, 28, ctx);
 
     len = sizeof(out);
     REQUIRE(rohccxx::emit_rtp_fo(out, &len, ctx));
@@ -1155,40 +1239,17 @@ TEST_CASE("RFC 5225 RTP extras list compression preserves CSRC extension and pad
     REQUIRE_FALSE(rohccxx::rfc5225::write_rtp_extras_list(p, out + sizeof(out), bad_padding));
 }
 
-TEST_CASE("RFC 5225 RTP IR and IR-DYN carry non-empty CSRC extension and padding lists")
+TEST_CASE("RFC 5225 IR emitters reject unsupported RTP list features instead of emitting private chains")
 {
     rohccxx::Context ctx = grammar_context(rohccxx::Profile::RTP, 17);
     configure_rtp_csrc_extension_padding(ctx);
 
     std::uint8_t out[256] = {};
     size_t len = sizeof(out);
-    REQUIRE(rohccxx::emit_ir_rtp(out, &len, ctx));
-    REQUIRE(len > 39);
-    rohccxx::Context decoded = grammar_context(rohccxx::Profile::RTP, 17);
-    size_t consumed = 0;
-    REQUIRE(rohccxx::decode_ir_rtp(out, len, decoded, &consumed));
-    REQUIRE(consumed == len);
-    REQUIRE(decoded.rtp.vpxcc == ctx.rtp.vpxcc);
-    require_rtp_extras_equal(ctx, decoded);
+    REQUIRE_FALSE(rohccxx::emit_ir_rtp(out, &len, ctx));
 
     len = sizeof(out);
-    REQUIRE(rohccxx::emit_ir_dyn_rtp(out, &len, ctx));
-    REQUIRE(len > 20);
-    decoded = grammar_context(rohccxx::Profile::RTP, 17);
-    consumed = 0;
-    REQUIRE(rohccxx::decode_ir_dyn_rtp(out, len, decoded, &consumed));
-    REQUIRE(consumed == len);
-    REQUIRE(decoded.rtp.vpxcc == ctx.rtp.vpxcc);
-    require_rtp_extras_equal(ctx, decoded);
-
-    std::uint8_t mutated[256] = {};
-    std::memcpy(mutated, out, len);
-    const size_t rtp_dynamic_pos = 11;
-    mutated[rtp_dynamic_pos + 9U] ^= 0x01U;
-    mutated[2] = 0;
-    mutated[2] = rohccxx::utils::crc8(mutated, len);
-    decoded = grammar_context(rohccxx::Profile::RTP, 17);
-    REQUIRE_FALSE(rohccxx::decode_ir_dyn_rtp(mutated, len, decoded, &consumed));
+    REQUIRE_FALSE(rohccxx::emit_ir_dyn_rtp(out, &len, ctx));
 }
 
 TEST_CASE("RFC 5225 UDP packet grammar is pinned for current IR IR-DYN and FO")
@@ -1197,24 +1258,25 @@ TEST_CASE("RFC 5225 UDP packet grammar is pinned for current IR IR-DYN and FO")
     std::uint8_t out[128] = {};
     size_t len = sizeof(out);
     REQUIRE(rohccxx::emit_ir_udp(out, &len, ctx));
-    REQUIRE(len == 26);
+    REQUIRE(len == 27);
     REQUIRE(out[0] == 0xFD);
     REQUIRE(out[1] == 0x02);
-    require_crc8_at(out, 25, 2);
+    require_crc8_at(out, len, 2);
     require_ipv4_static(out, 3, ctx, 17);
     require_udp_static(out, 13, ctx);
-    require_ipv4_dynamic(out, 17, ctx);
-    require_udp_dynamic(out, 23, ctx);
-    require_mode_byte(out, 25, ctx);
+    require_standard_ipv4_dynamic(out, 17, ctx, false);
+    require_udp_dynamic(out, 22, ctx);
+    REQUIRE(read_u16(out + 24) == ctx.msn);
+    REQUIRE(out[26] == ctx.reorder_ratio);
 
     len = sizeof(out);
     REQUIRE(rohccxx::emit_ir_dyn_udp(out, &len, ctx));
-    REQUIRE(len == 11);
-    REQUIRE(out[0] == 0xF8);
+    REQUIRE(len == 27);
+    REQUIRE(out[0] == 0xFD);
     REQUIRE(out[1] == 0x02);
     require_crc8_at(out, len, 2);
-    require_ipv4_dynamic(out, 3, ctx);
-    require_udp_dynamic(out, 9, ctx);
+    require_standard_ipv4_dynamic(out, 17, ctx, false);
+    require_udp_dynamic(out, 22, ctx);
 
     len = sizeof(out);
     REQUIRE(rohccxx::emit_udp_fo(out, &len, ctx));
@@ -1234,18 +1296,17 @@ TEST_CASE("RFC 5225 IP-only packet grammar is pinned for current IR IR-DYN and F
     REQUIRE(len == 20);
     REQUIRE(out[0] == 0xFD);
     REQUIRE(out[1] == 0x04);
-    require_crc8_at(out, 19, 2);
+    require_crc8_at(out, len, 2);
     require_ipv4_static(out, 3, ctx, 6);
-    require_ipv4_dynamic(out, 13, ctx);
-    require_mode_byte(out, 19, ctx);
+    require_standard_ipv4_dynamic(out, 13, ctx, true);
 
     len = sizeof(out);
     REQUIRE(rohccxx::emit_ir_dyn_ip(out, &len, ctx));
-    REQUIRE(len == 9);
-    REQUIRE(out[0] == 0xF8);
+    REQUIRE(len == 20);
+    REQUIRE(out[0] == 0xFD);
     REQUIRE(out[1] == 0x04);
     require_crc8_at(out, len, 2);
-    require_ipv4_dynamic(out, 3, ctx);
+    require_standard_ipv4_dynamic(out, 13, ctx, true);
 
     len = sizeof(out);
     REQUIRE(rohccxx::emit_ip_fo(out, &len, ctx));
@@ -1261,21 +1322,24 @@ TEST_CASE("RFC 5225 ESP packet grammar is pinned for current IR IR-DYN and FO")
     std::uint8_t out[128] = {};
     size_t len = sizeof(out);
     REQUIRE(rohccxx::emit_ir_esp(out, &len, ctx));
-    REQUIRE(len == 20);
+    REQUIRE(len == 27);
     REQUIRE(out[0] == 0xFD);
     REQUIRE(out[1] == 0x03);
-    require_crc8_at(out, 19, 2);
+    require_crc8_at(out, len, 2);
     require_ipv4_static(out, 3, ctx, 50);
-    require_ipv4_dynamic(out, 13, ctx);
-    require_mode_byte(out, 19, ctx);
+    REQUIRE(read_u32(out + 13) == ctx.esp_spi);
+    require_standard_ipv4_dynamic(out, 17, ctx, false);
+    REQUIRE(read_u32(out + 22) == ctx.esp_sequence);
+    REQUIRE(out[26] == ctx.reorder_ratio);
 
     len = sizeof(out);
     REQUIRE(rohccxx::emit_ir_dyn_esp(out, &len, ctx));
-    REQUIRE(len == 9);
-    REQUIRE(out[0] == 0xF8);
+    REQUIRE(len == 27);
+    REQUIRE(out[0] == 0xFD);
     REQUIRE(out[1] == 0x03);
     require_crc8_at(out, len, 2);
-    require_ipv4_dynamic(out, 3, ctx);
+    REQUIRE(read_u32(out + 13) == ctx.esp_spi);
+    require_standard_ipv4_dynamic(out, 17, ctx, false);
 
     len = sizeof(out);
     REQUIRE(rohccxx::emit_esp_fo(out, &len, ctx));
@@ -1301,7 +1365,7 @@ TEST_CASE("RFC 5225 RTP UDP-Lite packet grammar is pinned for current IR IR-DYN 
     REQUIRE(read_u32(out + 17) == ctx.rtp.ssrc);
     require_ipv4_dynamic(out, 21, ctx);
     require_udp_lite_dynamic(out, 27, ctx);
-    require_rtp_dynamic(out, 31, ctx);
+    require_legacy_rtp_dynamic(out, 31, ctx);
     require_mode_byte(out, 40, ctx);
 
     len = sizeof(out);
@@ -1312,7 +1376,7 @@ TEST_CASE("RFC 5225 RTP UDP-Lite packet grammar is pinned for current IR IR-DYN 
     require_crc8_at(out, len, 2);
     require_ipv4_dynamic(out, 3, ctx);
     require_udp_lite_dynamic(out, 9, ctx);
-    require_rtp_dynamic(out, 13, ctx);
+    require_legacy_rtp_dynamic(out, 13, ctx);
 
     len = sizeof(out);
     REQUIRE(rohccxx::emit_rtp_fo(out, &len, ctx));
@@ -1380,10 +1444,10 @@ TEST_CASE("RFC 5225 Add-CID grammar pins CRC coverage for current IR and IR-DYN 
     };
 
     const AddCidCase cases[] = {
-        {rohccxx::Profile::RTP, 17, 0x01, 40, 39, 21, rohccxx::emit_ir_rtp, rohccxx::emit_ir_dyn_rtp},
-        {rohccxx::Profile::UDP, 17, 0x02, 27, 26, 12, rohccxx::emit_ir_udp, rohccxx::emit_ir_dyn_udp},
-        {rohccxx::Profile::ESP, 50, 0x03, 21, 20, 10, rohccxx::emit_ir_esp, rohccxx::emit_ir_dyn_esp},
-        {rohccxx::Profile::IP, 6, 0x04, 21, 20, 10, rohccxx::emit_ir_ip, rohccxx::emit_ir_dyn_ip},
+        {rohccxx::Profile::RTP, 17, 0x01, 37, 37, 37, rohccxx::emit_ir_rtp, rohccxx::emit_ir_dyn_rtp},
+        {rohccxx::Profile::UDP, 17, 0x02, 28, 28, 28, rohccxx::emit_ir_udp, rohccxx::emit_ir_dyn_udp},
+        {rohccxx::Profile::ESP, 50, 0x03, 28, 28, 28, rohccxx::emit_ir_esp, rohccxx::emit_ir_dyn_esp},
+        {rohccxx::Profile::IP, 6, 0x04, 21, 21, 21, rohccxx::emit_ir_ip, rohccxx::emit_ir_dyn_ip},
         {rohccxx::Profile::RTP_UDP_Lite, 136, 0x07, 42, 41, 23, rohccxx::emit_ir_rtp_udp_lite, rohccxx::emit_ir_dyn_rtp_udp_lite},
         {rohccxx::Profile::UDP_Lite, 136, 0x08, 29, 28, 14, rohccxx::emit_ir_udp_lite, rohccxx::emit_ir_dyn_udp_lite},
     };
@@ -1401,7 +1465,8 @@ TEST_CASE("RFC 5225 Add-CID grammar pins CRC coverage for current IR and IR-DYN 
         REQUIRE(out[1] == 0xFD);
         REQUIRE(out[2] == item.profile_id);
         require_crc8_at(out, item.ir_crc_len, 3);
-        require_mode_byte(out, len - 1, ctx);
+        if(item.profile == rohccxx::Profile::RTP_UDP_Lite || item.profile == rohccxx::Profile::UDP_Lite)
+            require_mode_byte(out, len - 1, ctx);
 
         rohccxx::ParsedRohcPacket parsed{};
         REQUIRE(rohccxx::parse_rohc_packet(out, len, parsed));
@@ -1417,14 +1482,19 @@ TEST_CASE("RFC 5225 Add-CID grammar pins CRC coverage for current IR and IR-DYN 
         REQUIRE(item.emit_ir_dyn(out, &len, ctx));
         REQUIRE(len == item.ir_dyn_len);
         REQUIRE(out[0] == 0xE5);
-        REQUIRE(out[1] == 0xF8);
+        const bool standardized_refresh = item.profile == rohccxx::Profile::RTP ||
+                                          item.profile == rohccxx::Profile::UDP ||
+                                          item.profile == rohccxx::Profile::ESP ||
+                                          item.profile == rohccxx::Profile::IP;
+        REQUIRE(out[1] == (standardized_refresh ? 0xFD : 0xF8));
         REQUIRE(out[2] == item.profile_id);
         require_crc8_at(out, len, 3);
 
         REQUIRE(rohccxx::parse_rohc_packet(out, len, parsed));
         REQUIRE(parsed.has_add_cid);
         REQUIRE(parsed.cid == 5);
-        REQUIRE(parsed.type == rohccxx::RohcPacketType::IR_DYN);
+        REQUIRE(parsed.type == (standardized_refresh ? rohccxx::RohcPacketType::IR
+                                                    : rohccxx::RohcPacketType::IR_DYN));
         REQUIRE(parsed.profile_id == item.profile_id);
         REQUIRE(parsed.packet == out + 1);
         REQUIRE(rohccxx::decoder_packet_start(parsed) == out);
@@ -1530,11 +1600,14 @@ TEST_CASE("RFC 5225 generated CID cases cover IR and IR-DYN boundaries")
 
             len = sizeof(out);
             REQUIRE(profile.emit_ir_dyn(out, &len, ctx));
-            const std::uint8_t expected_ir_dyn_first = cid_case.large_cid ? 0xF8 :
-                (cid_case.cid == 0 ? 0xF8 : static_cast<std::uint8_t>(0xE0U | cid_case.cid));
+            const bool standardized_refresh = !profile.carries_udp_lite;
+            const std::uint8_t refresh_type = standardized_refresh ? 0xFDU : 0xF8U;
+            const std::uint8_t expected_ir_dyn_first = cid_case.large_cid ? refresh_type :
+                (cid_case.cid == 0 ? refresh_type : static_cast<std::uint8_t>(0xE0U | cid_case.cid));
             REQUIRE(out[0] == expected_ir_dyn_first);
             REQUIRE(rohccxx::parse_rohc_packet(out, len, parsed, cid_case.large_cid));
-            REQUIRE(parsed.type == rohccxx::RohcPacketType::IR_DYN);
+            REQUIRE(parsed.type == (standardized_refresh ? rohccxx::RohcPacketType::IR
+                                                        : rohccxx::RohcPacketType::IR_DYN));
             REQUIRE(parsed.profile_id == profile.profile_id);
             REQUIRE(parsed.cid == cid_case.cid);
             REQUIRE(parsed.cid_len == cid_case.expected_cid_len);
@@ -2501,4 +2574,239 @@ TEST_CASE("RFC 5225 CID encoders reject out-of-range and malformed CID forms")
     REQUIRE(rohccxx::cid::read_large(minimal_128, sizeof(minimal_128), value, consumed));
     REQUIRE(value == 0x80);
     REQUIRE(consumed == 2);
+}
+
+TEST_CASE("RFC 5225 IR compatibility parser preserves exact legacy migration boundaries")
+{
+    const std::uint8_t legacy_rtp[] = {
+        0xFD, 0x01, 0x9D, 0x40, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x12, 0x34, 0x56, 0x78, 0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x40, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x03, 0xE8, 0x00, 0x00, 0x04,
+        0xD2, 0x00, 0x04
+    };
+
+    rohccxx::Context decoded{};
+    size_t consumed = 0;
+    REQUIRE(rohccxx::decode_ir_rtp(legacy_rtp, sizeof(legacy_rtp), decoded, &consumed));
+    REQUIRE(consumed == sizeof(legacy_rtp));
+    REQUIRE(decoded.rtp.last_seq == 1000);
+    REQUIRE(decoded.rtp.last_ts == 1234);
+    REQUIRE(decoded.rtp.ssrc == 0xCAFEBABEU);
+
+    for(size_t len = 0; len < sizeof(legacy_rtp); ++len)
+    {
+        rohccxx::Context unchanged{};
+        unchanged.cid = 0;
+        unchanged.ipv4_id = 0xBEEF;
+        REQUIRE_FALSE(rohccxx::decode_ir_rtp(legacy_rtp, len, unchanged));
+        REQUIRE(unchanged.ipv4_id == 0xBEEF);
+        REQUIRE(unchanged.rohc_state == rohccxx::RohcState::NoContext);
+    }
+
+    std::uint8_t bad_crc[sizeof(legacy_rtp)] = {};
+    std::memcpy(bad_crc, legacy_rtp, sizeof(bad_crc));
+    bad_crc[2] ^= 0x01;
+    rohccxx::Context unchanged{};
+    unchanged.ipv4_id = 0xBEEF;
+    REQUIRE_FALSE(rohccxx::decode_ir_rtp(bad_crc, sizeof(bad_crc), unchanged));
+    REQUIRE(unchanged.ipv4_id == 0xBEEF);
+    REQUIRE(unchanged.rohc_state == rohccxx::RohcState::NoContext);
+}
+
+TEST_CASE("RFC 5225 IR compatibility parser fails closed on dual-format ambiguity")
+{
+    rohccxx::Context source = grammar_context(rohccxx::Profile::UDP, 17);
+    std::uint8_t packet[128] = {};
+    size_t packet_len = sizeof(packet);
+    REQUIRE(rohccxx::emit_ir_udp(packet, &packet_len, source));
+
+    const auto conflicting_legacy = [](const std::uint8_t*, size_t len,
+                                       rohccxx::Context& ctx, size_t* consumed) {
+        ctx.profile = rohccxx::Profile::UDP;
+        ctx.ipv4_id = 0xCAFE;
+        if(consumed) *consumed = len;
+        return true;
+    };
+    rohccxx::Context unchanged{};
+    unchanged.ipv4_id = 0xBEEF;
+    REQUIRE_FALSE(rohccxx::detail::decode_ir_compatible(
+        packet, packet_len, unchanged, rohccxx::Profile::UDP, 0x02,
+        conflicting_legacy, nullptr));
+    REQUIRE(unchanged.ipv4_id == 0xBEEF);
+    REQUIRE(unchanged.rohc_state == rohccxx::RohcState::NoContext);
+}
+
+TEST_CASE("RFC 5225 real standard and legacy parsers fail closed on semantic ambiguity")
+{
+    const auto& item = grammar_profile_cases[3];
+    rohccxx::Context source = grammar_context(item.profile, item.protocol);
+    source.msn = 0x4104; // legacy: one-byte options list containing 0x04
+    std::array<std::uint8_t, 256> packet{};
+    size_t packet_len = packet.size();
+    REQUIRE(item.emit_ir(packet.data(), &packet_len, source));
+    packet[packet_len++] = 0x04; // legacy O-mode; standard parser sees payload
+    rohccxx::Context legacy{};
+    size_t legacy_len = 0;
+    REQUIRE(rohccxx::decode_ir_ip_legacy(packet.data(), packet_len, legacy, &legacy_len));
+    rohccxx::Context standard{};
+    size_t standard_len = 0;
+    REQUIRE(rohccxx::detail::decode_ir_standard(packet.data(), packet_len, standard,
+                                                item.profile, item.profile_id, &standard_len));
+    REQUIRE((standard_len != legacy_len ||
+             !rohccxx::detail::standard_context_equal(standard, legacy)));
+    rohccxx::Context unchanged{};
+    unchanged.ipv4_id = 0xBEEF;
+    const rohccxx::Context before = unchanged;
+    REQUIRE_FALSE(rohccxx::decode_ir_ip(packet.data(), packet_len, unchanged));
+    REQUIRE(rohccxx::detail::standard_context_equal(unchanged, before));
+}
+
+TEST_CASE("RFC 5225 IR emitters preserve undersized destinations for every profile and CID mode")
+{
+    for(const auto& item : grammar_profile_cases)
+    {
+        for(const bool large_cid : {false, true})
+        {
+            rohccxx::Context ctx = grammar_context(item.profile, item.protocol);
+            ctx.large_cid = large_cid;
+            ctx.cid = large_cid ? 128U : 5U;
+            for(const auto emitter : {item.emit_ir, item.emit_ir_dyn})
+            {
+                std::array<std::uint8_t, 512> complete{};
+                size_t complete_len = complete.size();
+                REQUIRE(emitter(complete.data(), &complete_len, ctx));
+                for(size_t capacity = 0; capacity < complete_len; ++capacity)
+                {
+                    std::array<std::uint8_t, 512> guarded{};
+                    guarded.fill(0xA5);
+                    size_t attempted_len = capacity;
+                    REQUIRE_FALSE(emitter(guarded.data(), &attempted_len, ctx));
+                    REQUIRE(attempted_len == capacity);
+                    REQUIRE(std::all_of(guarded.begin(), guarded.end(),
+                                        [](std::uint8_t value) { return value == 0xA5; }));
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("RFC 5225 legacy UDP-Lite into emitters are directly capacity safe")
+{
+    using Emitter = bool (*)(std::uint8_t*, size_t*, const rohccxx::Context&);
+    struct Case
+    {
+        rohccxx::Profile profile;
+        std::uint8_t protocol;
+        Emitter emitter;
+    };
+    const Case cases[] = {
+        {rohccxx::Profile::UDP_Lite, 136, rohccxx::emit_ir_udp_lite_into},
+        {rohccxx::Profile::RTP_UDP_Lite, 136, rohccxx::emit_ir_rtp_udp_lite_into},
+        {rohccxx::Profile::UDP_Lite, 136, rohccxx::emit_ir_dyn_udp_lite_into},
+        {rohccxx::Profile::RTP_UDP_Lite, 136, rohccxx::emit_ir_dyn_rtp_udp_lite_into},
+    };
+
+    for(const auto& item : cases)
+    {
+        rohccxx::Context ctx = grammar_context(item.profile, item.protocol);
+        std::array<std::uint8_t, 512> complete{};
+        size_t complete_len = complete.size();
+        REQUIRE(item.emitter(complete.data(), &complete_len, ctx));
+        for(size_t capacity = 0; capacity < complete_len; ++capacity)
+        {
+            std::array<std::uint8_t, 512> guarded{};
+            guarded.fill(0xA5);
+            size_t attempted_len = capacity;
+            REQUIRE_FALSE(item.emitter(guarded.data(), &attempted_len, ctx));
+            REQUIRE(attempted_len == capacity);
+            REQUIRE(std::all_of(guarded.begin(), guarded.end(),
+                                [](std::uint8_t value) { return value == 0xA5; }));
+        }
+    }
+}
+
+TEST_CASE("RFC 5225 payload boundary helper rejects invalid consumed lengths")
+{
+    const std::array<std::uint8_t, 4> packet = {1, 2, 3, 4};
+    const std::uint8_t* payload = packet.data();
+    size_t payload_len = 99;
+    REQUIRE_FALSE(rohccxx::detail::payload_after_header(packet.data(), packet.size(),
+                                                        packet.size() + 1U,
+                                                        payload, payload_len));
+    REQUIRE(payload == packet.data());
+    REQUIRE(payload_len == 99);
+    REQUIRE(rohccxx::detail::payload_after_header(packet.data(), packet.size(),
+                                                  packet.size(), payload, payload_len));
+    REQUIRE(payload == packet.data() + packet.size());
+    REQUIRE(payload_len == 0);
+}
+
+TEST_CASE("RFC 5225 legacy profile parsers reject IPv4 and IPv6 truncation at every boundary")
+{
+    for(const auto& item : grammar_profile_cases)
+    {
+        for(const std::uint8_t ip_version : {std::uint8_t{4}, std::uint8_t{6}})
+        {
+            CAPTURE(item.profile, ip_version);
+            rohccxx::Context source = grammar_context(item.profile, item.protocol);
+            source.ip_version = ip_version;
+            source.ipv6_next_header = item.protocol;
+            source.ipv6_traffic_class = 0x2A;
+            source.ipv6_flow_label = 0x12345;
+            source.ipv6_hop_limit = 61;
+            for(size_t i = 0; i < source.ipv6_saddr.size(); ++i)
+            {
+                source.ipv6_saddr[i] = static_cast<std::uint8_t>(i);
+                source.ipv6_daddr[i] = static_cast<std::uint8_t>(0xF0U + i);
+            }
+            std::array<std::uint8_t, 256> packet{};
+            const size_t packet_len = emit_legacy_ir_fixture(packet.data(), packet.size(), source, item.profile_id);
+            rohccxx::Context decoded{};
+            REQUIRE(decode_legacy_fixture(item, packet.data(), packet_len, decoded));
+            for(size_t len = 0; len < packet_len; ++len)
+            {
+                rohccxx::Context unchanged{};
+                unchanged.cid = 0xCAFE;
+                unchanged.ipv4_id = 0xBEEF;
+                const rohccxx::Context before = unchanged;
+                REQUIRE_FALSE(item.decode_ir(packet.data(), len, unchanged, nullptr));
+                REQUIRE(rohccxx::detail::standard_context_equal(unchanged, before));
+            }
+        }
+    }
+}
+
+TEST_CASE("RFC 5225 legacy IR mode and terminal protocol validation is strict and context preserving")
+{
+    for(const auto& item : grammar_profile_cases)
+    {
+        CAPTURE(item.profile);
+        rohccxx::Context source = grammar_context(item.profile, item.protocol);
+        std::array<std::uint8_t, 256> packet{};
+        const size_t packet_len = emit_legacy_ir_fixture(packet.data(), packet.size(), source, item.profile_id);
+        for(const std::uint8_t invalid_mode : {std::uint8_t{0x00}, std::uint8_t{0x0C},
+                                               std::uint8_t{0x05}, std::uint8_t{0xF4}})
+        {
+            packet[packet_len - 1U] = invalid_mode;
+            rohccxx::Context unchanged{};
+            unchanged.ipv4_id = 0xBEEF;
+            const rohccxx::Context before = unchanged;
+            REQUIRE_FALSE(item.decode_ir(packet.data(), packet_len, unchanged, nullptr));
+            REQUIRE(rohccxx::detail::standard_context_equal(unchanged, before));
+        }
+
+        if(item.profile != rohccxx::Profile::IP)
+        {
+            packet = {};
+            const size_t contradictory_len = emit_legacy_ir_fixture(packet.data(), packet.size(), source, item.profile_id);
+            packet[4] = static_cast<std::uint8_t>(item.protocol ^ 0x01U);
+            packet[2] = 0;
+            packet[2] = rohccxx::utils::crc8(packet.data(), contradictory_len - 1U);
+            rohccxx::Context unchanged{};
+            unchanged.ipv4_id = 0xBEEF;
+            const rohccxx::Context before = unchanged;
+            REQUIRE_FALSE(item.decode_ir(packet.data(), contradictory_len, unchanged, nullptr));
+            REQUIRE(rohccxx::detail::standard_context_equal(unchanged, before));
+        }
+    }
 }

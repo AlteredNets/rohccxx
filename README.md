@@ -17,7 +17,10 @@ This repository is source-available under those terms, not OSI open-source.
 
 - Standards status and adapter boundaries are tracked in [`docs/rfc_compliance.md`](docs/rfc_compliance.md), [`docs/rfc_traceability_matrix.md`](docs/rfc_traceability_matrix.md), [`docs/rohc_standards_roadmap.md`](docs/rohc_standards_roadmap.md), [`docs/lower_layer_assisted_contract.md`](docs/lower_layer_assisted_contract.md), and [`docs/ppp_adapter_contract.md`](docs/ppp_adapter_contract.md).
 - Third-party integration guidance is provided in [`howto.md`](howto.md), including public API entry points and protocol-specific transmit/receive flows.
-- Optional third-party oracle hooks are documented in [`docs/external_oracle.md`](docs/external_oracle.md). The in-repo generated corpora and tests are the primary release gates.
+- Mandatory bidirectional rohc-lib interoperability for deterministic IPv4,
+  small-CID-0, no-IP-options flows in the RFC 5225 RTP/UDP/IP, UDP/IP, ESP/IP,
+  and IP-only profiles, plus the remaining optional oracle hooks,
+  is documented in [`docs/external_oracle.md`](docs/external_oracle.md).
 
 ## Dependencies
 

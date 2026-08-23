@@ -37,7 +37,7 @@ int main()
         return 4;
     }
 
-    if (!rohc_decomp_enable_profile(dec, ROHC_PROFILE_RTP))
+    if (!rohc_decomp_enable_profile(dec, ROHCv2_PROFILE_IP_UDP_RTP))
     {
         rohc_decomp_free(dec);
         return 5;

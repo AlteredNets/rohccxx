@@ -164,11 +164,11 @@ TEST_CASE("Decoder rejects corrupted IR CRC")
     make_valid_rtp(ip, 1001, 100160, 0x11223344);
     rohc_len = sizeof(rohc);
     REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
-    REQUIRE(decode_ir_dyn_rtp(rohc, rohc_len, ctx));
+    REQUIRE(decode_ir_rtp(rohc, rohc_len, ctx));
 
     std::memcpy(bad, rohc, rohc_len);
     bad[2] ^= 0xFF;
-    REQUIRE_FALSE(decode_ir_dyn_rtp(bad, rohc_len, ctx));
+    REQUIRE_FALSE(decode_ir_rtp(bad, rohc_len, ctx));
 
     rohc_comp_free(comp);
 }
@@ -194,7 +194,7 @@ TEST_CASE("ROHC feedback handling gates invalid and per-CID recovery behavior", 
         make_valid_rtp(ip, 1001, 100160, 0xCAFEBABE);
         rohc_len = sizeof(rohc);
         REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
-        REQUIRE(rohc[0] == 0xF8);
+        REQUIRE(rohc[0] == 0xFD);
 
         rohc_comp_free(comp);
     }
@@ -216,12 +216,12 @@ TEST_CASE("ROHC feedback handling gates invalid and per-CID recovery behavior", 
         make_valid_rtp(ip, 1001, 100160, 0xCAFEBABE);
         rohc_len = sizeof(rohc);
         REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
-        REQUIRE(rohc[0] == 0xF8);
+        REQUIRE(rohc[0] == 0xFD);
 
         rohc_comp_free(comp);
     }
 
-    SECTION("first NACK requests IR-DYN refresh")
+    SECTION("first NACK requests IR refresh")
     {
         rohc_comp* comp = rohc_comp_new2(4, ROHCCXX_DIRECTION_UPLINK);
         REQUIRE(comp != nullptr);
@@ -244,7 +244,7 @@ TEST_CASE("ROHC feedback handling gates invalid and per-CID recovery behavior", 
         make_valid_rtp(ip, 1003, 100480, 0xCAFEBABE);
         rohc_len = sizeof(rohc);
         REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
-        REQUIRE(rohc[0] == 0xF8);
+        REQUIRE(rohc[0] == 0xFD);
 
         rohc_comp_free(comp);
     }
@@ -298,13 +298,13 @@ TEST_CASE("ROHC feedback handling gates invalid and per-CID recovery behavior", 
         make_valid_rtp(ip, 1003, 100480, 0xCAFEBABE);
         rohc_len = sizeof(rohc);
         REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
-        REQUIRE(rohc[0] == 0xF8);
+        REQUIRE(rohc[0] == 0xFD);
 
         rohc_comp_handle_feedback(comp, 0, 0);
         make_valid_rtp(ip, 1004, 100640, 0xCAFEBABE);
         rohc_len = sizeof(rohc);
         REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
-        REQUIRE(rohc[0] == 0xF8);
+        REQUIRE(rohc[0] == 0xFD);
 
         rohc_comp_free(comp);
     }
@@ -354,7 +354,7 @@ TEST_CASE("ROHC feedback handling gates invalid and per-CID recovery behavior", 
         rohc_len = sizeof(rohc);
         REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
         REQUIRE(rohc[0] == 0xE3);
-        REQUIRE(rohc[1] == 0xF8);
+        REQUIRE(rohc[1] == 0xFD);
 
         rohc_comp_free(comp);
     }
@@ -383,7 +383,6 @@ TEST_CASE("ROHC modes expose U O and R transition behavior", "[modes][feedback]"
     make_valid_rtp(ip, 1000, 100000, 0xCAFEBABE);
     REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
     REQUIRE(rohc[0] == 0xFD);
-    REQUIRE((rohc[38] & 0x0CU) == 0x08U);
 
     make_valid_rtp(ip, 1001, 100160, 0xCAFEBABE);
     rohc_len = sizeof(rohc);
@@ -394,12 +393,12 @@ TEST_CASE("ROHC modes expose U O and R transition behavior", "[modes][feedback]"
     make_valid_rtp(ip, 1002, 100320, 0xCAFEBABE);
     rohc_len = sizeof(rohc);
     REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
-    REQUIRE(rohc[0] == 0xF8);
+    REQUIRE(rohc[0] == 0xFD);
 
     make_valid_rtp(ip, 1003, 100480, 0xCAFEBABE);
     rohc_len = sizeof(rohc);
     REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
-    REQUIRE(rohc[0] == 0xF8);
+    REQUIRE(rohc[0] == 0xFD);
 
     rohc_comp_handle_feedback(comp, 0, static_cast<std::uint8_t>(rohccxx::FeedbackType::ACK));
     make_valid_rtp(ip, 1004, 100640, 0xCAFEBABE);
@@ -447,12 +446,12 @@ TEST_CASE("ROHC feedback packets deliver mode requests to compressor", "[feedbac
     make_valid_rtp(ip, 1001, 100160, 0xCAFEBABE);
     rohc_len = sizeof(rohc);
     REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
-    REQUIRE(rohc[0] == 0xF8);
+    REQUIRE(rohc[0] == 0xFD);
 
     rohc_comp_free(comp);
 }
 
-TEST_CASE("ROHC decompressor mode API tracks decoded IR mode", "[modes]")
+TEST_CASE("ROHCv2 IR does not carry a private compressor mode byte", "[modes]")
 {
     rohc_comp* comp = rohc_comp_new2(4, ROHCCXX_DIRECTION_UPLINK);
     rohc_decomp* decomp = rohc_decomp_new2(4, ROHCCXX_DIRECTION_DOWNLINK);
@@ -472,7 +471,7 @@ TEST_CASE("ROHC decompressor mode API tracks decoded IR mode", "[modes]")
 
     rohccxx_mode_t mode = ROHCCXX_MODE_O;
     REQUIRE(rohc_decomp_get_mode(decomp, &mode) == 0);
-    REQUIRE(mode == ROHCCXX_MODE_R);
+    REQUIRE(mode == ROHCCXX_MODE_U);
 
     rohc_decomp_free(decomp);
     rohc_comp_free(comp);

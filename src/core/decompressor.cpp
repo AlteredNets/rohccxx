@@ -11,6 +11,7 @@
 #include <rohccxx/core/lla.hpp>
 
 #include <cstring>
+#include <limits>
 #include <mutex>
 
 namespace rohccxx {
@@ -58,6 +59,9 @@ bool build_rtp_packet_from_context(std::uint8_t* ip_packet,
                                    const std::uint8_t* payload,
                                    std::size_t payload_len)
 {
+    if(payload_len > std::numeric_limits<std::size_t>::max() - 40U ||
+       40U + payload_len > 0xFFFFU)
+        return false;
     const std::size_t total = 40U + payload_len;
     if(!ip_packet || !ip_len || *ip_len < total || (!payload && payload_len > 0))
         return false;
@@ -133,72 +137,40 @@ int Decompressor::decompress(const uint8_t* rohc_packet,
                              uint8_t* ip_packet,
                              size_t* ip_len)
 {
-    if(!rohc_packet || !ip_packet || !ip_len || rohc_len == 0)
+    if(!ip_len)
         return -1;
+    const size_t output_capacity = *ip_len;
+    auto fail = [&]() -> int { *ip_len = 0; return -1; };
+    if(!rohc_packet || !ip_packet || rohc_len == 0)
+        return fail();
 
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     Context* ctx = context_table_.get(cid_);
     if(!ctx)
-        return -1;
+        return fail();
 
-    ctx->profile = Profile::RTP;
-    ctx->mode = Mode::Optimistic;
+    Context decoded = *ctx;
+    decoded.profile = Profile::RTP;
+    decoded.mode = Mode::Optimistic;
 
     bool ok = false;
-    switch(ctx->rohc_state)
-    {
-        case RohcState::NoContext:
-            ok = decode_ir_rtp(rohc_packet, rohc_len, *ctx);
-            break;
+    size_t header_len = 0;
+    if((rohc_packet[0] & 0xFEU) == 0xFCU)
+        ok = decode_ir_rtp(rohc_packet, rohc_len, decoded, &header_len);
+    else
+        ok = decode_ir_dyn_rtp(rohc_packet, rohc_len, decoded, &header_len);
 
-        case RohcState::StaticEstablished:
-        case RohcState::DynamicEstablished:
-            ok = decode_ir_dyn_rtp(rohc_packet, rohc_len, *ctx);
-            break;
-    }
-
-    if(!ok)
-        return -1;
-
-    uint8_t* p = ip_packet;
-    std::memset(p, 0, 20);
-    p[0] = 0x45;
-    p[1] = ctx->ipv4_tos;
-    p[8] = ctx->ipv4_ttl;
-    p[9] = 17;
-    p[12] = static_cast<uint8_t>(ctx->ipv4_saddr >> 24);
-    p[13] = static_cast<uint8_t>(ctx->ipv4_saddr >> 16);
-    p[14] = static_cast<uint8_t>(ctx->ipv4_saddr >> 8);
-    p[15] = static_cast<uint8_t>(ctx->ipv4_saddr & 0xFF);
-    p[16] = static_cast<uint8_t>(ctx->ipv4_daddr >> 24);
-    p[17] = static_cast<uint8_t>(ctx->ipv4_daddr >> 16);
-    p[18] = static_cast<uint8_t>(ctx->ipv4_daddr >> 8);
-    p[19] = static_cast<uint8_t>(ctx->ipv4_daddr & 0xFF);
-
-    p += 20;
-    std::memset(p, 0, 8);
-    p[0] = static_cast<uint8_t>(ctx->udp_sport >> 8);
-    p[1] = static_cast<uint8_t>(ctx->udp_sport & 0xFF);
-    p[2] = static_cast<uint8_t>(ctx->udp_dport >> 8);
-    p[3] = static_cast<uint8_t>(ctx->udp_dport & 0xFF);
-    p[6] = static_cast<uint8_t>(ctx->udp_check >> 8);
-    p[7] = static_cast<uint8_t>(ctx->udp_check & 0xFF);
-
-    p += 8;
-    p[0] = ctx->rtp.vpxcc;
-    p[1] = ctx->rtp.mpt;
-    p[2] = static_cast<uint8_t>(ctx->rtp.last_seq >> 8);
-    p[3] = static_cast<uint8_t>(ctx->rtp.last_seq & 0xFF);
-    p[4] = static_cast<uint8_t>(ctx->rtp.last_ts >> 24);
-    p[5] = static_cast<uint8_t>(ctx->rtp.last_ts >> 16);
-    p[6] = static_cast<uint8_t>(ctx->rtp.last_ts >> 8);
-    p[7] = static_cast<uint8_t>(ctx->rtp.last_ts & 0xFF);
-    p[8] = static_cast<uint8_t>(ctx->rtp.ssrc >> 24);
-    p[9] = static_cast<uint8_t>(ctx->rtp.ssrc >> 16);
-    p[10] = static_cast<uint8_t>(ctx->rtp.ssrc >> 8);
-    p[11] = static_cast<uint8_t>(ctx->rtp.ssrc & 0xFF);
-
-    *ip_len = 40;
+    if(!ok || header_len > rohc_len)
+        return fail();
+    *ip_len = output_capacity;
+    if(decoded.ip_version != 4 ||
+       !build_rtp_packet_from_context(ip_packet,
+                                      ip_len,
+                                      decoded,
+                                      rohc_packet + header_len,
+                                      rohc_len - header_len))
+        return fail();
+    *ctx = decoded;
     return 0;
 }
 

@@ -15,16 +15,103 @@
 namespace rohccxx
 {
 
-inline bool emit_add_cid_if_needed(uint8_t*& p, const Context& ctx)
+inline bool emit_add_cid_if_needed(uint8_t*& p, const uint8_t* end, const Context& ctx)
 {
     if(!ctx.large_cid && !cid::is_small(ctx.cid))
         return false;
     if(!ctx.large_cid && ctx.cid > 0)
+    {
+        if(p >= end)
+            return false;
         *p++ = static_cast<uint8_t>(0xE0 | (ctx.cid & 0x0F));
+    }
     return true;
 }
 
-inline bool emit_ir_esp(uint8_t* out,
+inline bool emit_ir_prefix(uint8_t*& p,
+                           const uint8_t* end,
+                           const Context& ctx,
+                           uint8_t profile,
+                           uint8_t*& crc_pos)
+{
+    if(!emit_add_cid_if_needed(p, end, ctx) || p >= end)
+        return false;
+    *p++ = 0xFD;
+    if(ctx.large_cid && !cid::write_large(p, end, ctx.cid))
+        return false;
+    if(static_cast<size_t>(end - p) < 2U)
+        return false;
+    *p++ = profile;
+    crc_pos = p++;
+    return true;
+}
+
+inline bool legacy_ir_lengths(const Context& ctx,
+                              bool with_rtp,
+                              size_t transport_static_len,
+                              size_t transport_dynamic_len,
+                              size_t& static_len,
+                              size_t& dynamic_len)
+{
+    if(ctx.ip_version == 4)
+    {
+        if(ctx.ipv4_options_len > ctx.ipv4_options.size())
+            return false;
+        static_len = 10U + transport_static_len;
+        dynamic_len = 6U + ctx.ipv4_options_len + transport_dynamic_len;
+    }
+    else if(ctx.ip_version == 6)
+    {
+        if(ctx.ipv6_extension_len > 127U ||
+           ctx.ipv6_extension_len > ctx.ipv6_extensions.size())
+            return false;
+        static_len = 34U + transport_static_len;
+        dynamic_len = 7U + ctx.ipv6_extension_len + transport_dynamic_len;
+    }
+    else
+    {
+        return false;
+    }
+
+    if(with_rtp)
+    {
+        uint32_t body_len = 0;
+        if(!rfc5225::rtp_extras_body_len(ctx, body_len))
+            return false;
+        const size_t extras_len = body_len == 0U
+            ? 1U : 1U + cid::encoded_len(body_len) + body_len;
+        dynamic_len += 8U + extras_len;
+    }
+    return true;
+}
+
+inline bool legacy_ir_capacity_ok(const uint8_t* out,
+                                  const size_t* out_len,
+                                  const Context& ctx,
+                                  bool dynamic_only,
+                                  bool with_rtp,
+                                  size_t transport_static_len,
+                                  size_t transport_dynamic_len,
+                                  bool trailing_mode)
+{
+    if(out == nullptr || out_len == nullptr)
+        return false;
+    if((ctx.large_cid && ctx.cid > cid::large_cid_max) ||
+       (!ctx.large_cid && !cid::is_small(ctx.cid)))
+        return false;
+    size_t static_len = 0;
+    size_t dynamic_len = 0;
+    if(!legacy_ir_lengths(ctx, with_rtp, transport_static_len,
+                          transport_dynamic_len, static_len, dynamic_len))
+        return false;
+    const size_t cid_len = ctx.large_cid ? cid::encoded_len(ctx.cid)
+        : ((!ctx.large_cid && ctx.cid > 0U) ? 1U : 0U);
+    const size_t required = cid_len + 3U + (dynamic_only ? 0U : static_len) +
+                            dynamic_len + (trailing_mode ? 1U : 0U);
+    return *out_len >= required;
+}
+
+inline bool emit_ir_esp_into(uint8_t* out,
                         size_t* out_len,
                         const Context& ctx)
 {
@@ -32,25 +119,22 @@ inline bool emit_ir_esp(uint8_t* out,
 
     uint8_t* p = out;
     const uint8_t* end = out + *out_len;
-    if(!emit_add_cid_if_needed(p, ctx))
+    uint8_t* crc_pos = nullptr;
+    if(!emit_ir_prefix(p, end, ctx, 0x03, crc_pos))
         return false;
 
-    *p++ = 0xFD;
-    if(ctx.large_cid && !cid::write_large(p, end, ctx.cid))
+    if(!rfc5225::write_standard_ip_static(p, end, ctx) ||
+       !rfc5225::write_standard_esp_static(p, end, ctx) ||
+       !rfc5225::write_standard_ip_dynamic(p, end, ctx, false) ||
+       !rfc5225::write_standard_esp_dynamic(p, end, ctx))
         return false;
-    *p++ = 0x03;
-    uint8_t* crc_pos = p++;
-
-    rfc5225::write_ip_static_with_protocol(p, ctx, ctx.ipv4_protocol);
-    rfc5225::write_ip_dynamic(p, ctx);
 
     *crc_pos = utils::crc8(out, static_cast<size_t>(p - out));
-    *p++ = static_cast<uint8_t>((static_cast<uint8_t>(ctx.mode) & 0x03) << 2);
     *out_len = static_cast<size_t>(p - out);
     return true;
 }
 
-inline bool emit_ir_ip(uint8_t* out,
+inline bool emit_ir_ip_into(uint8_t* out,
                        size_t* out_len,
                        const Context& ctx)
 {
@@ -58,34 +142,31 @@ inline bool emit_ir_ip(uint8_t* out,
 
     uint8_t* p = out;
     const uint8_t* end = out + *out_len;
-    if(!emit_add_cid_if_needed(p, ctx))
+    uint8_t* crc_pos = nullptr;
+    if(!emit_ir_prefix(p, end, ctx, 0x04, crc_pos))
         return false;
 
-    *p++ = 0xFD;
-    if(ctx.large_cid && !cid::write_large(p, end, ctx.cid))
+    if(!rfc5225::write_standard_ip_static(p, end, ctx) ||
+       !rfc5225::write_standard_ip_dynamic(p, end, ctx, true))
         return false;
-    *p++ = 0x04;
-    uint8_t* crc_pos = p++;
-
-    rfc5225::write_ip_static_with_protocol(p, ctx, ctx.ipv4_protocol);
-    rfc5225::write_ip_dynamic(p, ctx);
 
     *crc_pos = utils::crc8(out, static_cast<size_t>(p - out));
-    *p++ = static_cast<uint8_t>((static_cast<uint8_t>(ctx.mode) & 0x03) << 2);
     *out_len = static_cast<size_t>(p - out);
     return true;
 }
 
 
-inline bool emit_ir_udp_lite(uint8_t* out,
+inline bool emit_ir_udp_lite_into(uint8_t* out,
                              size_t* out_len,
                              const Context& ctx)
 {
+    if(!legacy_ir_capacity_ok(out, out_len, ctx, false, false, 4U, 4U, true))
+        return false;
     std::memset(out, 0, *out_len);
 
     uint8_t* p = out;
     const uint8_t* end = out + *out_len;
-    if(!emit_add_cid_if_needed(p, ctx))
+    if(!emit_add_cid_if_needed(p, end, ctx))
         return false;
 
     *p++ = 0xFD;
@@ -105,7 +186,7 @@ inline bool emit_ir_udp_lite(uint8_t* out,
     return true;
 }
 
-inline bool emit_ir_udp(uint8_t* out,
+inline bool emit_ir_udp_into(uint8_t* out,
                         size_t* out_len,
                         const Context& ctx)
 {
@@ -113,36 +194,36 @@ inline bool emit_ir_udp(uint8_t* out,
 
     uint8_t* p = out;
     const uint8_t* end = out + *out_len;
-    if(!emit_add_cid_if_needed(p, ctx))
+    uint8_t* crc_pos = nullptr;
+    if(!emit_ir_prefix(p, end, ctx, 0x02, crc_pos))
         return false;
 
-    *p++ = 0xFD;
-    if(ctx.large_cid && !cid::write_large(p, end, ctx.cid))
+    if(!rfc5225::write_standard_ip_static(p, end, ctx))
         return false;
-    *p++ = 0x02;
-    uint8_t* crc_pos = p++;
-
-    rfc5225::write_ip_static(p, ctx);
+    if(static_cast<size_t>(end - p) < 4U)
+        return false;
     rfc5225::write_udp_static(p, ctx);
-    rfc5225::write_ip_dynamic(p, ctx);
-    rfc5225::write_udp_dynamic(p, ctx);
+    if(!rfc5225::write_standard_ip_dynamic(p, end, ctx, false) ||
+       !rfc5225::write_standard_udp_endpoint_dynamic(p, end, ctx))
+        return false;
 
     *crc_pos = utils::crc8(out, static_cast<size_t>(p - out));
-    *p++ = static_cast<uint8_t>((static_cast<uint8_t>(ctx.mode) & 0x03) << 2);
     *out_len = static_cast<size_t>(p - out);
     return true;
 }
 
 
-inline bool emit_ir_rtp_udp_lite(uint8_t* out,
+inline bool emit_ir_rtp_udp_lite_into(uint8_t* out,
                                  size_t* out_len,
                                  const Context& ctx)
 {
+    if(!legacy_ir_capacity_ok(out, out_len, ctx, false, true, 8U, 4U, true))
+        return false;
     std::memset(out, 0, *out_len);
 
     uint8_t* p = out;
     const uint8_t* end = out + *out_len;
-    if(!emit_add_cid_if_needed(p, ctx))
+    if(!emit_add_cid_if_needed(p, end, ctx))
         return false;
 
     *p++ = 0xFD;
@@ -165,7 +246,7 @@ inline bool emit_ir_rtp_udp_lite(uint8_t* out,
     return true;
 }
 
-inline bool emit_ir_rtp(uint8_t* out,
+inline bool emit_ir_rtp_into(uint8_t* out,
                         size_t* out_len,
                         const Context& ctx)
 {
@@ -173,27 +254,75 @@ inline bool emit_ir_rtp(uint8_t* out,
 
     uint8_t* p = out;
     const uint8_t* end = out + *out_len;
-    if(!emit_add_cid_if_needed(p, ctx))
+    uint8_t* crc_pos = nullptr;
+    if(!emit_ir_prefix(p, end, ctx, 0x01, crc_pos))
         return false;
 
-    *p++ = 0xFD;
-    if(ctx.large_cid && !cid::write_large(p, end, ctx.cid))
+    if(!rfc5225::write_standard_ip_static(p, end, ctx))
         return false;
-    *p++ = 0x01;
-    uint8_t* crc_pos = p++;
-
-    rfc5225::write_ip_static(p, ctx);
+    if(static_cast<size_t>(end - p) < 8U)
+        return false;
     rfc5225::write_udp_static(p, ctx);
     rfc5225::write_rtp_static(p, ctx);
-    rfc5225::write_ip_dynamic(p, ctx);
+    if(!rfc5225::write_standard_ip_dynamic(p, end, ctx, false))
+        return false;
     rfc5225::write_udp_dynamic(p, ctx);
-    if(!rfc5225::write_rtp_dynamic(p, end, ctx))
+    if(!rfc5225::write_standard_rtp_dynamic(p, end, ctx))
         return false;
 
     *crc_pos = utils::crc8(out, static_cast<size_t>(p - out));
-    *p++ = static_cast<uint8_t>((static_cast<uint8_t>(ctx.mode) & 0x03) << 2);
     *out_len = static_cast<size_t>(p - out);
     return true;
+}
+
+using IrEmitterInto = bool (*)(uint8_t*, size_t*, const Context&);
+
+inline bool emit_ir_atomically(uint8_t* out,
+                               size_t* out_len,
+                               const Context& ctx,
+                               IrEmitterInto emitter)
+{
+    if(out == nullptr || out_len == nullptr)
+        return false;
+
+    uint8_t scratch[2048] = {};
+    size_t scratch_len = sizeof(scratch);
+    if(!emitter(scratch, &scratch_len, ctx) || scratch_len > *out_len)
+        return false;
+
+    std::memcpy(out, scratch, scratch_len);
+    *out_len = scratch_len;
+    return true;
+}
+
+inline bool emit_ir_esp(uint8_t* out, size_t* out_len, const Context& ctx)
+{
+    return emit_ir_atomically(out, out_len, ctx, emit_ir_esp_into);
+}
+
+inline bool emit_ir_ip(uint8_t* out, size_t* out_len, const Context& ctx)
+{
+    return emit_ir_atomically(out, out_len, ctx, emit_ir_ip_into);
+}
+
+inline bool emit_ir_udp_lite(uint8_t* out, size_t* out_len, const Context& ctx)
+{
+    return emit_ir_atomically(out, out_len, ctx, emit_ir_udp_lite_into);
+}
+
+inline bool emit_ir_udp(uint8_t* out, size_t* out_len, const Context& ctx)
+{
+    return emit_ir_atomically(out, out_len, ctx, emit_ir_udp_into);
+}
+
+inline bool emit_ir_rtp_udp_lite(uint8_t* out, size_t* out_len, const Context& ctx)
+{
+    return emit_ir_atomically(out, out_len, ctx, emit_ir_rtp_udp_lite_into);
+}
+
+inline bool emit_ir_rtp(uint8_t* out, size_t* out_len, const Context& ctx)
+{
+    return emit_ir_atomically(out, out_len, ctx, emit_ir_rtp_into);
 }
 
 } // namespace rohccxx
