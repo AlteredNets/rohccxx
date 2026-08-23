@@ -1825,11 +1825,43 @@ TEST_CASE("RFC 5225 formal CO inventory covers active profile packet families")
 
 TEST_CASE("RFC 5225 formal pt-0 CO variants encode decode across profiles and CID modes")
 {
+    rohccxx::Context live{};
+    live.rohc_state = rohccxx::RohcState::DynamicEstablished;
+    live.profile = rohccxx::Profile::UDP;
+    live.ip_version = 4;
+    live.ipv4_id_behavior = 0;
+    REQUIRE(rohccxx::rfc5225::live_pt0_context_supported(live, false, 0, false));
+    for(const auto profile : {rohccxx::Profile::UDP, rohccxx::Profile::ESP, rohccxx::Profile::IP})
+    {
+        live.profile = profile;
+        REQUIRE(rohccxx::rfc5225::live_pt0_context_supported(live, false, 0, false));
+    }
+    live.profile = rohccxx::Profile::UDP;
+    live.ip_version = 6;
+    REQUIRE_FALSE(rohccxx::rfc5225::live_pt0_context_supported(live, false, 0, false));
+    live.ip_version = 4;
+    live.ipv4_id_behavior = 1;
+    REQUIRE_FALSE(rohccxx::rfc5225::live_pt0_context_supported(live, false, 0, false));
+    live.ipv4_id_behavior = 2;
+    REQUIRE_FALSE(rohccxx::rfc5225::live_pt0_context_supported(live, false, 0, false));
+    live.ipv4_id_behavior = 0;
+    REQUIRE_FALSE(rohccxx::rfc5225::live_pt0_context_supported(live, false, 1, true));
+    REQUIRE_FALSE(rohccxx::rfc5225::live_pt0_context_supported(live, true, 0, false));
+    live.large_cid = true;
+    REQUIRE_FALSE(rohccxx::rfc5225::live_pt0_context_supported(live, false, 0, false));
+    live.large_cid = false;
+    for(const auto profile : {rohccxx::Profile::RTP, rohccxx::Profile::RTP_UDP_Lite,
+                              rohccxx::Profile::UDP_Lite, rohccxx::Profile::Uncompressed})
+    {
+        live.profile = profile;
+        REQUIRE_FALSE(rohccxx::rfc5225::live_pt0_context_supported(live, false, 0, false));
+    }
+
     REQUIRE(rohccxx::utils::crc3(nullptr, 0) == 7);
     const std::uint8_t zero[] = {0x00};
     REQUIRE(rohccxx::utils::crc3(zero, sizeof(zero)) == 5);
     const std::uint8_t sample[] = {0x12, 0x34};
-    REQUIRE(rohccxx::utils::crc3(sample, sizeof(sample)) == 0);
+    REQUIRE(rohccxx::utils::crc3(sample, sizeof(sample)) == 6);
 
     for(const auto& profile : grammar_profile_cases)
     {

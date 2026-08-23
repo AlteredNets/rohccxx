@@ -968,8 +968,7 @@ inline bool decode_ir_standard(const uint8_t* in,
     if(!crc8_exact_matches(in, len, pos, crc_index, received_crc))
         return false;
     ctx.profile = profile;
-    ctx.rohc_state = profile == Profile::RTP ? RohcState::DynamicEstablished
-                                             : RohcState::StaticEstablished;
+    ctx.rohc_state = RohcState::DynamicEstablished;
     if(consumed)
         *consumed = pos;
     return true;

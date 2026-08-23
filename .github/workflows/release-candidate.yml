@@ -215,7 +215,7 @@ jobs:
           test_log="${{ steps.artifact-paths.outputs.rc_root }}/ctest.log"
 
           cmake --build "${build_dir}" --parallel
-          test "$(ctest --test-dir "${build_dir}" -N | sed -n 's/^Total Tests: //p')" -eq 215
+          test "$(ctest --test-dir "${build_dir}" -N | sed -n 's/^Total Tests: //p')" -eq 218
           ctest --test-dir "${build_dir}" --output-on-failure 2>&1 | tee "${test_log}"
 
           registered="$(grep -Eo '[0-9]+ tests failed out of [0-9]+' "${test_log}" | tail -1 | awk '{print $6}')"
@@ -223,8 +223,8 @@ jobs:
           passed="$(grep -Ec 'Test +#[0-9]+:.* +Passed +' "${test_log}")"
           skipped="$(grep -Ec '\*\*\*Skipped' "${test_log}")"
 
-          test "${registered}" -eq 215
-          test "${passed}" -eq 212
+          test "${registered}" -eq 218
+          test "${passed}" -eq 215
           test "${failed}" -eq 0
           test "${skipped}" -eq 3
 

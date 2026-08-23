@@ -18,6 +18,7 @@ constexpr std::size_t packet_size = 64;
 constexpr std::size_t max_rohc_size = 512;
 constexpr std::size_t profile_count = 4;
 constexpr std::size_t packets_per_profile = 3;
+constexpr std::size_t co_packets_per_profile = 20;
 
 enum class Profile : std::size_t
 {
@@ -89,6 +90,24 @@ inline void make_packet(Profile profile, int step, std::uint8_t* packet)
     finish_ipv4(packet);
 }
 
+inline void make_co_packet(Profile profile, int step, std::uint8_t* packet)
+{
+    make_packet(profile, step, packet);
+    const std::uint16_t ip_id = static_cast<std::uint16_t>(0x7230U + step);
+    packet[4] = static_cast<std::uint8_t>(ip_id >> 8U);
+    packet[5] = static_cast<std::uint8_t>(ip_id & 0xffU);
+    if(profile == Profile::Esp)
+    {
+        const std::uint32_t sequence = static_cast<std::uint32_t>(0xfffffff8U +
+                                                                  static_cast<std::uint32_t>(step));
+        packet[24] = static_cast<std::uint8_t>(sequence >> 24U);
+        packet[25] = static_cast<std::uint8_t>(sequence >> 16U);
+        packet[26] = static_cast<std::uint8_t>(sequence >> 8U);
+        packet[27] = static_cast<std::uint8_t>(sequence);
+    }
+    finish_ipv4(packet);
+}
+
 inline void print_hex(const std::uint8_t* data, std::size_t length)
 {
     static constexpr char digits[] = "0123456789abcdef";
@@ -102,6 +121,11 @@ inline void print_hex(const std::uint8_t* data, std::size_t length)
 inline void emit_header()
 {
     std::puts("rohccxx-rohclib-rfc5225-corpus-v1 profiles=4 packets_per_profile=3 encoding=hex");
+}
+
+inline void emit_co_header()
+{
+    std::puts("rohccxx-rohclib-rfc5225-co-corpus-v1 profiles=4 packets_per_profile=20 encoding=hex");
 }
 
 inline void emit_case(const ProfileSpec& profile,
@@ -255,6 +279,29 @@ bool consume_corpus(Consumer&& consumer)
         return false;
     }
     return !std::ferror(stdin);
+}
+
+template<typename Consumer>
+bool consume_co_corpus(Consumer&& consumer)
+{
+    char line[4096] = {};
+    if(!std::fgets(line, sizeof(line), stdin) ||
+       std::strcmp(line, "rohccxx-rohclib-rfc5225-co-corpus-v1 profiles=4 packets_per_profile=20 encoding=hex\n") != 0)
+    {
+        std::fprintf(stderr, "invalid RFC 5225 CO interoperability corpus header\n");
+        return false;
+    }
+    for(const auto& profile : profiles)
+    {
+        for(int step = 0; step < static_cast<int>(co_packets_per_profile); ++step)
+        {
+            if(!std::fgets(line, sizeof(line), stdin)) return false;
+            CorpusCase corpus_case{};
+            if(!parse_case_line(line, profile, step, corpus_case) || !consumer(corpus_case))
+                return false;
+        }
+    }
+    return std::fgets(line, sizeof(line), stdin) == nullptr && !std::ferror(stdin);
 }
 
 } // namespace rfc5225_interop

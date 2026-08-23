@@ -75,7 +75,6 @@ inline uint8_t crc3(const uint8_t* data, size_t len)
         for(uint8_t bit = 0; bit < 8U; ++bit)
         {
             crc = static_cast<uint8_t>((crc & 0x01U) ? ((crc >> 1U) ^ 0x06U) : (crc >> 1U));
-            crc &= 0x07U;
         }
     }
     return static_cast<uint8_t>(crc & 0x07U);

@@ -15,6 +15,48 @@ The mandatory bidirectional result is deliberately limited to the tested RTP,
 UDP, ESP, and IP-only IPv4/small-CID subset. It is not evidence for UDP-Lite,
 RFC 4362, IPv6, other CID modes, or any other untested variant.
 
+## Context-complete CO interoperability
+
+The `interop_rfc5225_co_*` tests add twenty-packet, small-CID-0 IPv4 flows with
+complete IR context establishment followed by externally generated formal CO.
+UDP/IP, ESP/IP, and IP-only exercise PT-0 in both directions with byte-exact IP
+reconstruction. The accepted interpretation interval is a forward MSN delta of
+1 through 15. The reverse path tests one deliberately lost packet, rejection of
+an older out-of-order packet and a duplicate, sequence-number wrap (ESP),
+CRC corruption, truncation, no-context rejection, and successful decoding after
+each failed transaction. It does not prove general reordering recovery or
+recovery after loss of 16 or more packets. The forward path independently checks
+rohc-lib's CRC rejection without treating a rejected packet as context advancement.
+
+The live PT-0 decoder is fail-closed to dynamically established UDP/IP, ESP/IP,
+and IP-only contexts using IPv4, small CID 0 without Add-CID, and sequential
+network-order IP-ID behavior. IPv6, UDP-Lite, RTP, nonzero CID, large CID, and
+non-sequential or byte-swapped IP-ID contexts are rejected before reconstruction.
+Reconstruction is staged: failed length, capacity, context, or CRC validation
+leaves both the context and every caller-output byte unchanged before retry.
+
+The pinned rohc-lib revision has two RTP limitations reported as an unvalidated
+gap: its RTP compressor remains in IR for the deterministic flow, and its RTP
+decompressor detects PT packets but its parser contains `TODO: handle other CO
+packets` and rejects them. Accordingly,
+the tests prove RTP context establishment and observe rohccxx's private/current
+RTP FO output, but record no external CO success for it and do not claim formal
+RTP PT interoperability in either direction. CO-COMMON (`0xFA`) and
+CO-REPAIR (`0xFB`) also remain unavailable in the live rohccxx decoder because
+those octets collide with the existing assisting-layer CSP/CCP namespace. Those
+refresh/repair paths, feedback exchange with the external compressor, nonzero
+and large CIDs, reserved-bit validation in CO-COMMON/CO-REPAIR, UDP-Lite,
+RFC 4362, IPv6, IP options, and all other untested variants remain explicit gaps.
+
+The 364-case internal grammar/CRC corpus is unchanged and remains broader
+byte-grammar evidence, not external context interoperability evidence.
+
+The retained private/current RTP FO format is explicitly framed with Add-CID in
+small-CID channels, including Add-CID 0. Bare RTP or RTP/UDP-Lite PT-0-shaped
+packets are therefore rejected before the private FO bit parser is entered.
+Large-CID RTP contexts use IR refresh rather than the ambiguous private FO form;
+bare large-CID RTP PT-0 is likewise rejected.
+
 A second ROHCv2-capable implementation can optionally be added as corroborating evidence by consuming the generated corpus from `rohccxx_oracle_corpus` or `rfc5225_co_corpus`. This is useful for commercial acceptance testing or independent validation, but it is not required for the in-tree conformance suite to pass. See `docs/external_oracle_gap_register.md` for optional third-party corroboration targets.
 
 ## Corpus Format
