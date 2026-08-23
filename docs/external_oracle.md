@@ -11,6 +11,10 @@ The mandatory oracle tests use small CID 0 and the RFC 5225 profile identifiers.
 
 rohc-lib does not expose the RFC 5225 UDP-Lite profiles used by this project, so RTP/UDP-Lite/IP and UDP-Lite/IP are explicitly outside this external-oracle claim. RFC 4362 remains covered only by the optional hook below. The 364-case formal CO corpus remains internal grammar/CRC evidence and is not described as end-to-end interoperability.
 
+The mandatory bidirectional result is deliberately limited to the tested RTP,
+UDP, ESP, and IP-only IPv4/small-CID subset. It is not evidence for UDP-Lite,
+RFC 4362, IPv6, other CID modes, or any other untested variant.
+
 A second ROHCv2-capable implementation can optionally be added as corroborating evidence by consuming the generated corpus from `rohccxx_oracle_corpus` or `rfc5225_co_corpus`. This is useful for commercial acceptance testing or independent validation, but it is not required for the in-tree conformance suite to pass. See `docs/external_oracle_gap_register.md` for optional third-party corroboration targets.
 
 ## Corpus Format
