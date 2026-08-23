@@ -47,7 +47,7 @@ cmake --install build
 
 ## Versioning And Binary Packages
 
-Release builds derive the project version from an exact git tag at `HEAD`. Tags may use either `vX.Y.Z` or `X.Y.Z`; the configured project version strips a leading `v`. Untagged builds fall back to `0.1.0`, and local builds may override the version explicitly:
+Release builds derive the project version from an exact git tag at `HEAD`. Tags may use either `vX.Y.Z` or `X.Y.Z`; the configured project version strips a leading `v`. Untagged builds use the version in the checked-in `VERSION` file, and local builds may override the version explicitly:
 
 ```bash
 cmake -B build -S . -DROHCCXX_VERSION=1.0.0
