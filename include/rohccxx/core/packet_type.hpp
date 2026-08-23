@@ -151,7 +151,7 @@ inline bool parse_rohc_packet(const uint8_t* in,
             return false;
         parsed.profile_id = parsed.packet[profile_pos];
     }
-    else if(parsed.type == RohcPacketType::FO_RTP && !large_cid_space)
+    else if(parsed.type == RohcPacketType::FO_RTP && !large_cid_space && !parsed.has_add_cid)
     {
         parsed.cid = static_cast<uint32_t>((parsed.packet[0] >> 2) & 0x0F);
     }

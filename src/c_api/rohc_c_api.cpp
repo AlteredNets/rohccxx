@@ -266,6 +266,19 @@ static bool prepend_small_cid(uint8_t* packet,
     return true;
 }
 
+static bool prepend_private_rtp_small_cid(uint8_t* packet,
+                                          size_t* packet_len,
+                                          size_t capacity,
+                                          uint32_t cid)
+{
+    if(!packet || !packet_len || cid > 0x0FU || *packet_len + 1U > capacity)
+        return false;
+    std::memmove(packet + 1U, packet, *packet_len);
+    packet[0] = static_cast<uint8_t>(0xE0U | cid);
+    ++(*packet_len);
+    return true;
+}
+
 
 static bool update_rtp_ipv4_id_behavior(rohccxx::Context& ctx,
                                         bool had_ipv4_rtp_context,
@@ -2070,7 +2083,14 @@ rohc_compress4(struct rohc_comp* comp,
         else
         {
             ctx->rohc_state = RohcState::DynamicEstablished;
-            if(!emit_rtp_fo(rohc_packet, rohc_packet_len, *ctx))
+            if(ctx->large_cid)
+            {
+                if(!emit_ir_rtp_udp_lite(rohc_packet, rohc_packet_len, *ctx))
+                    return -1;
+            }
+            else if(!emit_rtp_fo(rohc_packet, rohc_packet_len, *ctx) ||
+                    !prepend_private_rtp_small_cid(rohc_packet, rohc_packet_len,
+                                                   out_capacity, cid))
                 return -1;
         }
         return append_payload_range(*rohc_packet_len,
@@ -2146,7 +2166,14 @@ rohc_compress4(struct rohc_comp* comp,
         else
         {
             ctx->rohc_state = RohcState::DynamicEstablished;
-            if(!emit_rtp_fo(rohc_packet, rohc_packet_len, *ctx))
+            if(ctx->large_cid)
+            {
+                if(!emit_ir_rtp(rohc_packet, rohc_packet_len, *ctx))
+                    return -1;
+            }
+            else if(!emit_rtp_fo(rohc_packet, rohc_packet_len, *ctx) ||
+                    !prepend_private_rtp_small_cid(rohc_packet, rohc_packet_len,
+                                                   out_capacity, cid))
                 return -1;
         }
         return append_payload_range(*rohc_packet_len,
@@ -3107,7 +3134,11 @@ rohc_decompress4(struct rohc_decomp* decomp,
         uint16_t seq;
         uint32_t ts;
 
-        ok = decode_fo_rtp(packet, packet_len, *ctx, seq, ts, &header_len);
+        // Private/current RTP FO is explicitly framed with Add-CID in the
+        // small-CID space. A bare PT-0-shaped packet belongs to the formal
+        // RFC 5225 namespace, which is intentionally unsupported for RTP.
+        const bool private_rtp_framing = !decomp->impl.large_cid_space && parsed.has_add_cid;
+        ok = private_rtp_framing && decode_fo_rtp(packet, packet_len, *ctx, seq, ts, &header_len);
         if (ok && ctx->rohc_state != RohcState::DynamicEstablished)
             ok = false;
     }

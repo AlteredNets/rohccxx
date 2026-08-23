@@ -24,15 +24,19 @@ inline bool decode_fo_rtp(const uint8_t* in,
 {
     using namespace rohccxx;
 
-    BitReader br(in);
+    if(!in || len == 0)
+        return false;
+    BitReader br(in, len);
 
     // FO bit must be 0
-    if (br.read_bits(1) != 0)
+    if (br.read_bits(1) != 0 || !br.valid)
         return false;
 
     br.read_bits(1);             // extension
 
     const uint8_t embedded_cid = br.read_bits(4);
+    if(!br.valid)
+        return false;
     if(ctx.large_cid)
     {
         if(embedded_cid != 0)
@@ -43,6 +47,8 @@ inline bool decode_fo_rtp(const uint8_t* in,
             return false;
         if(wire_cid != ctx.cid)
             return false;
+        if(cid_len > len - 1U)
+            return false;
         br.bitpos = (1U + cid_len) * 8U;
     }
     else if(embedded_cid != ctx.cid)
@@ -51,17 +57,25 @@ inline bool decode_fo_rtp(const uint8_t* in,
     }
 
     uint8_t k = br.read_bits(6); // K
+    if(!br.valid || k > 16U)
+        return false;
 
     uint16_t seq_lsb = br.read_bits(k);
     uint32_t ts_lsb  = br.read_bits(8);
+    if(!br.valid)
+        return false;
 
     // Align to the CRC byte.
     size_t payload_bits  = br.bitpos;
     size_t payload_bytes = (payload_bits + 7) >> 3;
+    if(payload_bytes > len)
+        return false;
     br.bitpos = payload_bytes * 8;
 
     // Read the CRC-7 bits.
     (void) br.read_bits(7);
+    if(!br.valid)
+        return false;
 
     size_t total_bits = br.bitpos;
     size_t total_bytes = (total_bits + 7) >> 3;
@@ -69,7 +83,7 @@ inline bool decode_fo_rtp(const uint8_t* in,
     if(consumed)
         *consumed = total_bytes;
 
-    if (!validate_crc7_bits(in, total_bits))
+    if(total_bytes > len || !validate_crc7_bits(in, total_bits))
         return false;
 
     // Sliding-window reconstruction

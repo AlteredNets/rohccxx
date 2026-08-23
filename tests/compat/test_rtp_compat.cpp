@@ -1353,7 +1353,7 @@ TEST_CASE("RTP/UDP-Lite/IP RFC 5225 profile emits FO after IR-DYN and round-trip
 
     REQUIRE(rohc_compress4(comp, packet, sizeof(packet), rohc, &rohc_len) == 0);
     REQUIRE(rohc_len < sizeof(packet) + 1);
-    REQUIRE((rohc[0] & 0x80) == 0x00);
+    REQUIRE(rohc[0] == 0xE0);
     REQUIRE(rohc_decompress4(decomp, rohc, rohc_len, out, &out_len) == 0);
     REQUIRE(out_len == sizeof(packet));
     REQUIRE(std::memcmp(out, packet, sizeof(packet)) == 0);
@@ -1407,7 +1407,7 @@ TEST_CASE("RTP/UDP-Lite/IP FO CRC failure triggers feedback")
     rohc_len = sizeof(rohc);
     out_len = sizeof(out);
     REQUIRE(rohc_compress4(comp, packet, sizeof(packet), rohc, &rohc_len) == 0);
-    REQUIRE((rohc[0] & 0x80) == 0x00);
+    REQUIRE(rohc[0] == 0xE0);
     rohc[1] ^= 0x01;
 
     REQUIRE(rohc_decompress4(decomp, rohc, rohc_len, out, &out_len) != 0);
@@ -1833,11 +1833,11 @@ struct Ipv6TraceFixture
 };
 
 static constexpr Ipv6TraceFixture ipv6_trace_fixtures[] = {
-    {ParityProfile::Rtp, "IPv6 RTP/UDP/IP", {77, 77, 25}, {0x016C953CU, 0x016C953CU, 0x2A4F555BU}},
+    {ParityProfile::Rtp, "IPv6 RTP/UDP/IP", {77, 77, 26}, {0x016C953CU, 0x016C953CU, 0x56327A09U}},
     {ParityProfile::Udp, "IPv6 UDP/IP", {80, 80, 38}, {0x28DAE527U, 0x19886A2BU, 0xE796A23BU}},
     {ParityProfile::Esp, "IPv6 ESP/IP", {80, 80, 80}, {0x1130FE35U, 0x1130FE35U, 0x1130FE35U}},
     {ParityProfile::Ip, "IPv6 IP-only", {82, 82, 44}, {0x3F7AD763U, 0x56983E50U, 0x8F543C06U}},
-    {ParityProfile::RtpUdpLite, "IPv6 RTP/UDP-Lite/IP", {86, 43, 25}, {0xBC53256AU, 0x378AA1A6U, 0x2A4F555BU}},
+    {ParityProfile::RtpUdpLite, "IPv6 RTP/UDP-Lite/IP", {86, 43, 26}, {0xBC53256AU, 0x378AA1A6U, 0x56327A09U}},
     {ParityProfile::UdpLite, "IPv6 UDP-Lite/IP", {85, 46, 40}, {0x45CA8475U, 0xD5B9DECAU, 0x40B3AF3AU}},
 };
 
@@ -2110,9 +2110,18 @@ void require_profile_parity_fixture(const ProfileParityFixture& fixture)
             expected.erase(expected.begin() + static_cast<std::ptrdiff_t>(dynamic_offset + 3U),
                            expected.begin() + static_cast<std::ptrdiff_t>(dynamic_offset + 5U));
         }
+        if(i == 2 && (fixture.profile == ParityProfile::Rtp ||
+                      fixture.profile == ParityProfile::RtpUdpLite))
+            expected.insert(expected.begin(), 0xE0U);
         REQUIRE(rohc_len == expected.size());
         REQUIRE(std::memcmp(rohc, expected.data(), rohc_len) == 0);
-        REQUIRE(rohc_decompress4(decomp, fixture.expected[i], fixture.expected_len[i], out, &out_len) == 0);
+        const std::uint8_t* decode_input = i == 2 &&
+            (fixture.profile == ParityProfile::Rtp || fixture.profile == ParityProfile::RtpUdpLite)
+                ? expected.data() : fixture.expected[i];
+        const size_t decode_len = i == 2 &&
+            (fixture.profile == ParityProfile::Rtp || fixture.profile == ParityProfile::RtpUdpLite)
+                ? expected.size() : fixture.expected_len[i];
+        REQUIRE(rohc_decompress4(decomp, decode_input, decode_len, out, &out_len) == 0);
         REQUIRE(out_len == sizeof(packet));
         require_profile_parity_output(fixture.profile, packet, out, out_len);
     }

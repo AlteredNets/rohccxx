@@ -171,8 +171,9 @@ void require_collision_regression_round_trips(bool zero_payload)
 
         if(!zero_payload && (i == 41095U || i == 49016U))
         {
-            REQUIRE(compressed_len == 1205);
-            REQUIRE(compressed[0] == 0x00);
+            REQUIRE(compressed_len == 1206);
+            REQUIRE(compressed[0] == 0xE0);
+            REQUIRE(compressed[1] == 0x00);
         }
 
         std::size_t output_len = output.size();
@@ -2572,6 +2573,9 @@ TEST_CASE("ROHC decompressor selects embedded RTP FO CID context")
     rohc_len = sizeof(rohc);
     REQUIRE(rohccxx::emit_rtp_fo(rohc, &rohc_len, ctx));
     REQUIRE(((rohc[0] >> 2) & 0x0F) == 3);
+    std::memmove(rohc + 1, rohc, rohc_len);
+    rohc[0] = 0xE3;
+    ++rohc_len;
     const std::uint8_t payload[] = {0xCA, 0xFE, 0xBA, 0xBE};
     std::memcpy(rohc + rohc_len, payload, sizeof(payload));
     rohc_len += sizeof(payload);
@@ -2606,6 +2610,105 @@ TEST_CASE("ROHC FO decoders reject short profile-specific packets")
 
     const std::uint8_t short_udp_lite[] = {0x77, 0x00, 0x12, 0x34, 0x00, 0x10, 0x56};
     REQUIRE_FALSE(rohccxx::decode_udp_lite_fo(short_udp_lite, sizeof(short_udp_lite), ctx, &consumed));
+
+    ctx.cid = 0;
+    ctx.rtp.last_seq = 0x1234;
+    ctx.rtp.last_ts = 0x01020304;
+    ctx.rtp.ts_stride = 160;
+    std::uint8_t private_fo[32] = {};
+    size_t private_fo_len = sizeof(private_fo);
+    REQUIRE(rohccxx::emit_rtp_fo(private_fo, &private_fo_len, ctx));
+    for(size_t len = 0; len < private_fo_len; ++len)
+    {
+        auto truncated_ctx = ctx;
+        std::uint16_t seq = 0;
+        std::uint32_t ts = 0;
+        consumed = 99;
+        REQUIRE_FALSE(rohccxx::decode_fo_rtp(private_fo, len, truncated_ctx, seq, ts, &consumed));
+        REQUIRE(truncated_ctx.rtp.last_seq == ctx.rtp.last_seq);
+        REQUIRE(truncated_ctx.rtp.last_ts == ctx.rtp.last_ts);
+    }
+}
+
+TEST_CASE("ROHC live decoder rejects formal PT-0 in every unsupported context transactionally")
+{
+    enum class UnsupportedKind { Rtp, RtpUdpLite, UdpLite, Ipv6, LargeCid, NonzeroCid, NonSequentialId };
+    const UnsupportedKind kinds[] = {
+        UnsupportedKind::Rtp, UnsupportedKind::RtpUdpLite, UnsupportedKind::UdpLite,
+        UnsupportedKind::Ipv6, UnsupportedKind::LargeCid, UnsupportedKind::NonzeroCid,
+        UnsupportedKind::NonSequentialId,
+    };
+
+    for(const auto kind : kinds)
+    {
+        const bool large = kind == UnsupportedKind::LargeCid;
+        const std::uint32_t cid = large ? 16U : (kind == UnsupportedKind::NonzeroCid ? 3U : 0U);
+        rohc_comp* comp = rohc_comp_new2(large ? 31U : 15U, ROHCCXX_DIRECTION_UPLINK);
+        rohc_decomp* decomp = rohc_decomp_new2(large ? 31U : 15U, ROHCCXX_DIRECTION_UPLINK);
+        REQUIRE(comp != nullptr);
+        REQUIRE(decomp != nullptr);
+        REQUIRE(rohc_comp_set_cid(comp, cid) == 0);
+
+        auto make_input = [&](int step, std::array<std::uint8_t, 64>& packet) {
+            const std::uint16_t id = static_cast<std::uint16_t>(
+                0x4100U + (kind == UnsupportedKind::NonSequentialId ? step * 2U : step));
+            if(kind == UnsupportedKind::Ipv6)
+            {
+                make_valid_ipv6_udp_without_transport(packet.data(), packet.size());
+                packet[39] = static_cast<std::uint8_t>(step);
+            }
+            else if(kind == UnsupportedKind::Rtp)
+                make_valid_udp_family_packet(packet.data(), 17, id, 0, true);
+            else if(kind == UnsupportedKind::RtpUdpLite)
+                make_valid_udp_family_packet(packet.data(), 136, id, 64, true);
+            else if(kind == UnsupportedKind::UdpLite)
+                make_valid_udp_family_packet(packet.data(), 136, id, 64, false);
+            else
+                make_valid_udp_family_packet(packet.data(), 17, id, 0, false);
+        };
+        auto round_trip = [&](int step) {
+            std::array<std::uint8_t, 64> ip{};
+            std::array<std::uint8_t, 256> rohc{};
+            std::array<std::uint8_t, 96> output{};
+            make_input(step, ip);
+            size_t rohc_len = rohc.size();
+            size_t output_len = output.size();
+            return rohc_compress4(comp, ip.data(), ip.size(), rohc.data(), &rohc_len) == 0 &&
+                   rohc_decompress4(decomp, rohc.data(), rohc_len, output.data(), &output_len) == 0 &&
+                   output_len == ip.size() && std::memcmp(output.data(), ip.data(), ip.size()) == 0;
+        };
+        REQUIRE(round_trip(0));
+        REQUIRE(round_trip(1));
+
+        std::array<std::uint8_t, 48> formal{};
+        size_t formal_len = 0;
+        formal[formal_len++] = 0x00U;
+        if(large) formal[formal_len++] = 0x10U;
+        else if(cid != 0U)
+        {
+            formal[0] = static_cast<std::uint8_t>(0xE0U | cid);
+            formal[formal_len++] = 0x00U;
+        }
+        while(formal_len < formal.size()) formal[formal_len++] = 0x5aU;
+
+        std::array<std::uint8_t, 128> guarded{};
+        guarded.fill(0xa5U);
+        const auto before = guarded;
+        size_t output_len = 96;
+        REQUIRE(rohc_decompress4(decomp, formal.data(), formal.size(), guarded.data() + 16U,
+                                 &output_len) != 0);
+        REQUIRE(output_len == 0);
+        REQUIRE(guarded == before);
+        REQUIRE(rohc_decomp_has_feedback(decomp) == 1);
+        std::uint32_t feedback_cid = 0xffffffffU;
+        std::uint8_t feedback_type = 0;
+        REQUIRE(rohc_decomp_get_feedback(decomp, &feedback_cid, &feedback_type) == 0);
+        REQUIRE(feedback_cid == cid);
+        REQUIRE(round_trip(2));
+
+        rohc_decomp_free(decomp);
+        rohc_comp_free(comp);
+    }
 }
 
 TEST_CASE("ROHC decompressor rejects malformed FO packet families with feedback")
@@ -2832,7 +2935,7 @@ TEST_CASE("ROHC packet parser identifies large-CID IR and FO framing")
 }
 
 
-TEST_CASE("ROHC large-CID RTP channel round-trips IR IR-DYN and FO packets")
+TEST_CASE("ROHC large-CID RTP channel uses fail-closed IR refresh instead of private FO")
 {
     rohc_comp* comp = rohc_comp_new2(0x1234, ROHCCXX_DIRECTION_UPLINK);
     rohc_decomp* decomp = rohc_decomp_new2(0x1234, ROHCCXX_DIRECTION_UPLINK);
@@ -2871,7 +2974,7 @@ TEST_CASE("ROHC large-CID RTP channel round-trips IR IR-DYN and FO packets")
     rohc_len = sizeof(rohc);
     out_len = sizeof(out);
     REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
-    REQUIRE((rohc[0] & 0x80) == 0x00);
+    REQUIRE(rohc[0] == 0xFD);
     REQUIRE(rohc[1] == 0x92);
     REQUIRE(rohc[2] == 0x34);
     REQUIRE(rohc_decompress4(decomp, rohc, rohc_len, out, &out_len) == 0);

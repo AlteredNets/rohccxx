@@ -51,6 +51,12 @@ RFC 4362, IPv6, IP options, and all other untested variants remain explicit gaps
 The 364-case internal grammar/CRC corpus is unchanged and remains broader
 byte-grammar evidence, not external context interoperability evidence.
 
+The retained private/current RTP FO format is explicitly framed with Add-CID in
+small-CID channels, including Add-CID 0. Bare RTP or RTP/UDP-Lite PT-0-shaped
+packets are therefore rejected before the private FO bit parser is entered.
+Large-CID RTP contexts use IR refresh rather than the ambiguous private FO form;
+bare large-CID RTP PT-0 is likewise rejected.
+
 A second ROHCv2-capable implementation can optionally be added as corroborating evidence by consuming the generated corpus from `rohccxx_oracle_corpus` or `rfc5225_co_corpus`. This is useful for commercial acceptance testing or independent validation, but it is not required for the in-tree conformance suite to pass. See `docs/external_oracle_gap_register.md` for optional third-party corroboration targets.
 
 ## Corpus Format
