@@ -22,11 +22,11 @@ concurrency:
 
 jobs:
   build-release-candidate:
-    name: Build and validate v0.2.2
+    name: Build and validate v0.3.0
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      EXPECTED_VERSION: "0.2.2"
+      EXPECTED_VERSION: "0.3.0"
       EXPECTED_ROHC_LIB_COMMIT: "70589cc2b8650f82453815c84ba41b0ab80a52a0"
       CC: gcc
       CXX: g++
@@ -199,9 +199,9 @@ jobs:
             "${build_dir}/generated/include/rohccxx/version.h"
           grep -Fq "#define ROHCCXX_VERSION_MAJOR 0" \
             "${build_dir}/generated/include/rohccxx/version.h"
-          grep -Fq "#define ROHCCXX_VERSION_MINOR 2" \
+          grep -Fq "#define ROHCCXX_VERSION_MINOR 3" \
             "${build_dir}/generated/include/rohccxx/version.h"
-          grep -Fq "#define ROHCCXX_VERSION_PATCH 2" \
+          grep -Fq "#define ROHCCXX_VERSION_PATCH 0" \
             "${build_dir}/generated/include/rohccxx/version.h"
 
           printf 'build_dir=%s\n' "${build_dir}" >> "${GITHUB_OUTPUT}"
@@ -351,10 +351,10 @@ jobs:
 
           int main(void)
           {
-              if(strcmp(rohccxx_version_string(), "0.2.2") != 0 ||
+              if(strcmp(rohccxx_version_string(), "0.3.0") != 0 ||
                  rohccxx_version_major() != 0 ||
-                 rohccxx_version_minor() != 2 ||
-                 rohccxx_version_patch() != 2)
+                 rohccxx_version_minor() != 3 ||
+                 rohccxx_version_patch() != 0)
               {
                   return 1;
               }
@@ -388,7 +388,7 @@ jobs:
           cat > "${cmake_source}/CMakeLists.txt" <<'EOF'
           cmake_minimum_required(VERSION 3.16)
           project(rohccxx_consumer LANGUAGES C CXX)
-          find_package(rohccxx 0.2.2 CONFIG REQUIRED)
+          find_package(rohccxx 0.3.0 CONFIG REQUIRED)
           add_executable(consumer_shared consumer.c)
           target_link_libraries(consumer_shared PRIVATE rohccxx::rohccxx)
           set_property(TARGET consumer_shared PROPERTY LINKER_LANGUAGE CXX)
@@ -501,11 +501,11 @@ jobs:
       - name: Upload release candidate bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: rohccxx-0.2.2-release-candidate-${{ github.sha }}
+          name: rohccxx-0.3.0-release-candidate-${{ github.sha }}
           path: |
-            ${{ steps.artifact-paths.outputs.artifact_dir }}/rohccxx-0.2.2-source-with-submodules.tar.gz
-            ${{ steps.artifact-paths.outputs.artifact_dir }}/librohccxx-0.2.2.deb
-            ${{ steps.artifact-paths.outputs.artifact_dir }}/rohccxx-0.2.2-buildinfo.txt
+            ${{ steps.artifact-paths.outputs.artifact_dir }}/rohccxx-0.3.0-source-with-submodules.tar.gz
+            ${{ steps.artifact-paths.outputs.artifact_dir }}/librohccxx-0.3.0.deb
+            ${{ steps.artifact-paths.outputs.artifact_dir }}/rohccxx-0.3.0-buildinfo.txt
             ${{ steps.artifact-paths.outputs.artifact_dir }}/SHA256SUMS
           if-no-files-found: error
           retention-days: 14
