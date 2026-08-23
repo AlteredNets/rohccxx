@@ -107,6 +107,7 @@ struct Context
     bool      udp_checksum_used = false;
     uint32_t  esp_spi = 0;
     uint32_t  esp_sequence = 0;
+    bool      legacy_esp_payload_includes_header = false;
 
     RtpContext rtp;
 };

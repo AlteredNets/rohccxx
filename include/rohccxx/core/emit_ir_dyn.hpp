@@ -33,7 +33,7 @@ inline bool emit_ir_dyn_ip(uint8_t* out,
 }
 
 
-inline bool emit_ir_dyn_udp_lite(uint8_t* out,
+inline bool emit_ir_dyn_udp_lite_into(uint8_t* out,
                                  size_t* out_len,
                                  const Context& ctx)
 {
@@ -41,7 +41,7 @@ inline bool emit_ir_dyn_udp_lite(uint8_t* out,
 
     uint8_t* p = out;
     const uint8_t* end = out + *out_len;
-    if(!emit_add_cid_if_needed(p, ctx))
+    if(!emit_add_cid_if_needed(p, end, ctx))
         return false;
 
     *p++ = 0xF8;
@@ -65,7 +65,7 @@ inline bool emit_ir_dyn_udp(uint8_t* out,
     return emit_ir_udp(out, out_len, ctx);
 }
 
-inline bool emit_ir_dyn_rtp_udp_lite(uint8_t* out,
+inline bool emit_ir_dyn_rtp_udp_lite_into(uint8_t* out,
                                      size_t* out_len,
                                      const Context& ctx)
 {
@@ -73,7 +73,7 @@ inline bool emit_ir_dyn_rtp_udp_lite(uint8_t* out,
 
     uint8_t* p = out;
     const uint8_t* end = out + *out_len;
-    if(!emit_add_cid_if_needed(p, ctx))
+    if(!emit_add_cid_if_needed(p, end, ctx))
         return false;
 
     *p++ = 0xF8;
@@ -90,6 +90,20 @@ inline bool emit_ir_dyn_rtp_udp_lite(uint8_t* out,
     *crc_pos = utils::crc8(out, static_cast<size_t>(p - out));
     *out_len = static_cast<size_t>(p - out);
     return true;
+}
+
+inline bool emit_ir_dyn_udp_lite(uint8_t* out,
+                                 size_t* out_len,
+                                 const Context& ctx)
+{
+    return emit_ir_atomically(out, out_len, ctx, emit_ir_dyn_udp_lite_into);
+}
+
+inline bool emit_ir_dyn_rtp_udp_lite(uint8_t* out,
+                                     size_t* out_len,
+                                     const Context& ctx)
+{
+    return emit_ir_atomically(out, out_len, ctx, emit_ir_dyn_rtp_udp_lite_into);
 }
 
 inline bool emit_ir_dyn_rtp(uint8_t* out,

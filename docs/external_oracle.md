@@ -5,7 +5,7 @@ See LICENSE.md for licensing details.
 
 # External ROHCv2 Oracle Harness
 
-`rohccxx` keeps deterministic in-repo parity fixtures and generated corpora for every supported RFC 5225 profile family. It also builds the pinned rohc-lib submodule and runs mandatory bidirectional, exact-reconstruction tests for RTP/UDP/IP, UDP/IP, ESP/IP, and IP-only. Each side compresses an equivalent deterministic three-packet flow and the other side independently decompresses it.
+`rohccxx` keeps deterministic in-repo parity fixtures and generated corpora for every supported RFC 5225 profile family. It also builds the pinned rohc-lib submodule and runs mandatory bidirectional, exact-reconstruction tests for the tested IPv4, small-CID-0, no-IP-options subset of RTP/UDP/IP, UDP/IP, ESP/IP, and IP-only. Each side compresses an equivalent deterministic three-packet flow and the other side independently decompresses it. This evidence does not extend to IPv6, nonzero or large CIDs, IP options, extension-header chains, or packet families absent from those flows.
 
 The mandatory oracle tests use small CID 0 and the RFC 5225 profile identifiers. Corpus records are strictly ordered and carry an explicit profile, packet index, original length, compressed length, and hexadecimal packet bodies; invalid hexadecimal data, length disagreement, unsupported profiles, duplicate or out-of-order records, and incomplete flows are errors rather than skips.
 

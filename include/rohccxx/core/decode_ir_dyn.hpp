@@ -58,7 +58,7 @@ inline bool decode_ir_dyn_esp(const uint8_t* in,
     if(!detail::crc8_exact_matches(in, len, header_len, crc_index, received_crc))
         return false;
 
-    if(!detail::read_ip_dynamic_chain(in, len, pos, ctx))
+    if(!detail::read_legacy_ip_dynamic_consistent(in, len, pos, ctx))
         return false;
 
     ctx.profile = Profile::ESP;
@@ -108,7 +108,7 @@ inline bool decode_ir_dyn_ip(const uint8_t* in,
     if(!detail::crc8_exact_matches(in, len, header_len, crc_index, received_crc))
         return false;
 
-    if(!detail::read_ip_dynamic_chain(in, len, pos, ctx))
+    if(!detail::read_legacy_ip_dynamic_consistent(in, len, pos, ctx))
         return false;
 
     if(consumed)
@@ -158,7 +158,7 @@ inline bool decode_ir_dyn_udp_lite(const uint8_t* in,
     if(!detail::crc8_exact_matches(in, len, header_len, crc_index, received_crc))
         return false;
 
-    if(!detail::read_ip_dynamic_chain(in, len, pos, ctx))
+    if(!detail::read_legacy_ip_dynamic_consistent(in, len, pos, ctx))
         return false;
 
     ctx.udp_length_or_coverage = detail::read_u16(in + pos);
@@ -211,7 +211,7 @@ inline bool decode_ir_dyn_udp(const uint8_t* in,
     if(!detail::crc8_exact_matches(in, len, header_len, crc_index, received_crc))
         return false;
 
-    if(!detail::read_ip_dynamic_chain(in, len, pos, ctx))
+    if(!detail::read_legacy_ip_dynamic_consistent(in, len, pos, ctx))
         return false;
 
     ctx.udp_check = detail::read_u16(in + pos);
@@ -271,7 +271,7 @@ inline bool decode_ir_dyn_rtp_udp_lite(const uint8_t* in,
     if(!detail::crc8_exact_matches(in, len, candidate_len, crc_index, received_crc))
         return false;
 
-    if(!detail::read_ip_dynamic_chain(in, len, pos, ctx))
+    if(!detail::read_legacy_ip_dynamic_consistent(in, len, pos, ctx))
         return false;
 
     ctx.udp_length_or_coverage = detail::read_u16(in + pos);
@@ -378,7 +378,7 @@ inline bool decode_ir_dyn_rtp(const uint8_t* in,
     if(!detail::crc8_exact_matches(in, len, candidate_len, crc_index, received_crc))
         return false;
 
-    if(!detail::read_ip_dynamic_chain(in, len, pos, ctx))
+    if(!detail::read_legacy_ip_dynamic_consistent(in, len, pos, ctx))
         return false;
 
     ctx.udp_check = detail::read_u16(in + pos);

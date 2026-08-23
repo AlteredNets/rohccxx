@@ -35,7 +35,7 @@ This matrix tracks ROHCv2 profile work at a finer granularity than the high-leve
 
 ## rohc-lib Oracle Notes
 
-The pinned rohc-lib submodule is a mandatory bidirectional external oracle for the RFC 5225 RTP/UDP/IP, UDP/IP, ESP/IP, and IP-only initialization paths. The tests require exact reconstruction of three deterministic packets per profile in both directions. rohc-lib does not provide compatible RFC 5225 UDP-Lite profiles, so RTP/UDP-Lite/IP and UDP-Lite/IP retain internal coverage without an external interoperability claim. The optional RFC 4362 hook is unchanged.
+The pinned rohc-lib submodule is a mandatory bidirectional external oracle for deterministic three-packet IPv4, small-CID-0, no-IP-options flows in the RFC 5225 RTP/UDP/IP, UDP/IP, ESP/IP, and IP-only profiles. The tests require exact reconstruction in both directions; they do not externally validate IPv6, other CID forms, IP options, or extension-header chains. rohc-lib does not provide compatible RFC 5225 UDP-Lite profiles, so RTP/UDP-Lite/IP and UDP-Lite/IP retain internal coverage without an external interoperability claim. The optional RFC 4362 hook is unchanged.
 
 ## Near-Term Acceptance Gates
 

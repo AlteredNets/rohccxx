@@ -64,24 +64,30 @@ inline bool capture_rtp_packet(Context& ctx,
         return false;
     if(ipv4::is_fragmented(read_u16(ip_packet + 6)))
         return false;
+    if((ip_packet[0] >> 4U) != 4U || (ip_packet[0] & 0x0FU) != 5U || ip_packet[9] != 17U)
+        return false;
 
     const bool had_ipv4_rtp_context = ctx.rtp.initialized != 0;
     const std::uint16_t previous_ipv4_id = ctx.ipv4_id;
     const std::uint16_t previous_rtp_seq = ctx.rtp.last_seq;
 
+    ctx.ip_version = 4;
     ctx.ipv4_tos = ip_packet[1];
     ctx.ipv4_ttl = ip_packet[8];
     ctx.ipv4_id = read_u16(ip_packet + 4);
     ctx.ipv4_flags = static_cast<std::uint8_t>((read_u16(ip_packet + 6) >> 13U) & 0x07U);
     ctx.ipv4_saddr = read_u32(ip_packet + 12);
     ctx.ipv4_daddr = read_u32(ip_packet + 16);
+    ctx.ipv4_protocol = ip_packet[9];
     ctx.udp_sport = read_u16(ip_packet + 20);
     ctx.udp_dport = read_u16(ip_packet + 22);
     ctx.udp_check = read_u16(ip_packet + 26);
+    ctx.udp_checksum_used = ctx.udp_check != 0U ? 1U : 0U;
 
     const uint8_t* rtp = ip_packet + 28;
     const uint16_t seq = read_u16(rtp + 2);
     const uint32_t ts = read_u32(rtp + 4);
+    ctx.msn = seq;
     if(ctx.rtp.initialized && ctx.rtp.ts_stride == 0)
     {
         uint32_t stride = 0;
@@ -97,10 +103,24 @@ inline bool capture_rtp_packet(Context& ctx,
     {
         const auto id_delta = static_cast<std::uint16_t>(ctx.ipv4_id - previous_ipv4_id);
         const auto seq_delta = static_cast<std::uint16_t>(seq - previous_rtp_seq);
-        ctx.ipv4_id_sequential = id_delta != 0U && id_delta == seq_delta;
+        if(ctx.ipv4_id == 0U && previous_ipv4_id == 0U)
+            ctx.ipv4_id_behavior = 3U;
+        else if(id_delta != 0U && id_delta == seq_delta)
+            ctx.ipv4_id_behavior = 0U;
+        else
+        {
+            const auto swapped_current = static_cast<std::uint16_t>(
+                (ctx.ipv4_id << 8U) | (ctx.ipv4_id >> 8U));
+            const auto swapped_previous = static_cast<std::uint16_t>(
+                (previous_ipv4_id << 8U) | (previous_ipv4_id >> 8U));
+            const auto swapped_delta = static_cast<std::uint16_t>(swapped_current - swapped_previous);
+            ctx.ipv4_id_behavior = swapped_delta != 0U && swapped_delta == seq_delta ? 1U : 2U;
+        }
+        ctx.ipv4_id_sequential = ctx.ipv4_id_behavior <= 1U;
     }
     else
     {
+        ctx.ipv4_id_behavior = ctx.ipv4_id == 0U ? 3U : 2U;
         ctx.ipv4_id_sequential = false;
     }
 
@@ -146,17 +166,22 @@ int Compressor::compress(const uint8_t* ip_packet,
 {
     if(!rohc_packet || !rohc_len || *rohc_len == 0)
         return -1;
+    const size_t output_capacity = *rohc_len;
 
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     Context* ctx = context_table_.get(cid_);
     if(!ctx)
         return -1;
+    const Context context_before_compress = *ctx;
 
     ctx->profile = Profile::RTP;
     ctx->mode = Mode::Optimistic;
 
     if(!capture_rtp_packet(*ctx, ip_packet, ip_len))
+    {
+        *ctx = context_before_compress;
         return -1;
+    }
 
     bool ok = false;
     switch(ctx->rohc_state)
@@ -176,7 +201,21 @@ int Compressor::compress(const uint8_t* ip_packet,
     }
 
     if(!ok)
+    {
+        *ctx = context_before_compress;
         return -1;
+    }
+
+    constexpr size_t fixed_header_len = 40U;
+    const size_t payload_len = ip_len - fixed_header_len;
+    if(*rohc_len > output_capacity || payload_len > output_capacity - *rohc_len)
+    {
+        *ctx = context_before_compress;
+        return -1;
+    }
+    if(payload_len > 0)
+        std::memcpy(rohc_packet + *rohc_len, ip_packet + fixed_header_len, payload_len);
+    *rohc_len += payload_len;
 
     ++packet_count_;
     return 0;
