@@ -67,12 +67,32 @@ add_test(NAME interop_rfc5225_rohclib_to_rohccxx
 )
 
 add_test(NAME interop_rfc5225_co_rohccxx_to_rohclib
-    COMMAND sh -c "set -o pipefail; $<TARGET_FILE:rohccxx_rfc5225_interop> emit-co | $<TARGET_FILE:rohclib_rfc5225_interop> decode-co"
+    COMMAND ${CMAKE_COMMAND}
+        -DGENERATOR=$<TARGET_FILE:rohccxx_rfc5225_interop>
+        -DGENERATOR_MODE=emit-co
+        -DORACLE=$<TARGET_FILE:rohclib_rfc5225_interop>
+        -DORACLE_MODE=decode-co
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/run_corpus_oracle.cmake
 )
 
 add_test(NAME interop_rfc5225_co_rohclib_to_rohccxx
-    COMMAND sh -c "set -o pipefail; $<TARGET_FILE:rohclib_rfc5225_interop> emit-co | $<TARGET_FILE:rohccxx_rfc5225_interop> decode-co"
+    COMMAND ${CMAKE_COMMAND}
+        -DGENERATOR=$<TARGET_FILE:rohclib_rfc5225_interop>
+        -DGENERATOR_MODE=emit-co
+        -DORACLE=$<TARGET_FILE:rohccxx_rfc5225_interop>
+        -DORACLE_MODE=decode-co
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/run_corpus_oracle.cmake
 )
+
+# Keep mandatory interoperability launchers independent of shell pipeline
+# semantics. In particular, /bin/sh is dash on GitHub's Linux runners.
+file(READ "${CMAKE_CURRENT_LIST_FILE}" _interop_cmake_source)
+if(_interop_cmake_source MATCHES "set[ \t]+-o[ \t]+pipefail" OR
+   _interop_cmake_source MATCHES
+       "add_test\\(NAME[ \t]+interop_rfc5225_co_[^)]*COMMAND[ \t]+sh")
+    message(FATAL_ERROR
+        "Mandatory CO interop tests must use run_corpus_oracle.cmake, not a shell pipeline")
+endif()
 
 add_executable(rohccxx_oracle_corpus rohccxx_oracle_corpus.cpp)
 target_link_libraries(rohccxx_oracle_corpus rohccxx)
