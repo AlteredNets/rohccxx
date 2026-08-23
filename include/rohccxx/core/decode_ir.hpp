@@ -206,38 +206,12 @@ inline bool rtp_dynamic_extra_len(const uint8_t* in,
     return true;
 }
 
-inline bool find_crc8_len(const uint8_t* in,
-                          size_t len,
-                          size_t min_crc_len,
-                          size_t max_extra_len,
-                          size_t crc_index,
-                          uint8_t received_crc,
-                          size_t& crc_len)
-{
-    uint8_t crc_buf[1024];
-    for(size_t extra = 0; extra <= max_extra_len; ++extra)
-    {
-        const size_t candidate = min_crc_len + extra;
-        if(candidate > sizeof(crc_buf) || len < candidate || crc_index >= candidate)
-            continue;
-
-        std::memcpy(crc_buf, in, candidate);
-        crc_buf[crc_index] = 0x00;
-        if(utils::crc8(crc_buf, candidate) == received_crc)
-        {
-            crc_len = candidate;
-            return true;
-        }
-    }
-    return false;
-}
-
 } // namespace detail
 
 
 
 
-inline bool decode_ir_esp(const uint8_t* in,
+inline bool decode_ir_esp_legacy(const uint8_t* in,
                           size_t len,
                           Context& ctx,
                           size_t* consumed = nullptr)
@@ -290,7 +264,7 @@ inline bool decode_ir_esp(const uint8_t* in,
     return true;
 }
 
-inline bool decode_ir_ip(const uint8_t* in,
+inline bool decode_ir_ip_legacy(const uint8_t* in,
                          size_t len,
                          Context& ctx,
                          size_t* consumed = nullptr)
@@ -323,20 +297,15 @@ inline bool decode_ir_ip(const uint8_t* in,
         return false;
 
     const uint8_t received_crc = in[pos++];
-    size_t crc_len = 0;
-    const size_t min_crc_len = crc_len_no_cid + (has_cid ? 1U : 0U) + (ctx.large_cid ? cid::encoded_len(ctx.cid) : 0U);
     const size_t crc_index = has_cid ? 3U : (ctx.large_cid ? (2U + cid::encoded_len(ctx.cid)) : 2U);
-    if(!detail::find_crc8_len(in, len, min_crc_len, 168U, crc_index, received_crc, crc_len))
-        return false;
-    const size_t header_len = crc_len + 1U;
-    if(len < header_len)
-        return false;
 
     if(!detail::read_ip_static_chain(in, len, pos, ctx))
         return false;
     if(!detail::read_ip_dynamic_chain(in, len, pos, ctx))
         return false;
 
+    if(pos >= len)
+        return false;
     if(!detail::crc8_exact_matches(in, len, pos, crc_index, received_crc))
         return false;
     ctx.mode = detail::mode_from_wire(in[pos]);
@@ -382,14 +351,7 @@ inline bool decode_ir_udp_lite(const uint8_t* in,
         return false;
 
     const uint8_t received_crc = in[pos++];
-    size_t crc_len = 0;
-    const size_t min_crc_len = crc_len_no_cid + (has_cid ? 1U : 0U) + (ctx.large_cid ? cid::encoded_len(ctx.cid) : 0U);
     const size_t crc_index = has_cid ? 3U : (ctx.large_cid ? (2U + cid::encoded_len(ctx.cid)) : 2U);
-    if(!detail::find_crc8_len(in, len, min_crc_len, 168U, crc_index, received_crc, crc_len))
-        return false;
-    const size_t header_len = crc_len + 1U;
-    if(len < header_len)
-        return false;
 
     if(!detail::read_ip_static_chain(in, len, pos, ctx))
         return false;
@@ -408,6 +370,8 @@ inline bool decode_ir_udp_lite(const uint8_t* in,
     ctx.udp_check = detail::read_u16(in + pos);
     pos += 2;
 
+    if(pos >= len)
+        return false;
     if(!detail::crc8_exact_matches(in, len, pos, crc_index, received_crc))
         return false;
     ctx.mode = detail::mode_from_wire(in[pos]);
@@ -419,7 +383,7 @@ inline bool decode_ir_udp_lite(const uint8_t* in,
     return true;
 }
 
-inline bool decode_ir_udp(const uint8_t* in,
+inline bool decode_ir_udp_legacy(const uint8_t* in,
                           size_t len,
                           Context& ctx,
                           size_t* consumed = nullptr)
@@ -452,14 +416,7 @@ inline bool decode_ir_udp(const uint8_t* in,
         return false;
 
     const uint8_t received_crc = in[pos++];
-    size_t crc_len = 0;
-    const size_t min_crc_len = crc_len_no_cid + (has_cid ? 1U : 0U) + (ctx.large_cid ? cid::encoded_len(ctx.cid) : 0U);
     const size_t crc_index = has_cid ? 3U : (ctx.large_cid ? (2U + cid::encoded_len(ctx.cid)) : 2U);
-    if(!detail::find_crc8_len(in, len, min_crc_len, 168U, crc_index, received_crc, crc_len))
-        return false;
-    const size_t header_len = crc_len + 1U;
-    if(len < header_len)
-        return false;
 
     if(!detail::read_ip_static_chain(in, len, pos, ctx))
         return false;
@@ -476,6 +433,8 @@ inline bool decode_ir_udp(const uint8_t* in,
     ctx.udp_check = detail::read_u16(in + pos);
     pos += 2;
 
+    if(pos >= len)
+        return false;
     if(!detail::crc8_exact_matches(in, len, pos, crc_index, received_crc))
         return false;
     ctx.mode = detail::mode_from_wire(in[pos]);
@@ -521,14 +480,7 @@ inline bool decode_ir_rtp_udp_lite(const uint8_t* in,
         return false;
 
     const uint8_t received_crc = in[pos++];
-    size_t crc_len = 0;
-    const size_t min_crc_len = crc_len_no_cid + (has_cid ? 1U : 0U) + (ctx.large_cid ? cid::encoded_len(ctx.cid) : 0U);
     const size_t crc_index = has_cid ? 3U : (ctx.large_cid ? (2U + cid::encoded_len(ctx.cid)) : 2U);
-    if(!detail::find_crc8_len(in, len, min_crc_len, 168U, crc_index, received_crc, crc_len))
-        return false;
-    const size_t header_len = crc_len + 1U;
-    if(len < header_len)
-        return false;
 
     if(!detail::read_ip_static_chain(in, len, pos, ctx))
         return false;
@@ -560,9 +512,7 @@ inline bool decode_ir_rtp_udp_lite(const uint8_t* in,
         return false;
     if(pos >= len)
         return false;
-    const bool crc_matches = detail::crc8_exact_matches(in, len, pos, crc_index, received_crc) ||
-                             detail::crc8_exact_matches(in, len, pos + 1U, crc_index, received_crc);
-    if(!crc_matches)
+    if(!detail::crc8_exact_matches(in, len, pos, crc_index, received_crc))
         return false;
 
     ctx.mode = detail::mode_from_wire(in[pos]);
@@ -579,7 +529,7 @@ inline bool decode_ir_rtp_udp_lite(const uint8_t* in,
     return true;
 }
 
-inline bool decode_ir_rtp(const uint8_t* in,
+inline bool decode_ir_rtp_legacy(const uint8_t* in,
                           size_t len,
                           Context& ctx,
                           size_t* consumed = nullptr)
@@ -642,9 +592,7 @@ inline bool decode_ir_rtp(const uint8_t* in,
         return false;
     if(pos >= len)
         return false;
-    const bool crc_matches = detail::crc8_exact_matches(in, len, pos, crc_index, received_crc) ||
-                             detail::crc8_exact_matches(in, len, pos + 1U, crc_index, received_crc);
-    if(!crc_matches)
+    if(!detail::crc8_exact_matches(in, len, pos, crc_index, received_crc))
         return false;
 
     ctx.mode = detail::mode_from_wire(in[pos]);
@@ -659,6 +607,334 @@ inline bool decode_ir_rtp(const uint8_t* in,
     ctx.profile = Profile::RTP;
     ctx.rohc_state = RohcState::DynamicEstablished;
     return true;
+}
+
+namespace detail
+{
+
+inline bool read_standard_ip_static(const uint8_t* in, size_t len, size_t& pos, Context& ctx)
+{
+    if(pos >= len)
+        return false;
+    const uint8_t first = in[pos++];
+    const bool ipv6 = (first & 0x80U) != 0;
+    if((first & 0x40U) == 0)
+        return false; // only an innermost IP header is supported
+    if(!ipv6)
+    {
+        if((first & 0x3FU) != 0 || len - pos < 9U)
+            return false;
+        ctx.ip_version = 4;
+        ctx.ipv4_protocol = in[pos++];
+        ctx.ipv4_saddr = read_u32(in + pos); pos += 4;
+        ctx.ipv4_daddr = read_u32(in + pos); pos += 4;
+        ctx.ipv4_options_len = 0;
+        ctx.ipv4_options.fill(0);
+        return true;
+    }
+
+    // Supported RFC fl_zero form: version=1, innermost=1, reserved=0,
+    // discriminator=0, and the four flow-label reserved bits are zero.
+    if(first != 0xC0U || len - pos < 33U)
+        return false;
+    ctx.ip_version = 6;
+    ctx.ipv6_flow_label = 0;
+    ctx.ipv6_next_header = in[pos++];
+    ctx.ipv4_protocol = ctx.ipv6_next_header;
+    std::memcpy(ctx.ipv6_saddr.data(), in + pos, ctx.ipv6_saddr.size());
+    pos += ctx.ipv6_saddr.size();
+    std::memcpy(ctx.ipv6_daddr.data(), in + pos, ctx.ipv6_daddr.size());
+    pos += ctx.ipv6_daddr.size();
+    ctx.ipv6_extension_len = 0;
+    ctx.ipv6_extensions.fill(0);
+    return true;
+}
+
+inline bool read_standard_ip_dynamic(const uint8_t* in,
+                                     size_t len,
+                                     size_t& pos,
+                                     Context& ctx,
+                                     bool endpoint)
+{
+    if(ctx.ip_version == 6)
+    {
+        const size_t required = endpoint ? 5U : 2U;
+        if(len - pos < required)
+            return false;
+        ctx.ipv6_traffic_class = in[pos++];
+        ctx.ipv6_hop_limit = in[pos++];
+        if(endpoint)
+        {
+            const uint8_t control = in[pos++];
+            if((control & 0xFCU) != 0)
+                return false;
+            ctx.reorder_ratio = static_cast<uint8_t>(control & 0x03U);
+            ctx.msn = read_u16(in + pos); pos += 2;
+        }
+        return true;
+    }
+
+    if(len - pos < 3U)
+        return false;
+    const uint8_t control = in[pos++];
+    if(endpoint)
+    {
+        if((control & 0xE0U) != 0)
+            return false;
+        ctx.reorder_ratio = static_cast<uint8_t>((control >> 3U) & 0x03U);
+    }
+    else if((control & 0xF8U) != 0)
+    {
+        return false;
+    }
+    ctx.ipv4_flags = static_cast<uint8_t>(((control >> 2U) & 0x01U) << 1U);
+    ctx.ipv4_id_behavior = static_cast<uint8_t>(control & 0x03U);
+    ctx.ipv4_id_sequential = ctx.ipv4_id_behavior <= 1U;
+    ctx.ipv4_tos = in[pos++];
+    ctx.ipv4_ttl = in[pos++];
+    if(ctx.ipv4_id_behavior != 3U)
+    {
+        if(len - pos < 2U)
+            return false;
+        ctx.ipv4_id = read_u16(in + pos); pos += 2;
+    }
+    else
+    {
+        ctx.ipv4_id = 0;
+    }
+    if(endpoint)
+    {
+        if(len - pos < 2U)
+            return false;
+        ctx.msn = read_u16(in + pos); pos += 2;
+    }
+    return true;
+}
+
+inline bool read_standard_ir_prefix(const uint8_t* in,
+                                    size_t len,
+                                    size_t& pos,
+                                    const Context& expected,
+                                    uint8_t profile_id,
+                                    size_t& crc_index,
+                                    uint8_t& received_crc)
+{
+    pos = 0;
+    if(!expected.large_cid && expected.cid > 0)
+    {
+        if(pos >= len || in[pos++] != static_cast<uint8_t>(0xE0U | expected.cid))
+            return false;
+    }
+    if(pos >= len || in[pos++] != 0xFDU)
+        return false;
+    if(expected.large_cid)
+    {
+        uint32_t wire_cid = 0;
+        size_t cid_len = 0;
+        if(!cid::read_large(in + pos, len - pos, wire_cid, cid_len) || wire_cid != expected.cid)
+            return false;
+        pos += cid_len;
+    }
+    if(len - pos < 2U || in[pos++] != profile_id)
+        return false;
+    crc_index = pos;
+    received_crc = in[pos++];
+    return true;
+}
+
+inline bool standard_context_equal(const Context& a, const Context& b)
+{
+    return a.profile == b.profile && a.cid == b.cid && a.large_cid == b.large_cid &&
+           a.msn == b.msn && a.reorder_ratio == b.reorder_ratio &&
+           a.ip_version == b.ip_version && a.ipv4_tos == b.ipv4_tos &&
+           a.ipv4_ttl == b.ipv4_ttl && a.ipv4_id == b.ipv4_id &&
+           a.ipv4_flags == b.ipv4_flags && a.ipv4_protocol == b.ipv4_protocol &&
+           a.ipv4_id_behavior == b.ipv4_id_behavior &&
+           a.ipv4_id_sequential == b.ipv4_id_sequential &&
+           a.ipv4_saddr == b.ipv4_saddr && a.ipv4_daddr == b.ipv4_daddr &&
+           a.ipv6_traffic_class == b.ipv6_traffic_class &&
+           a.ipv6_flow_label == b.ipv6_flow_label &&
+           a.ipv6_next_header == b.ipv6_next_header &&
+           a.ipv6_hop_limit == b.ipv6_hop_limit &&
+           a.ipv6_saddr == b.ipv6_saddr && a.ipv6_daddr == b.ipv6_daddr &&
+           a.udp_sport == b.udp_sport && a.udp_dport == b.udp_dport &&
+           a.udp_check == b.udp_check &&
+           a.udp_checksum_used == b.udp_checksum_used &&
+           a.esp_spi == b.esp_spi &&
+           a.esp_sequence == b.esp_sequence && a.rtp.ssrc == b.rtp.ssrc &&
+           a.rtp.vpxcc == b.rtp.vpxcc && a.rtp.mpt == b.rtp.mpt &&
+           a.rtp.last_seq == b.rtp.last_seq && a.rtp.last_ts == b.rtp.last_ts;
+}
+
+inline bool decode_ir_standard(const uint8_t* in,
+                               size_t len,
+                               Context& ctx,
+                               Profile profile,
+                               uint8_t profile_id,
+                               size_t* consumed)
+{
+    const bool had_rtp_context = ctx.rtp.initialized != 0;
+    const uint16_t previous_rtp_seq = ctx.rtp.last_seq;
+    const uint32_t previous_rtp_ts = ctx.rtp.last_ts;
+    const bool had_ipv4_context = ctx.ip_version == 4 && ctx.rohc_state != RohcState::NoContext;
+    const uint16_t previous_ipv4_id = ctx.ipv4_id;
+    size_t pos = 0;
+    size_t crc_index = 0;
+    uint8_t received_crc = 0;
+    if(!read_standard_ir_prefix(in, len, pos, ctx, profile_id, crc_index, received_crc) ||
+       !read_standard_ip_static(in, len, pos, ctx))
+        return false;
+
+    if(profile == Profile::UDP || profile == Profile::RTP)
+    {
+        if(len - pos < 4U)
+            return false;
+        ctx.udp_sport = read_u16(in + pos); pos += 2;
+        ctx.udp_dport = read_u16(in + pos); pos += 2;
+        ctx.udp_checksum_used = false;
+    }
+    if(profile == Profile::ESP)
+    {
+        if(len - pos < 4U)
+            return false;
+        ctx.esp_spi = read_u32(in + pos); pos += 4;
+    }
+    if(profile == Profile::RTP)
+    {
+        if(len - pos < 4U)
+            return false;
+        ctx.rtp.ssrc = read_u32(in + pos); pos += 4;
+    }
+
+    if(!read_standard_ip_dynamic(in, len, pos, ctx, profile == Profile::IP))
+        return false;
+
+    if(profile == Profile::UDP)
+    {
+        if(len - pos < 5U)
+            return false;
+        ctx.udp_check = read_u16(in + pos); pos += 2;
+        ctx.udp_checksum_used = ctx.udp_check != 0;
+        ctx.msn = read_u16(in + pos); pos += 2;
+        const uint8_t control = in[pos++];
+        if((control & 0xFCU) != 0)
+            return false;
+        ctx.reorder_ratio = static_cast<uint8_t>(control & 0x03U);
+    }
+    else if(profile == Profile::ESP)
+    {
+        if(len - pos < 5U)
+            return false;
+        ctx.esp_sequence = read_u32(in + pos); pos += 4;
+        const uint8_t control = in[pos++];
+        if((control & 0xFCU) != 0)
+            return false;
+        ctx.reorder_ratio = static_cast<uint8_t>(control & 0x03U);
+        ctx.msn = static_cast<uint16_t>(ctx.esp_sequence);
+    }
+    else if(profile == Profile::RTP)
+    {
+        if(len - pos < 10U)
+            return false;
+        ctx.udp_check = read_u16(in + pos); pos += 2;
+        ctx.udp_checksum_used = ctx.udp_check != 0;
+        const uint8_t indicators = in[pos++];
+        if((indicators & 0x80U) != 0 || (indicators & 0x1CU) != 0)
+            return false; // strides and CSRC lists are not yet supported here
+        ctx.reorder_ratio = static_cast<uint8_t>((indicators >> 5U) & 0x03U);
+        const uint8_t pad_extension = static_cast<uint8_t>(indicators & 0x03U);
+        ctx.rtp.vpxcc = static_cast<uint8_t>(0x80U | ((pad_extension & 0x02U) << 4U) |
+                                             ((pad_extension & 0x01U) << 4U));
+        ctx.rtp.mpt = in[pos++];
+        ctx.rtp.last_seq = read_u16(in + pos); pos += 2;
+        ctx.rtp.last_ts = read_u32(in + pos); pos += 4;
+        if(had_rtp_context)
+        {
+            uint32_t stride = 0;
+            uint32_t residue = 0;
+            if(encoding::infer_timestamp_stride(previous_rtp_seq,
+                                                previous_rtp_ts,
+                                                ctx.rtp.last_seq,
+                                                ctx.rtp.last_ts,
+                                                stride,
+                                                residue))
+            {
+                ctx.rtp.ts_stride = stride;
+                ctx.rtp.ts_residue = residue;
+            }
+        }
+        if(ctx.ip_version == 4 && had_ipv4_context)
+        {
+            const uint16_t id_delta = static_cast<uint16_t>(ctx.ipv4_id - previous_ipv4_id);
+            const uint16_t seq_delta = static_cast<uint16_t>(ctx.rtp.last_seq - previous_rtp_seq);
+            ctx.ipv4_id_sequential = id_delta == seq_delta;
+        }
+        ctx.msn = ctx.rtp.last_seq;
+        ctx.rtp.initialized = 1;
+        ctx.rtp.seq_window.init(ctx.rtp.last_seq);
+        ctx.rtp.ts_window.init(ctx.rtp.last_ts);
+    }
+
+    if(!crc8_exact_matches(in, len, pos, crc_index, received_crc))
+        return false;
+    ctx.profile = profile;
+    ctx.rohc_state = profile == Profile::RTP ? RohcState::DynamicEstablished
+                                             : RohcState::StaticEstablished;
+    if(consumed)
+        *consumed = pos;
+    return true;
+}
+
+template<typename LegacyDecoder>
+inline bool decode_ir_compatible(const uint8_t* in,
+                                 size_t len,
+                                 Context& ctx,
+                                 Profile profile,
+                                 uint8_t profile_id,
+                                 LegacyDecoder legacy,
+                                 size_t* consumed)
+{
+    Context standard_ctx = ctx;
+    Context legacy_ctx = ctx;
+    size_t standard_len = 0;
+    size_t legacy_len = 0;
+    const bool standard_ok = decode_ir_standard(in, len, standard_ctx, profile, profile_id, &standard_len);
+    const bool legacy_ok = legacy(in, len, legacy_ctx, &legacy_len);
+    if(standard_ok && legacy_ok &&
+       (standard_len != legacy_len || !standard_context_equal(standard_ctx, legacy_ctx)))
+        return false;
+    if(!standard_ok && !legacy_ok)
+        return false;
+    ctx = standard_ok ? standard_ctx : legacy_ctx;
+    if(consumed)
+        *consumed = standard_ok ? standard_len : legacy_len;
+    return true;
+}
+
+} // namespace detail
+
+inline bool decode_ir_esp(const uint8_t* in, size_t len, Context& ctx, size_t* consumed = nullptr)
+{
+    return detail::decode_ir_compatible(in, len, ctx, Profile::ESP, 0x03,
+                                        decode_ir_esp_legacy, consumed);
+}
+
+inline bool decode_ir_ip(const uint8_t* in, size_t len, Context& ctx, size_t* consumed = nullptr)
+{
+    return detail::decode_ir_compatible(in, len, ctx, Profile::IP, 0x04,
+                                        decode_ir_ip_legacy, consumed);
+}
+
+inline bool decode_ir_udp(const uint8_t* in, size_t len, Context& ctx, size_t* consumed = nullptr)
+{
+    return detail::decode_ir_compatible(in, len, ctx, Profile::UDP, 0x02,
+                                        decode_ir_udp_legacy, consumed);
+}
+
+inline bool decode_ir_rtp(const uint8_t* in, size_t len, Context& ctx, size_t* consumed = nullptr)
+{
+    return detail::decode_ir_compatible(in, len, ctx, Profile::RTP, 0x01,
+                                        decode_ir_rtp_legacy, consumed);
 }
 
 } // namespace rohccxx

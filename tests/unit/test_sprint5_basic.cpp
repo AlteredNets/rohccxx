@@ -40,7 +40,7 @@ TEST_CASE("Sprint 5: First RTP packet emits IR", "[sprint5][ir]")
     rohc_comp_free(c);
 }
 
-TEST_CASE("Sprint 5: Second RTP packet emits IR-DYN", "[sprint5][ir-dyn]")
+TEST_CASE("Sprint 5: Second RTP packet emits standards-compliant IR refresh", "[sprint5][ir]")
 {
     rohc_comp* c = rohc_comp_new2(4, ROHCCXX_DIRECTION_UPLINK);
 
@@ -56,12 +56,12 @@ TEST_CASE("Sprint 5: Second RTP packet emits IR-DYN", "[sprint5][ir-dyn]")
     rohccxx::Context ctx{};
     REQUIRE(rohccxx::decode_ir_rtp(out, out_len, ctx));
 
-    // Second packet → IR‑DYN
+    // ROHCv2 has no IR-DYN packet; refresh with another standards-compliant IR.
     make_valid_rtp(pkt, 1001, 1334, 0x11223344);
     out_len = sizeof(out);
     REQUIRE(rohc_compress4(c, pkt, sizeof(pkt), out, &out_len) == 0);
 
-    REQUIRE(rohccxx::decode_ir_dyn_rtp(out, out_len, ctx));
+    REQUIRE(rohccxx::decode_ir_rtp(out, out_len, ctx));
 
     REQUIRE(ctx.rtp.last_seq == 1001);
     REQUIRE(ctx.rtp.last_ts == 1334);

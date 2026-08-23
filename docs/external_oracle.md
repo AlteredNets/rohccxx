@@ -5,7 +5,11 @@ See LICENSE.md for licensing details.
 
 # External ROHCv2 Oracle Harness
 
-`rohccxx` keeps deterministic in-repo parity fixtures and generated corpora for every supported RFC 5225 profile family. These in-repo tests are the normal release baseline.
+`rohccxx` keeps deterministic in-repo parity fixtures and generated corpora for every supported RFC 5225 profile family. It also builds the pinned rohc-lib submodule and runs mandatory bidirectional, exact-reconstruction tests for RTP/UDP/IP, UDP/IP, ESP/IP, and IP-only. Each side compresses an equivalent deterministic three-packet flow and the other side independently decompresses it.
+
+The mandatory oracle tests use small CID 0 and the RFC 5225 profile identifiers. Corpus records are strictly ordered and carry an explicit profile, packet index, original length, compressed length, and hexadecimal packet bodies; invalid hexadecimal data, length disagreement, unsupported profiles, duplicate or out-of-order records, and incomplete flows are errors rather than skips.
+
+rohc-lib does not expose the RFC 5225 UDP-Lite profiles used by this project, so RTP/UDP-Lite/IP and UDP-Lite/IP are explicitly outside this external-oracle claim. RFC 4362 remains covered only by the optional hook below. The 364-case formal CO corpus remains internal grammar/CRC evidence and is not described as end-to-end interoperability.
 
 A second ROHCv2-capable implementation can optionally be added as corroborating evidence by consuming the generated corpus from `rohccxx_oracle_corpus` or `rfc5225_co_corpus`. This is useful for commercial acceptance testing or independent validation, but it is not required for the in-tree conformance suite to pass. See `docs/external_oracle_gap_register.md` for optional third-party corroboration targets.
 

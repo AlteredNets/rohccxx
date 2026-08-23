@@ -35,7 +35,7 @@ This matrix tracks ROHCv2 profile work at a finer granularity than the high-leve
 
 ## rohc-lib Oracle Notes
 
-The bundled rohc-lib submodule exposes ROHC profile constants for RTP, UDP, ESP, IP, and UDP-Lite, but its own robustness tests classify those constants as non-ROHCv2 profiles. Treat rohc-lib as the external oracle for the existing RTP interop path. For current non-RTP ROHCv2 profiles, deterministic byte-trace fixtures are the active parity oracle. `rohccxx_oracle_corpus` and the optional `ROHCCXX_EXTERNAL_ORACLE` CTest hook provide the expansion point for a separate v2-capable external oracle.
+The pinned rohc-lib submodule is a mandatory bidirectional external oracle for the RFC 5225 RTP/UDP/IP, UDP/IP, ESP/IP, and IP-only initialization paths. The tests require exact reconstruction of three deterministic packets per profile in both directions. rohc-lib does not provide compatible RFC 5225 UDP-Lite profiles, so RTP/UDP-Lite/IP and UDP-Lite/IP retain internal coverage without an external interoperability claim. The optional RFC 4362 hook is unchanged.
 
 ## Near-Term Acceptance Gates
 

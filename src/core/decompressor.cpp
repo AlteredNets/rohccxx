@@ -145,17 +145,10 @@ int Decompressor::decompress(const uint8_t* rohc_packet,
     ctx->mode = Mode::Optimistic;
 
     bool ok = false;
-    switch(ctx->rohc_state)
-    {
-        case RohcState::NoContext:
-            ok = decode_ir_rtp(rohc_packet, rohc_len, *ctx);
-            break;
-
-        case RohcState::StaticEstablished:
-        case RohcState::DynamicEstablished:
-            ok = decode_ir_dyn_rtp(rohc_packet, rohc_len, *ctx);
-            break;
-    }
+    if((rohc_packet[0] & 0xFEU) == 0xFCU)
+        ok = decode_ir_rtp(rohc_packet, rohc_len, *ctx);
+    else
+        ok = decode_ir_dyn_rtp(rohc_packet, rohc_len, *ctx);
 
     if(!ok)
         return -1;

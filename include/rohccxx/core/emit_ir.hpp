@@ -41,11 +41,13 @@ inline bool emit_ir_esp(uint8_t* out,
     *p++ = 0x03;
     uint8_t* crc_pos = p++;
 
-    rfc5225::write_ip_static_with_protocol(p, ctx, ctx.ipv4_protocol);
-    rfc5225::write_ip_dynamic(p, ctx);
+    if(!rfc5225::write_standard_ip_static(p, end, ctx) ||
+       !rfc5225::write_standard_esp_static(p, end, ctx) ||
+       !rfc5225::write_standard_ip_dynamic(p, end, ctx, false) ||
+       !rfc5225::write_standard_esp_dynamic(p, end, ctx))
+        return false;
 
     *crc_pos = utils::crc8(out, static_cast<size_t>(p - out));
-    *p++ = static_cast<uint8_t>((static_cast<uint8_t>(ctx.mode) & 0x03) << 2);
     *out_len = static_cast<size_t>(p - out);
     return true;
 }
@@ -67,11 +69,11 @@ inline bool emit_ir_ip(uint8_t* out,
     *p++ = 0x04;
     uint8_t* crc_pos = p++;
 
-    rfc5225::write_ip_static_with_protocol(p, ctx, ctx.ipv4_protocol);
-    rfc5225::write_ip_dynamic(p, ctx);
+    if(!rfc5225::write_standard_ip_static(p, end, ctx) ||
+       !rfc5225::write_standard_ip_dynamic(p, end, ctx, true))
+        return false;
 
     *crc_pos = utils::crc8(out, static_cast<size_t>(p - out));
-    *p++ = static_cast<uint8_t>((static_cast<uint8_t>(ctx.mode) & 0x03) << 2);
     *out_len = static_cast<size_t>(p - out);
     return true;
 }
@@ -122,13 +124,14 @@ inline bool emit_ir_udp(uint8_t* out,
     *p++ = 0x02;
     uint8_t* crc_pos = p++;
 
-    rfc5225::write_ip_static(p, ctx);
+    if(!rfc5225::write_standard_ip_static(p, end, ctx))
+        return false;
     rfc5225::write_udp_static(p, ctx);
-    rfc5225::write_ip_dynamic(p, ctx);
-    rfc5225::write_udp_dynamic(p, ctx);
+    if(!rfc5225::write_standard_ip_dynamic(p, end, ctx, false) ||
+       !rfc5225::write_standard_udp_endpoint_dynamic(p, end, ctx))
+        return false;
 
     *crc_pos = utils::crc8(out, static_cast<size_t>(p - out));
-    *p++ = static_cast<uint8_t>((static_cast<uint8_t>(ctx.mode) & 0x03) << 2);
     *out_len = static_cast<size_t>(p - out);
     return true;
 }
@@ -182,16 +185,17 @@ inline bool emit_ir_rtp(uint8_t* out,
     *p++ = 0x01;
     uint8_t* crc_pos = p++;
 
-    rfc5225::write_ip_static(p, ctx);
+    if(!rfc5225::write_standard_ip_static(p, end, ctx))
+        return false;
     rfc5225::write_udp_static(p, ctx);
     rfc5225::write_rtp_static(p, ctx);
-    rfc5225::write_ip_dynamic(p, ctx);
+    if(!rfc5225::write_standard_ip_dynamic(p, end, ctx, false))
+        return false;
     rfc5225::write_udp_dynamic(p, ctx);
-    if(!rfc5225::write_rtp_dynamic(p, end, ctx))
+    if(!rfc5225::write_standard_rtp_dynamic(p, end, ctx))
         return false;
 
     *crc_pos = utils::crc8(out, static_cast<size_t>(p - out));
-    *p++ = static_cast<uint8_t>((static_cast<uint8_t>(ctx.mode) & 0x03) << 2);
     *out_len = static_cast<size_t>(p - out);
     return true;
 }

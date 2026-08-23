@@ -42,7 +42,7 @@ int main()
         return 4;
     }
 
-    if (!rohc_comp_enable_profile(comp, ROHC_PROFILE_RTP))
+    if (!rohc_comp_enable_profile(comp, ROHCv2_PROFILE_IP_UDP_RTP))
     {
         rohc_comp_free(comp);
         return 5;

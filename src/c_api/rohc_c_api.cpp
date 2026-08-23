@@ -149,6 +149,10 @@ static bool capture_ip_context(rohccxx::Context& ctx,
             (rohccxx::wire::to_host(view.ip4->flags_fragment) >> 13U) & 0x07U);
         ctx.ipv4_saddr = rohccxx::wire::to_host(view.ip4->src);
         ctx.ipv4_daddr = rohccxx::wire::to_host(view.ip4->dst);
+        // The current compressor uses the RFC sequential behavior for IR.
+        // A zero value is still a valid member of that modulo-16-bit sequence.
+        ctx.ipv4_id_behavior = 0U;
+        ctx.ipv4_id_sequential = true;
         return capture_ipv4_options(ctx, packet, view.header_len);
     }
 
@@ -519,6 +523,40 @@ static bool build_rtp_packet(uint8_t* out,
     return true;
 }
 
+static bool build_ipv6_ip_packet(uint8_t* out,
+                                 size_t* out_len,
+                                 const rohccxx::Context& ctx,
+                                 const uint8_t* payload,
+                                 size_t payload_len);
+
+static bool build_esp_packet(uint8_t* out,
+                             size_t* out_len,
+                             const rohccxx::Context& ctx,
+                             const uint8_t* payload,
+                             size_t payload_len)
+{
+    constexpr size_t esp_len = 8U;
+    const size_t ip_len = ctx.ip_version == 6 ? 40U : 20U;
+    if(*out_len < ip_len + esp_len + payload_len)
+        return false;
+    uint8_t esp_payload[2048] = {};
+    if(esp_len + payload_len > sizeof(esp_payload))
+        return false;
+    esp_payload[0] = static_cast<uint8_t>(ctx.esp_spi >> 24);
+    esp_payload[1] = static_cast<uint8_t>(ctx.esp_spi >> 16);
+    esp_payload[2] = static_cast<uint8_t>(ctx.esp_spi >> 8);
+    esp_payload[3] = static_cast<uint8_t>(ctx.esp_spi);
+    esp_payload[4] = static_cast<uint8_t>(ctx.esp_sequence >> 24);
+    esp_payload[5] = static_cast<uint8_t>(ctx.esp_sequence >> 16);
+    esp_payload[6] = static_cast<uint8_t>(ctx.esp_sequence >> 8);
+    esp_payload[7] = static_cast<uint8_t>(ctx.esp_sequence);
+    if(payload_len > 0)
+        std::memcpy(esp_payload + esp_len, payload, payload_len);
+    return ctx.ip_version == 6
+        ? build_ipv6_ip_packet(out, out_len, ctx, esp_payload, esp_len + payload_len)
+        : build_ip_packet(out, out_len, ctx, esp_payload, esp_len + payload_len);
+}
+
 
 static bool build_ipv6_header(uint8_t* out,
                               size_t total,
@@ -872,6 +910,8 @@ static bool should_emit_ir(const rohccxx::Context& ctx)
 
 static bool should_emit_ir_dyn(const rohccxx::Context& ctx)
 {
+    // ROHCv2 has no IR-DYN format. Repeat the standards-compliant IR while
+    // establishing the dynamic context before selecting a CO packet.
     if(ctx.tx_count == 1 || ctx.rohc_state == rohccxx::RohcState::StaticEstablished)
         return true;
     return ctx.mode == rohccxx::Mode::Reliable && ctx.static_acked && !ctx.dynamic_acked;
@@ -1830,6 +1870,17 @@ rohc_compress4(struct rohc_comp* comp,
     }
 
     Profile profile = ipv4_fragmented ? Profile::Uncompressed : classify_packet(ip_packet, ip_packet_len);
+    const bool unsupported_standard_chain =
+        (!ip_view.is_ipv6 && ip_view.header_len != sizeof(ipv4::Header)) ||
+        (ip_view.is_ipv6 && (ip_view.extension_len != 0 ||
+         (wire::to_host(ip_view.ip6->version_tc_flow) & 0x000FFFFFU) != 0)) ||
+        (rtp && (wire::to_host(rtp->vpxcc) & 0x3FU) != 0);
+    if(unsupported_standard_chain &&
+       (profile == Profile::RTP || profile == Profile::UDP ||
+        profile == Profile::ESP || profile == Profile::IP))
+    {
+        profile = Profile::Uncompressed;
+    }
     DBG("profile=%u", static_cast<unsigned>(profile));
 
     uint32_t cid = comp->impl.current_cid;
@@ -1907,6 +1958,8 @@ rohc_compress4(struct rohc_comp* comp,
         ctx->rtp.mpt = wire::to_host(rtp->mpt);
         ctx->rtp.last_seq = seq;
         ctx->rtp.last_ts = ts;
+        ctx->msn = seq;
+        ctx->udp_checksum_used = ctx->udp_check != 0;
         ctx->rtp.ssrc = wire::to_host(rtp->ssrc);
         const size_t rtp_offset = ip_view.header_len + sizeof(*udp);
         RtpPayloadView rtp_payload{};
@@ -1970,6 +2023,8 @@ rohc_compress4(struct rohc_comp* comp,
         ctx->rtp.mpt = wire::to_host(rtp->mpt);
         ctx->rtp.last_seq = seq;
         ctx->rtp.last_ts = ts;
+        ctx->msn = seq;
+        ctx->udp_checksum_used = ctx->udp_check != 0;
         ctx->rtp.ssrc = wire::to_host(rtp->ssrc);
         const size_t rtp_offset = ip_view.header_len + sizeof(*udp);
         RtpPayloadView rtp_payload{};
@@ -2025,6 +2080,8 @@ rohc_compress4(struct rohc_comp* comp,
         ctx->udp_dport = wire::to_host(udp->dst_port);
         ctx->udp_length_or_coverage = wire::to_host(udp->length);
         ctx->udp_check = wire::to_host(udp->checksum);
+        ctx->udp_checksum_used = ctx->udp_check != 0;
+        ctx->msn = static_cast<std::uint16_t>(ctx->tx_count + 1U);
         const size_t out_capacity = *rohc_packet_len;
         if(should_emit_ir(*ctx))
         {
@@ -2055,6 +2112,7 @@ rohc_compress4(struct rohc_comp* comp,
         ctx->mode = comp->impl.mode;
         if(!capture_common())
             return -1;
+        ctx->msn = static_cast<std::uint16_t>(ctx->tx_count + 1U);
         const size_t out_capacity = *rohc_packet_len;
         if(should_emit_ir(*ctx))
         {
@@ -2085,28 +2143,27 @@ rohc_compress4(struct rohc_comp* comp,
         ctx->mode = comp->impl.mode;
         if(!capture_common())
             return -1;
+        if(ip_packet_len < ip_view.header_len + 8U)
+            return -1;
+        const uint8_t* esp = ip_packet + ip_view.header_len;
+        ctx->esp_spi = (static_cast<uint32_t>(esp[0]) << 24U) |
+                       (static_cast<uint32_t>(esp[1]) << 16U) |
+                       (static_cast<uint32_t>(esp[2]) << 8U) |
+                       static_cast<uint32_t>(esp[3]);
+        ctx->esp_sequence = (static_cast<uint32_t>(esp[4]) << 24U) |
+                            (static_cast<uint32_t>(esp[5]) << 16U) |
+                            (static_cast<uint32_t>(esp[6]) << 8U) |
+                            static_cast<uint32_t>(esp[7]);
+        ctx->msn = static_cast<std::uint16_t>(ctx->esp_sequence);
         const size_t out_capacity = *rohc_packet_len;
-        if(should_emit_ir(*ctx))
-        {
-            ctx->rohc_state = RohcState::StaticEstablished;
-            if(!emit_ir_esp(rohc_packet, rohc_packet_len, *ctx))
-                return -1;
-        }
-        else if(should_emit_ir_dyn(*ctx))
-        {
-            ctx->rohc_state = RohcState::DynamicEstablished;
-            if(!emit_ir_dyn_esp(rohc_packet, rohc_packet_len, *ctx))
-                return -1;
-        }
-        else
-        {
-            ctx->rohc_state = RohcState::DynamicEstablished;
-            if(!emit_esp_fo(rohc_packet, rohc_packet_len, *ctx))
-                return -1;
-            if(!ctx->large_cid && !prepend_small_cid(rohc_packet, rohc_packet_len, out_capacity, cid))
-                return -1;
-        }
-        return append_payload(*rohc_packet_len, ip_view.header_len, out_capacity) ? 0 : -1;
+        // The implemented ESP FO format does not carry the 32-bit ESP sequence
+        // number.  Since the ESP header is now captured rather than copied as
+        // payload, use the standardized IR refresh until a standards-compliant
+        // compressed ESP sequence encoding is available.
+        ctx->rohc_state = RohcState::DynamicEstablished;
+        if(!emit_ir_esp(rohc_packet, rohc_packet_len, *ctx))
+            return -1;
+        return append_payload(*rohc_packet_len, ip_view.header_len + 8U, out_capacity) ? 0 : -1;
     }
 
     if(profile == Profile::UDP_Lite && udp)
@@ -2791,7 +2848,14 @@ rohc_decompress4(struct rohc_decomp* decomp,
         if(built) { decomp->impl.mode = ctx->mode; return verify_rohcoipsec_icv(0); } return fail_with_feedback(cid);
     }
 
-    if(ctx->profile == Profile::IP || ctx->profile == Profile::ESP)
+    if(ctx->profile == Profile::ESP)
+    {
+        const bool built = build_esp_packet(ip_packet, ip_packet_len, *ctx, payload, payload_len);
+        if(built) { decomp->impl.mode = ctx->mode; return verify_rohcoipsec_icv(0); }
+        return fail_with_feedback(cid);
+    }
+
+    if(ctx->profile == Profile::IP)
     {
         const bool built = ctx->ip_version == 6
             ? build_ipv6_ip_packet(ip_packet, ip_packet_len, *ctx, payload, payload_len)

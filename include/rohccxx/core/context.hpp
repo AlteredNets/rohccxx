@@ -77,6 +77,8 @@ struct Context
     uint8_t   nack_count = 0;
     bool      static_acked = false;
     bool      dynamic_acked = false;
+    uint16_t  msn = 0;
+    uint8_t   reorder_ratio = 0;
 
     uint8_t   ip_version = 4;
     uint8_t   ipv4_tos = 0;
@@ -84,6 +86,7 @@ struct Context
     uint16_t  ipv4_id = 0;
     uint8_t   ipv4_flags = 0;
     bool      ipv4_id_sequential = false;
+    uint8_t   ipv4_id_behavior = 0;
     uint8_t   ipv4_protocol = 0;
     uint32_t  ipv4_saddr = 0;
     uint32_t  ipv4_daddr = 0;
@@ -101,6 +104,9 @@ struct Context
     uint16_t  udp_dport = 0;
     uint16_t  udp_length_or_coverage = 0;
     uint16_t  udp_check = 0;
+    bool      udp_checksum_used = false;
+    uint32_t  esp_spi = 0;
+    uint32_t  esp_sequence = 0;
 
     RtpContext rtp;
 };

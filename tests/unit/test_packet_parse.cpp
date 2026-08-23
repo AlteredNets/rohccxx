@@ -2023,7 +2023,7 @@ TEST_CASE("ROHC decompressor selects Add-CID context for IR packets")
 
 
 
-TEST_CASE("ROHC decompressor selects Add-CID context for IR-DYN packets")
+TEST_CASE("ROHC decompressor selects Add-CID context for IR refresh packets")
 {
     rohccxx::Context ctx{};
     ctx.cid = 3;
@@ -2056,7 +2056,7 @@ TEST_CASE("ROHC decompressor selects Add-CID context for IR-DYN packets")
     rohc_len = sizeof(rohc);
     REQUIRE(rohccxx::emit_ir_dyn_udp(rohc, &rohc_len, ctx));
     REQUIRE(rohc[0] == 0xE3);
-    REQUIRE(rohc[1] == 0xF8);
+    REQUIRE(rohc[1] == 0xFD);
 
     const std::uint8_t payload[] = {0xAA, 0xBB, 0xCC, 0xDD};
     REQUIRE(rohc_len + sizeof(payload) <= sizeof(rohc));
@@ -2234,6 +2234,8 @@ TEST_CASE("ROHC decompressor selects Add-CID context for ESP FO packets")
     ctx.ipv4_ttl = 64;
     ctx.ipv4_saddr = 0xC0000201;
     ctx.ipv4_daddr = 0xC6336402;
+    ctx.esp_spi = 0x01020304;
+    ctx.esp_sequence = 7;
 
     std::uint8_t rohc[128] = {};
     size_t rohc_len = sizeof(rohc);
@@ -2255,10 +2257,12 @@ TEST_CASE("ROHC decompressor selects Add-CID context for ESP FO packets")
 
     out_len = sizeof(out);
     REQUIRE(rohc_decompress4(decomp, rohc, rohc_len, out, &out_len) == 0);
-    REQUIRE(out_len == 24);
+    REQUIRE(out_len == 32);
     require_ip_header_id(out, 0x5678);
     REQUIRE(out[9] == 50);
-    REQUIRE(std::memcmp(out + 20, payload, sizeof(payload)) == 0);
+    REQUIRE((out[20] == 0x01 && out[21] == 0x02 && out[22] == 0x03 && out[23] == 0x04));
+    REQUIRE((out[24] == 0 && out[25] == 0 && out[26] == 0 && out[27] == 7));
+    REQUIRE(std::memcmp(out + 28, payload, sizeof(payload)) == 0);
 
     rohc_decomp_free(decomp);
 }
@@ -2721,7 +2725,7 @@ TEST_CASE("ROHC compressor emits selected nonzero CID across UDP IR IR-DYN and F
     out_len = sizeof(out);
     REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
     REQUIRE(rohc[0] == 0xE3);
-    REQUIRE(rohc[1] == 0xF8);
+    REQUIRE(rohc[1] == 0xFD);
     REQUIRE(rohc_decompress4(decomp, rohc, rohc_len, out, &out_len) == 0);
     REQUIRE(std::memcmp(out, ip, sizeof(ip)) == 0);
 
@@ -2853,7 +2857,7 @@ TEST_CASE("ROHC large-CID RTP channel round-trips IR IR-DYN and FO packets")
     rohc_len = sizeof(rohc);
     out_len = sizeof(out);
     REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
-    REQUIRE(rohc[0] == 0xF8);
+    REQUIRE(rohc[0] == 0xFD);
     REQUIRE(rohc[1] == 0x92);
     REQUIRE(rohc[2] == 0x34);
     REQUIRE(rohc[3] == 0x01);
@@ -2934,7 +2938,7 @@ TEST_CASE("ROHC large-CID UDP channel round-trips IR IR-DYN and FO packets")
     rohc_len = sizeof(rohc);
     out_len = sizeof(out);
     REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
-    REQUIRE(rohc[0] == 0xF8);
+    REQUIRE(rohc[0] == 0xFD);
     REQUIRE(rohc[1] == 0x92);
     REQUIRE(rohc[2] == 0x34);
     REQUIRE(rohc[3] == 0x02);
@@ -3020,7 +3024,10 @@ TEST_CASE("ROHC large-CID channels round-trip remaining compressed profiles")
         rohc_len = sizeof(rohc);
         out_len = sizeof(out);
         REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
-        REQUIRE(rohc[0] == 0xF8);
+        REQUIRE(rohc[0] == (item.profile == rohccxx::Profile::UDP_Lite ||
+                                    item.profile == rohccxx::Profile::RTP_UDP_Lite
+                                ? 0xF8
+                                : 0xFD));
         REQUIRE(rohc[1] == 0x92);
         REQUIRE(rohc[2] == 0x34);
         REQUIRE(rohc[3] == item.ir_profile_id);
@@ -3049,6 +3056,8 @@ TEST_CASE("ROHC large-CID channels round-trip remaining compressed profiles")
             // This packet changes IP-ID behavior, so IR-DYN must refresh context.
             REQUIRE(rohc[0] == 0xF8);
         }
+        else if(item.profile == rohccxx::Profile::ESP)
+            REQUIRE(rohc[0] == 0xFD);
         else
             REQUIRE(rohc[0] == item.fo_type);
         REQUIRE(rohc[1] == 0x92);
