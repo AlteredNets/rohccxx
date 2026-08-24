@@ -2906,6 +2906,208 @@ rohc_decompress4(struct rohc_decomp* decomp,
     const uint8_t* decode_packet = decoder_packet_start(parsed);
     size_t decode_packet_len = decoder_packet_len(parsed);
 
+    // RFC 5225 PT-0 uses the entire zero-MSB octet space.  The legacy/private
+    // FO markers 0x77..0x7a therefore overlap valid CID-0 PT-0 values.  Resolve
+    // only that overlap, only for an established small-CID-0 formal context,
+    // and authenticate both possible meanings without touching live state or
+    // caller output.  A genuinely ambiguous packet is rejected rather than
+    // choosing a format by parser precedence.
+    const bool private_fo_overlap =
+        parsed.type == RohcPacketType::FO_UDP_Lite ||
+        parsed.type == RohcPacketType::FO_ESP ||
+        parsed.type == RohcPacketType::FO_IP ||
+        parsed.type == RohcPacketType::FO_UDP;
+    if(private_fo_overlap && packet_len > 0 && (packet[0] & 0x80U) == 0 &&
+       rfc5225::live_pt0_context_supported(context_before_decode,
+                                           decomp->impl.large_cid_space,
+                                           cid,
+                                           parsed.has_add_cid))
+    {
+        struct TentativeMeaning
+        {
+            enum class Interpretation
+            {
+                FormalPt0,
+                PrivateFo,
+            } interpretation = Interpretation::FormalPt0;
+            bool valid = false;
+            Context context{};
+            std::unique_ptr<std::uint8_t[]> output;
+            size_t output_len = 0;
+            size_t consumed_len = 0;
+            Profile profile = Profile::Uncompressed;
+            std::uint32_t cid = 0;
+        };
+
+        auto reconstruct_tentative = [&](TentativeMeaning& meaning,
+                                         size_t candidate_header_len) -> bool
+        {
+            const uint8_t* candidate_payload = nullptr;
+            size_t candidate_payload_len = 0;
+            if(!detail::payload_after_header(packet, packet_len, candidate_header_len,
+                                             candidate_payload, candidate_payload_len))
+                return false;
+
+            meaning.output.reset(new(std::nothrow) uint8_t[max_reconstructed_ip_packet]);
+            if(!meaning.output)
+                return false;
+            meaning.output_len = max_reconstructed_ip_packet;
+            switch(meaning.context.profile)
+            {
+            case Profile::UDP:
+                return build_udp_packet(meaning.output.get(), &meaning.output_len,
+                                        meaning.context, candidate_payload,
+                                        candidate_payload_len);
+            case Profile::ESP:
+                return meaning.context.legacy_esp_payload_includes_header
+                    ? build_ip_packet(meaning.output.get(), &meaning.output_len,
+                                      meaning.context, candidate_payload,
+                                      candidate_payload_len)
+                    : build_esp_packet(meaning.output.get(), &meaning.output_len,
+                                       meaning.context, candidate_payload,
+                                       candidate_payload_len);
+            case Profile::IP:
+                return build_ip_packet(meaning.output.get(), &meaning.output_len,
+                                       meaning.context, candidate_payload,
+                                       candidate_payload_len);
+            default:
+                return false;
+            }
+        };
+
+        auto try_formal_pt0 = [&]() -> TentativeMeaning
+        {
+            TentativeMeaning meaning{};
+            meaning.interpretation = TentativeMeaning::Interpretation::FormalPt0;
+            meaning.context = context_before_decode;
+            meaning.profile = context_before_decode.profile;
+            meaning.cid = cid;
+            rfc5225::FormalCoPacket formal{};
+            if(!rfc5225::read_formal_co_base(packet, 1U, meaning.context.profile,
+                                             rfc5225::FormalCoVariant::Pt0Crc3,
+                                             formal))
+                return meaning;
+
+            std::uint16_t next_msn = meaning.context.msn;
+            for(std::uint16_t delta = 1; delta <= 15U; ++delta)
+            {
+                const std::uint16_t candidate =
+                    static_cast<std::uint16_t>(meaning.context.msn + delta);
+                if((candidate & 0x0FU) == formal.msn)
+                {
+                    next_msn = candidate;
+                    break;
+                }
+            }
+            if(next_msn == meaning.context.msn)
+                return meaning;
+
+            const std::uint16_t msn_delta =
+                static_cast<std::uint16_t>(next_msn - meaning.context.msn);
+            meaning.context.msn = next_msn;
+            meaning.context.ipv4_id =
+                static_cast<std::uint16_t>(meaning.context.ipv4_id + msn_delta);
+            if(meaning.context.profile == Profile::ESP)
+                meaning.context.esp_sequence += msn_delta;
+
+            size_t candidate_header_len = 1U;
+            if(meaning.context.profile == Profile::UDP &&
+               meaning.context.udp_checksum_used)
+            {
+                if(packet_len < candidate_header_len + 2U)
+                    return meaning;
+                meaning.context.udp_check = static_cast<std::uint16_t>(
+                    (static_cast<std::uint16_t>(packet[candidate_header_len]) << 8U) |
+                    packet[candidate_header_len + 1U]);
+                candidate_header_len += 2U;
+            }
+            if(!reconstruct_tentative(meaning, candidate_header_len))
+                return meaning;
+            meaning.consumed_len = candidate_header_len;
+            const size_t crc_header_len = meaning.context.profile == Profile::IP ? 20U : 28U;
+            meaning.valid = meaning.output_len >= crc_header_len &&
+                utils::crc3(meaning.output.get(), crc_header_len) == formal.header_crc;
+            return meaning;
+        };
+
+        auto try_private_fo = [&]() -> TentativeMeaning
+        {
+            TentativeMeaning meaning{};
+            meaning.interpretation = TentativeMeaning::Interpretation::PrivateFo;
+            meaning.context = context_before_decode;
+            meaning.profile = context_before_decode.profile;
+            meaning.cid = cid;
+            size_t candidate_header_len = 0;
+            bool decoded = false;
+            switch(parsed.type)
+            {
+            case RohcPacketType::FO_UDP:
+                decoded = decode_udp_fo(packet, packet_len, meaning.context,
+                                        &candidate_header_len) &&
+                          meaning.context.profile == Profile::UDP;
+                break;
+            case RohcPacketType::FO_ESP:
+                decoded = decode_esp_fo(packet, packet_len, meaning.context,
+                                        &candidate_header_len) &&
+                          meaning.context.profile == Profile::ESP;
+                break;
+            case RohcPacketType::FO_IP:
+                decoded = decode_ip_fo(packet, packet_len, meaning.context,
+                                       &candidate_header_len) &&
+                          meaning.context.profile == Profile::IP;
+                break;
+            case RohcPacketType::FO_UDP_Lite:
+            default:
+                // live_pt0_context_supported excludes UDP-Lite, so a 0x77
+                // collision can only be private if the established profile
+                // also changes; reject that downgrade here.
+                decoded = false;
+                break;
+            }
+            if(decoded)
+            {
+                meaning.profile = meaning.context.profile;
+                meaning.cid = meaning.context.cid;
+                meaning.consumed_len = candidate_header_len;
+                meaning.valid = reconstruct_tentative(meaning, candidate_header_len);
+            }
+            return meaning;
+        };
+
+        TentativeMeaning formal = try_formal_pt0();
+        if(formal.valid)
+        {
+            TentativeMeaning private_fo = try_private_fo();
+            if(private_fo.valid)
+            {
+                const bool same_interpretation =
+                    formal.interpretation == private_fo.interpretation;
+                const bool same_consumed_len =
+                    formal.consumed_len == private_fo.consumed_len;
+                const bool same_profile = formal.profile == private_fo.profile;
+                const bool same_cid = formal.cid == private_fo.cid;
+                const bool same_output_len = formal.output_len == private_fo.output_len;
+                const bool same_output = same_output_len &&
+                    std::memcmp(formal.output.get(), private_fo.output.get(),
+                                formal.output_len) == 0;
+                const bool same_context =
+                    detail::standard_context_equal(formal.context, private_fo.context);
+                if(!(same_interpretation && same_consumed_len && same_profile &&
+                     same_cid && same_output && same_context))
+                {
+                    *ctx = context_before_decode;
+                    decomp->impl.mode = decompressor_mode_before;
+                    return fail_with_feedback(cid);
+                }
+            }
+            parsed.type = RohcPacketType::FO_RTP;
+        }
+        // If formal authentication fails but the complete private packet,
+        // including its CRC-8, succeeds below, preserve legacy compatibility.
+        // An identical wire image carries no provenance that could distinguish
+        // a genuine private packet from a corrupted formal packet.
+    }
+
     if(parsed.type == RohcPacketType::Feedback)
     {
         Feedback incoming{};
