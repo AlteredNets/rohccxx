@@ -21,9 +21,9 @@ This repository is source-available under those terms, not OSI open-source.
   small-CID-0, no-IP-options flows in the RFC 5225 RTP/UDP/IP, UDP/IP, ESP/IP,
   and IP-only profiles, plus the remaining optional oracle hooks,
   is documented in [`docs/external_oracle.md`](docs/external_oracle.md).
-- Version 0.4.0 release details, including the exact externally proven CO
-  interoperability boundary, are documented in
-  [`docs/release_v0.4.0.md`](docs/release_v0.4.0.md).
+- Version 0.4.1 release details, including the PT-0 dispatch correction and
+  exact externally proven CO interoperability boundary, are documented in
+  [`docs/release_v0.4.1.md`](docs/release_v0.4.1.md).
 
 ## Dependencies
 
