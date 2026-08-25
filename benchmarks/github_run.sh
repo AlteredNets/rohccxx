@@ -49,16 +49,17 @@ resolved=$root/harness-build/experiment-resolved-v0.4.1.txt
 : > "$resolved"
 for f in "$root/harness-src/experiment-v0.4.1.json" "$root/harness-build/scientific_runner" "$root/harness-src/scientific_runner.cpp" "$root/harness-build/effective-flags.txt" "$archive" "$buildinfo" "$root/build-release/src/librohccxx.so.0.4.1" "$root/rohclib-build-normalized/src/.libs/librohc.so.3.0.0"; do sha256sum "$f" >> "$resolved"; done
 
+first_line() { awk 'NR == 1 { line = $0 } END { print line }'; }
 {
   echo "runner_image=${ImageOS:-unknown}-${ImageVersion:-unknown}"
   echo "kernel=$(uname -a)"
   echo "clock=$(cat /sys/devices/system/clocksource/clocksource0/current_clocksource)"
-  echo "compiler=$(g++-13 --version | head -1)"
-  echo "linker=$(ld --version | head -1)"
-  echo "cmake=$(cmake --version | head -1)"
-  echo "glibc=$(ldd --version | head -1)"
+  echo "compiler=$(g++-13 --version | first_line)"
+  echo "linker=$(ld --version | first_line)"
+  echo "cmake=$(cmake --version | first_line)"
+  echo "glibc=$(ldd --version | first_line)"
   echo "topology=$(lscpu -p=CPU,CORE,SOCKET,NODE | tr '\n' ';')"
-  echo "cpu_model=$(lscpu | awk -F: '/Model name/{sub(/^ +/,"",$2);print $2;exit}')"
+  echo "cpu_model=$(lscpu | awk -F: '/Model name/ && !seen {sub(/^ +/,"",$2);print $2;seen=1}')"
   echo "load_before=$(cat /proc/loadavg)"
   echo "swap_before=$(free -b | awk '/Swap:/{print $2","$3","$4}')"
   echo "steal_before=$(awk '/^cpu /{print $9}' /proc/stat)"
