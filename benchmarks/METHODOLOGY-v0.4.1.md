@@ -1,10 +1,11 @@
-# v0.4.1 benchmark methodology
+# v0.4.1 development baseline methodology
 
-Protocol revision: `v0.4.1-protocol-r2`.
+Protocol revision: `v0.4.1-development-baseline-r1`.
 
-This experiment compares rohccxx v0.4.1 with the pinned rohc-lib and an
-uncompressed memory-copy control. It is not a cross-version comparison;
-v0.4.0 and its historical workspace are explicitly excluded.
+This fast development baseline compares rohccxx v0.4.1 with the pinned rohc-lib
+and an uncompressed memory-copy control. It is intended for engineering
+feedback, not formal benchmarking, marketing, absolute hardware-performance
+claims, or cross-version comparison.
 
 All treatments consume identical immutable packet vectors. Contexts are fresh for context-establishment measurements and advanced to the same ordinal before steady-state measurements. Allocation, corpus generation, setup, validation, logging, and file I/O are outside timed regions. The memory-copy control quantifies harness overhead only.
 
@@ -18,25 +19,23 @@ RTP, UDP, ESP, and IP-only results remain separate. Every workload must pass byt
 
 Every calibration treatment performs exactly 10,000 untimed operations before
 its first discarded timing probe. The probe selects a repetition count meeting
-both 1,000,000 operations and four seconds. Calibration rows are permanently
+both 100,000 operations and one second. Calibration rows are permanently
 labeled `CALIBRATION_NON_REPORTABLE`; neither their durations nor their rows
-become final observations. Final mode performs 21 new observations and requires
+become final observations. Final mode performs five new observations and requires
 both `--mode final` and `--authorize-final`, plus the pinned manifest, resolved
 build identity, and calibration-plan hash. Allocation, setup, context
 establishment, validation, logging, and file I/O surround rather than enter the
 timed API loop.
 
-Three independent GitHub-hosted `ubuntu-24.04` jobs execute the same experiment.
-Each job records its runner image, CPU model and topology, kernel, compiler,
+One GitHub-hosted `ubuntu-24.04` benchmark job executes the complete workload
+matrix and records its runner image, CPU model and topology, kernel, compiler,
 linker, CMake, glibc, clocksource, load, swap, and CPU-steal counters. Workloads
-are deterministically sharded within a replica to fit the six-hour job limit;
+are deterministically sharded within that job to fit the 30-minute job limit;
 each shard has its own calibration plan, and every plan hash is added to that
-replica's resolved identity before final mode. The cross-replica gate flags a
-series when its median relative spread exceeds 15 percent and suppresses a
-claim when any series is unstable. Results support relative comparisons only,
-not absolute hardware-performance or marketing claims. The v0.4.1-only scope,
+run's resolved identity before final mode. Results support development-oriented
+relative comparisons only. The v0.4.1-only scope,
 implementations, workloads, corpus, seed, payloads, flow counts, balanced
 ordering, warm-up count, calibration minima, final observation count, timing
 boundaries, correctness and guard requirements, statistics, confidence
 intervals, no-outlier-deletion rule, calibration labeling, and final
-authorization controls are unchanged.
+authorization controls are enforced by the manifest, runner, and analysis gate.

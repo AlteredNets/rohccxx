@@ -23,13 +23,8 @@ jobs:
       - run: ctest --test-dir build-tests --output-on-failure
 
   benchmark:
-    name: replica-${{ matrix.replica }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
-    strategy:
-      fail-fast: false
-      matrix:
-        replica: [1, 2, 3]
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends cmake gcc-13 g++-13 autoconf automake libtool pkg-config curl
@@ -37,29 +32,8 @@ jobs:
         run: benchmarks/github_run.sh
       - uses: actions/upload-artifact@v6
         with:
-          name: replica-${{ matrix.replica }}
+          name: v0.4.1-development-baseline
           path: benchmark-run/artifacts/
           if-no-files-found: error
           retention-days: 90
           compression-level: 0
-
-  cross-replica:
-    if: always()
-    needs: [repository-tests, benchmark]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v7
-        with: {pattern: 'replica-*', path: replicas}
-      - name: Verify and compare
-        run: |
-          test '${{ needs.repository-tests.result }}' = success
-          test '${{ needs.benchmark.result }}' = success
-          python3 benchmarks/cross_replica.py replicas cross-replica-summary.json
-      - uses: actions/upload-artifact@v6
-        with:
-          name: cross-replica-summary
-          path: cross-replica-summary.json
-          if-no-files-found: error
-          retention-days: 90
