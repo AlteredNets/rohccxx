@@ -1,0 +1,13 @@
+artifacts/
+calibration/
+final/
+incoming/
+work/
+*.csv
+*.log
+*.tar.gz
+*.sha256
+__pycache__/
+scientific_runner
+scientific_comparator
+collision_regression
