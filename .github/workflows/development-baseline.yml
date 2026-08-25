@@ -31,6 +31,7 @@ jobs:
       - name: Build, validate, calibrate, and measure
         run: benchmarks/github_run.sh
       - uses: actions/upload-artifact@v6
+        if: always()
         with:
           name: v0.4.1-development-baseline
           path: benchmark-run/artifacts/

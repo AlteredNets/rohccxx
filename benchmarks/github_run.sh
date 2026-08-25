@@ -67,9 +67,9 @@ first_line() { awk 'NR == 1 { line = $0 } END { print line }'; }
 
 export LD_LIBRARY_PATH="$root/build-release/src:$root/rohclib-build-normalized/src/.libs"
 export ROHCCXX_SO="$root/build-release/src/librohccxx.so.0.4.1"
-"$root/harness-build/collision_regression" > "$root/artifacts/correctness.txt"
-"$root/harness-build/scientific_comparator" validate >> "$root/artifacts/correctness.txt"
-"$root/harness-build/scientific_runner" --mode correctness --manifest "$root/harness-src/experiment-v0.4.1.json" --root "$root" >> "$root/artifacts/correctness.txt"
+"$root/harness-build/collision_regression" 2>&1 | tee "$root/artifacts/correctness.txt"
+"$root/harness-build/scientific_comparator" validate 2>&1 | tee -a "$root/artifacts/correctness.txt"
+"$root/harness-build/scientific_runner" --mode correctness --manifest "$root/harness-src/experiment-v0.4.1.json" --root "$root" 2>&1 | tee -a "$root/artifacts/correctness.txt"
 
 shards=8
 pids=()
