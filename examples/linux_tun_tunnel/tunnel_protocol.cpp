@@ -28,8 +28,9 @@ void append32(FlowKey& key, const std::uint8_t* value)
     std::memcpy(key.bytes.data() + key.length, value, 4U);
     key.length = static_cast<std::uint8_t>(key.length + 4U);
 }
+}
 
-Result flow_key(const std::uint8_t* packet, std::size_t packet_len, FlowKey& key)
+Result identify_flow(const std::uint8_t* packet, std::size_t packet_len, FlowKey& key)
 {
     key = {};
     const Result valid = validate_ipv4_packet(packet, packet_len, packet_len);
@@ -97,7 +98,6 @@ Result flow_key(const std::uint8_t* packet, std::size_t packet_len, FlowKey& key
     key.bytes[key.length++] = 0U;
     return Result::Ok;
 }
-}
 
 bool FlowKey::operator==(const FlowKey& other) const
 {
@@ -110,7 +110,7 @@ Result FlowTable::select(const std::uint8_t* packet, std::size_t packet_len,
 {
     assignment = {};
     FlowKey key{};
-    const Result parsed = flow_key(packet, packet_len, key);
+    const Result parsed = identify_flow(packet, packet_len, key);
     if(parsed != Result::Ok)
     {
         ++mapping_failures_;

@@ -160,6 +160,8 @@ struct CodecContext
 {
     std::array<CompPtr, 16>* compressors;
     std::array<DecompPtr, 16>* decompressors;
+    std::array<rohccxx::tun::FlowKey, 16>* inbound_flows;
+    std::array<bool, 16>* inbound_used;
     rohc_comp* selected_comp;
     rohc_decomp* selected_decomp;
     Statistics* stats;
@@ -181,17 +183,39 @@ int decompress_adapter(void* context, const std::uint8_t* in, std::size_t in_len
             return -1;
     }
     const bool ir_family = (in[marker_offset] & 0xfeU) == 0xfcU;
-    if(!(*state.decompressors)[cid] || ir_family)
+    if(!(*state.decompressors)[cid])
     {
         DecompPtr replacement(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
         if(!replacement)
             return -1;
         (*state.decompressors)[cid] = std::move(replacement);
-        if(ir_family)
-            ++state.stats->context_resets;
     }
     state.selected_decomp = (*state.decompressors)[cid].get();
-    return rohc_decompress4(state.selected_decomp, in, in_len, out, out_len);
+    const std::size_t output_capacity = *out_len;
+    int status = rohc_decompress4(state.selected_decomp, in, in_len, out, out_len);
+    if(status != 0 || !ir_family)
+        return status;
+    rohccxx::tun::FlowKey decoded_flow{};
+    if(rohccxx::tun::identify_flow(out, *out_len, decoded_flow) !=
+       rohccxx::tun::Result::Ok)
+        return -1;
+    if((*state.inbound_used)[cid] &&
+       !((*state.inbound_flows)[cid] == decoded_flow))
+    {
+        DecompPtr replacement(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+        if(!replacement)
+            return -1;
+        *out_len = output_capacity;
+        status = rohc_decompress4(replacement.get(), in, in_len, out, out_len);
+        if(status != 0)
+            return status;
+        (*state.decompressors)[cid] = std::move(replacement);
+        state.selected_decomp = (*state.decompressors)[cid].get();
+        ++state.stats->context_resets;
+    }
+    (*state.inbound_flows)[cid] = decoded_flow;
+    (*state.inbound_used)[cid] = true;
+    return 0;
 }
 
 int compress_combined_adapter(void* context, const std::uint8_t* in, std::size_t in_len,
@@ -284,9 +308,12 @@ int main(int argc, char** argv)
 
     std::array<CompPtr, 16> compressors{};
     std::array<DecompPtr, 16> decompressors{};
+    std::array<rohccxx::tun::FlowKey, 16> inbound_flows{};
+    std::array<bool, 16> inbound_used{};
     rohccxx::tun::FlowTable flows;
     Statistics stats{};
-    CodecContext codec_context{&compressors, &decompressors, nullptr, nullptr, &stats};
+    CodecContext codec_context{&compressors, &decompressors, &inbound_flows,
+                               &inbound_used, nullptr, nullptr, &stats};
     const rohccxx::tun::Codec codec{&codec_context, compress_combined_adapter,
                                     decompress_adapter, feedback_adapter};
     const std::size_t datagram_capacity = 65507U;

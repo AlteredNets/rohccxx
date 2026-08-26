@@ -64,6 +64,9 @@ struct FlowAssignment
     bool evicted = false;
 };
 
+Result identify_flow(const std::uint8_t* packet, std::size_t packet_len,
+                     FlowKey& key);
+
 class FlowTable
 {
 public:
