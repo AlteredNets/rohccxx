@@ -474,6 +474,9 @@ TEST_CASE("Linux TUN rejects no valid private UDP FO as ambiguous formal PT-0")
         std::size_t compressed_len = compressed.size();
         REQUIRE(rohc_compress4(comp.get(), packet.data(), packet.size(),
                                compressed.data(), &compressed_len) == 0);
+        REQUIRE(compressed_len == packet.size());
+        REQUIRE(compressed[0] == 0xe1U);
+        REQUIRE(compressed[1] == 0xfdU);
         INFO("index=" << index << " checksum=" << std::hex
              << unsigned(packet[26]) << unsigned(packet[27])
              << " compressed_len=" << std::dec << compressed_len
