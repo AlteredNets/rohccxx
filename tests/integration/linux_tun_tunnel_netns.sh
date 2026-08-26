@@ -299,6 +299,9 @@ ip -n "${ns_a}" addr add 10.44.0.1/30 dev rohca
 ip -n "${ns_b}" addr add 10.44.0.2/30 dev rohcb
 ip -n "${ns_a}" link set rohca up mtu 1400
 ip -n "${ns_b}" link set rohcb up mtu 1400
+ip netns exec "${ns_a}" ping -c 2 -W 2 10.44.0.2 >/dev/null
+ip netns exec "${ns_b}" ping -c 2 -W 2 10.44.0.1 >/dev/null
+echo "PASS: rapid endpoint restart and bounded bidirectional recovery"
 
 stress_tool="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/linux_tun_tunnel_stress.py"
 ip netns exec "${ns_b}" python3 "${stress_tool}" server --address 10.44.0.2 >"${tmp_dir}/stress-server.log" 2>&1 &
