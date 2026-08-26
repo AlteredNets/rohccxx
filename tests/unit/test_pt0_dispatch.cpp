@@ -87,7 +87,8 @@ std::vector<std::uint8_t> make_packet(Pt0Profile profile,
                                       std::uint32_t ordinal,
                                       std::uint8_t tos = 0,
                                       std::uint16_t id_override = 0xffffU,
-                                      std::uint16_t udp_checksum = 0U)
+                                      std::uint16_t udp_checksum = 0U,
+                                      unsigned flow = 0U)
 {
     const std::size_t header_len = profile == Pt0Profile::Ip ? 20U : 28U;
     std::vector<std::uint8_t> packet(header_len + 160U);
@@ -100,13 +101,13 @@ std::vector<std::uint8_t> make_packet(Pt0Profile profile,
     ip[8] = 64;
     ip[9] = profile == Pt0Profile::Udp ? 17U : profile == Pt0Profile::Esp ? 50U : 253U;
     ip[12] = 10;
-    ip[15] = 1;
+    ip[15] = static_cast<std::uint8_t>(1U + flow);
     ip[16] = 10;
-    ip[19] = 2;
+    ip[19] = static_cast<std::uint8_t>(2U + flow);
     if(profile == Pt0Profile::Udp)
     {
-        put16(ip + 20, 10000U);
-        put16(ip + 22, 20000U);
+        put16(ip + 20, static_cast<std::uint16_t>(10000U + flow));
+        put16(ip + 22, static_cast<std::uint16_t>(20000U + flow));
         put16(ip + 24, static_cast<std::uint16_t>(packet.size() - 20U));
         put16(ip + 26, udp_checksum);
     }
@@ -115,7 +116,8 @@ std::vector<std::uint8_t> make_packet(Pt0Profile profile,
         put32(ip + 20, 0x10203000U);
         put32(ip + 24, ordinal);
     }
-    std::uint64_t state = 0x524f484343585832ULL ^ ordinal;
+    std::uint64_t state = 0x524f484343585832ULL ^ ordinal ^
+                          (static_cast<std::uint64_t>(flow) << 32U);
     for(std::size_t pos = header_len; pos < packet.size(); ++pos)
     {
         state ^= state << 13U;
@@ -263,7 +265,8 @@ CollisionFixture establish_before(Pt0Profile profile, std::size_t collision_ordi
 void require_failed_transaction(rohc_decomp* decomp,
                                 const std::vector<std::uint8_t>& packet,
                                 std::size_t capacity = 510U,
-                                bool expect_feedback = true)
+                                bool expect_feedback = true,
+                                std::uint32_t expected_cid = 0U)
 {
     std::array<std::uint8_t, 512> output{};
     output.fill(0xa5U);
@@ -286,13 +289,13 @@ void require_failed_transaction(rohc_decomp* decomp,
     if(expect_feedback)
     {
         REQUIRE(rohc_decomp_get_feedback(decomp, &feedback_cid, &feedback_type) == 0);
-        REQUIRE(feedback_cid == 0U);
+        REQUIRE(feedback_cid == expected_cid);
         REQUIRE(feedback_type == 0U); // public NACK value
         // Retrieval is observational, not consuming.
         feedback_cid = 0xffffffffU;
         feedback_type = 0xffU;
         REQUIRE(rohc_decomp_get_feedback(decomp, &feedback_cid, &feedback_type) == 0);
-        REQUIRE(feedback_cid == 0U);
+        REQUIRE(feedback_cid == expected_cid);
         REQUIRE(feedback_type == 0U);
     }
     else
@@ -330,6 +333,23 @@ std::vector<std::uint8_t> compress_rtp(rohc_comp* comp, std::uint32_t cid,
     std::size_t length = output.size();
     REQUIRE(rohc_compress4(comp, packet.data(), packet.size(), output.data(), &length) == 0);
     return {output.begin(), output.begin() + static_cast<std::ptrdiff_t>(length)};
+}
+
+std::vector<std::uint8_t> compress_packet(rohc_comp* comp, std::uint32_t cid,
+                                         const std::vector<std::uint8_t>& packet)
+{
+    REQUIRE(rohc_comp_set_cid(comp, cid) == 0);
+    std::array<std::uint8_t, 514> guarded{};
+    guarded.fill(0xccU);
+    guarded.front() = 0xa5U;
+    guarded.back() = 0x5aU;
+    std::size_t length = guarded.size() - 2U;
+    REQUIRE(rohc_compress4(comp, packet.data(), packet.size(), guarded.data() + 1U,
+                           &length) == 0);
+    REQUIRE(guarded.front() == 0xa5U);
+    REQUIRE(guarded.back() == 0x5aU);
+    return {guarded.begin() + 1U,
+            guarded.begin() + 1U + static_cast<std::ptrdiff_t>(length)};
 }
 
 } // namespace
@@ -653,6 +673,102 @@ TEST_CASE("PT-0 collision contexts tolerate loss and reject stale reordering")
             require_guarded_decode(decomp.get(), rohc, ip);
             if(ordinal == 13U) require_failed_transaction(decomp.get(), delayed);
         }
+    }
+}
+
+TEST_CASE("UDP formal PT-0 uses RFC 5225 small-CID framing")
+{
+    for(const std::uint32_t cid : {0U, 1U, 15U})
+    {
+        CAPTURE(cid);
+        CompPtr comp(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+        DecompPtr decomp(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+        REQUIRE(comp);
+        REQUIRE(decomp);
+        for(std::uint32_t ordinal = 0; ordinal < 5U; ++ordinal)
+        {
+            const auto packet = make_packet(Pt0Profile::Udp, ordinal);
+            const auto rohc = compress_packet(comp.get(), cid, packet);
+            require_guarded_decode(decomp.get(), rohc, packet);
+            if(ordinal >= 2U)
+            {
+                REQUIRE(rohc.size() - 160U == (cid == 0U ? 1U : 2U));
+                if(cid != 0U)
+                    REQUIRE(rohc[0] == static_cast<std::uint8_t>(0xe0U | cid));
+            }
+        }
+    }
+}
+
+TEST_CASE("UDP formal PT-0 round-trips four interleaved small-CID flows")
+{
+    CompPtr comp(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    DecompPtr decomp(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(comp);
+    REQUIRE(decomp);
+    for(std::uint32_t ordinal = 0; ordinal < 512U; ++ordinal)
+    {
+        for(std::uint32_t flow = 0; flow < 4U; ++flow)
+        {
+            const auto packet = make_packet(Pt0Profile::Udp, ordinal, 0U, 0xffffU,
+                                            0U, flow);
+            const auto rohc = compress_packet(comp.get(), flow, packet);
+            require_guarded_decode(decomp.get(), rohc, packet);
+            if(ordinal >= 2U)
+                REQUIRE(rohc.size() - 160U == (flow == 0U ? 1U : 2U));
+        }
+    }
+}
+
+TEST_CASE("unsafe UDP fields retain private FO and PT-0 failures are transactional")
+{
+    SECTION("unsafe fields use the private fallback")
+    {
+        for(const unsigned change : {0U, 1U, 2U, 3U})
+        {
+            CAPTURE(change);
+            CompPtr comp(rohc_comp_new2(0U, ROHCCXX_DIRECTION_UPLINK));
+            REQUIRE(comp);
+            for(std::uint32_t ordinal = 0; ordinal < 3U; ++ordinal)
+                (void) compress_packet(comp.get(), 0U,
+                                       make_packet(Pt0Profile::Udp, ordinal));
+            auto packet = make_packet(Pt0Profile::Udp, 3U);
+            if(change == 0U) put16(packet.data() + 20U, 10001U);
+            if(change == 1U) packet[8] = 63U;
+            if(change == 2U) put16(packet.data() + 26U, 0x1234U);
+            if(change == 3U) put16(packet.data() + 4U, 99U);
+            put16(packet.data() + 10U, 0U);
+            put16(packet.data() + 10U, ipv4_checksum(packet.data()));
+            const auto rohc = compress_packet(comp.get(), 0U, packet);
+            REQUIRE(rohc.size() - 160U == 6U);
+            REQUIRE(rohc[0] == 0x7aU);
+        }
+    }
+
+    SECTION("malformed packets preserve output and context")
+    {
+        CompPtr comp(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+        DecompPtr decomp(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+        REQUIRE(comp);
+        REQUIRE(decomp);
+        std::vector<std::uint8_t> valid;
+        std::vector<std::uint8_t> expected;
+        for(std::uint32_t ordinal = 0; ordinal < 3U; ++ordinal)
+        {
+            expected = make_packet(Pt0Profile::Udp, ordinal);
+            valid = compress_packet(comp.get(), 1U, expected);
+            if(ordinal < 2U) require_guarded_decode(decomp.get(), valid, expected);
+        }
+        REQUIRE(valid.size() - 160U == 2U);
+        auto corrupt = valid;
+        corrupt[1] ^= 0x01U;
+        require_failed_transaction(decomp.get(), corrupt, 510U, true, 1U);
+        require_guarded_decode(decomp.get(), valid, expected);
+
+        auto next = make_packet(Pt0Profile::Udp, 3U);
+        const auto next_valid = compress_packet(comp.get(), 1U, next);
+        require_failed_transaction(decomp.get(), {next_valid.front()}, 510U, true, 0U);
+        require_guarded_decode(decomp.get(), next_valid, next);
     }
 }
 
