@@ -26,7 +26,45 @@ cleanup() {
     ip netns del "${ns_b}" 2>/dev/null
     rm -rf -- "${tmp_dir}"
 }
-trap cleanup EXIT INT TERM
+
+diagnostics() {
+    set +e
+    echo "===== integration failure diagnostics =====" >&2
+    for namespace in "${ns_a}" "${ns_b}"; do
+        echo "----- ${namespace}: addresses -----" >&2
+        ip -n "${namespace}" address show >&2
+        echo "----- ${namespace}: routes -----" >&2
+        ip -n "${namespace}" route show >&2
+        echo "----- ${namespace}: UDP sockets -----" >&2
+        ip netns exec "${namespace}" ss -uapn >&2
+    done
+    [[ -n ${pid_a:-} ]] && kill -TERM "${pid_a}" 2>/dev/null
+    [[ -n ${pid_b:-} ]] && kill -TERM "${pid_b}" 2>/dev/null
+    [[ -n ${pid_a:-} ]] && wait "${pid_a}" 2>/dev/null
+    [[ -n ${pid_b:-} ]] && wait "${pid_b}" 2>/dev/null
+    pid_a=""
+    pid_b=""
+    for log in a.log b.log relay-a.log relay-b.log udp-server.log udp-client.log; do
+        echo "----- ${log} -----" >&2
+        if [[ -e ${tmp_dir}/${log} ]]; then
+            sed -n '1,240p' "${tmp_dir}/${log}" >&2
+        else
+            echo "missing" >&2
+        fi
+    done
+}
+
+finish() {
+    status=$?
+    trap - EXIT INT TERM
+    if [[ ${status} -ne 0 ]]; then
+        diagnostics
+    fi
+    cleanup
+    exit "${status}"
+}
+trap finish EXIT
+trap 'exit 130' INT TERM
 
 if ! ip netns add "${ns_a}" 2>/dev/null; then
     echo "SKIP: CAP_NET_ADMIN is required for the namespace integration test"
@@ -49,7 +87,7 @@ ip -n "${ns_b}" link set "vethb${suffix}" up
 
 cat > "${tmp_dir}/relay.py" <<'PY'
 import os, select, socket, sys
-local_port, local_target, underlay, peer, marker = sys.argv[1:]
+local_port, local_target, underlay, peer, marker, log_path = sys.argv[1:]
 local = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 local.bind(("127.0.0.1", int(local_port)))
 transport = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -57,27 +95,32 @@ host, port = underlay.rsplit(":", 1)
 transport.bind((host, int(port)))
 host, port = peer.rsplit(":", 1)
 transport.connect((host, int(port)))
+log = open(log_path, "w", buffering=1)
 while True:
     readable, _, _ = select.select([local, transport], [], [])
     for source in readable:
         data = bytearray(source.recv(65535))
         if source is local:
+            corrupted = False
             if os.path.exists(marker) and len(data) > 8 and data[:4] == b"RHCT" and data[5] == 1:
                 data[8] ^= 1
                 os.unlink(marker)
+                corrupted = True
+            log.write(f"local-to-underlay length={len(data)} type={data[5] if len(data) > 5 else -1} corrupted={int(corrupted)}\n")
             transport.send(data)
         else:
+            log.write(f"underlay-to-local length={len(data)} type={data[5] if len(data) > 5 else -1}\n")
             local.sendto(data, ("127.0.0.1", int(local_target)))
 PY
 
-ip netns exec "${ns_a}" python3 "${tmp_dir}/relay.py" 20001 20000 192.0.2.1:10000 192.0.2.2:10000 "${tmp_dir}/corrupt-a" &
+ip netns exec "${ns_a}" python3 "${tmp_dir}/relay.py" 20001 20000 192.0.2.1:10000 192.0.2.2:10000 "${tmp_dir}/corrupt-a" "${tmp_dir}/relay-a.log" &
 relay_a=$!
-ip netns exec "${ns_b}" python3 "${tmp_dir}/relay.py" 20001 20000 192.0.2.2:10000 192.0.2.1:10000 "${tmp_dir}/corrupt-b" &
+ip netns exec "${ns_b}" python3 "${tmp_dir}/relay.py" 20001 20000 192.0.2.2:10000 192.0.2.1:10000 "${tmp_dir}/corrupt-b" "${tmp_dir}/relay-b.log" &
 relay_b=$!
 
-ip netns exec "${ns_a}" "${tunnel}" --tun rohca --local 127.0.0.1:20000 --peer 127.0.0.1:20001 --max-packet 2000 --stats-interval 60 >"${tmp_dir}/a.log" 2>&1 &
+ip netns exec "${ns_a}" "${tunnel}" --tun rohca --local 127.0.0.1:20000 --peer 127.0.0.1:20001 --max-packet 2000 --stats-interval 1 >"${tmp_dir}/a.log" 2>&1 &
 pid_a=$!
-ip netns exec "${ns_b}" "${tunnel}" --tun rohcb --local 127.0.0.1:20000 --peer 127.0.0.1:20001 --max-packet 2000 --stats-interval 60 >"${tmp_dir}/b.log" 2>&1 &
+ip netns exec "${ns_b}" "${tunnel}" --tun rohcb --local 127.0.0.1:20000 --peer 127.0.0.1:20001 --max-packet 2000 --stats-interval 1 >"${tmp_dir}/b.log" 2>&1 &
 pid_b=$!
 
 for _ in $(seq 1 50); do
@@ -94,7 +137,43 @@ ip netns exec "${ns_a}" ping -c 2 -W 2 10.44.0.2 >/dev/null
 ip netns exec "${ns_b}" ping -c 2 -W 2 10.44.0.1 >/dev/null
 echo "PASS: bidirectional ping"
 
-ip netns exec "${ns_b}" python3 -c 'import socket,sys; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.bind(("10.44.0.2",32123)); open(sys.argv[1],"w").close(); data,peer=s.recvfrom(4096); s.sendto(data,peer)' "${tmp_dir}/udp-ready" &
+cat > "${tmp_dir}/udp_echo.py" <<'PY'
+import hashlib, socket, sys
+ready_path, log_path = sys.argv[1:]
+with open(log_path, "w", buffering=1) as log:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(5.0)
+    sock.bind(("10.44.0.2", 32123))
+    open(ready_path, "w").close()
+    log.write("READY\n")
+    data, peer = sock.recvfrom(4096)
+    log.write(f"REQUEST length={len(data)} sha256={hashlib.sha256(data).hexdigest()} peer={peer}\n")
+    expected = bytes(range(256)) * 4
+    if data != expected:
+        raise RuntimeError("request payload mismatch")
+    sent = sock.sendto(data, peer)
+    log.write(f"REPLY length={sent} sha256={hashlib.sha256(data).hexdigest()}\n")
+    if sent != len(data):
+        raise RuntimeError("short UDP reply")
+PY
+cat > "${tmp_dir}/udp_client.py" <<'PY'
+import hashlib, socket, sys
+log_path = sys.argv[1]
+payload = bytes(range(256)) * 4
+with open(log_path, "w", buffering=1) as log:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(5.0)
+    sent = sock.sendto(payload, ("10.44.0.2", 32123))
+    log.write(f"REQUEST length={sent} sha256={hashlib.sha256(payload).hexdigest()}\n")
+    if sent != len(payload):
+        raise RuntimeError("short UDP request")
+    reply, peer = sock.recvfrom(4096)
+    log.write(f"REPLY length={len(reply)} sha256={hashlib.sha256(reply).hexdigest()} peer={peer}\n")
+    if reply != payload:
+        raise RuntimeError("reply payload mismatch")
+PY
+
+ip netns exec "${ns_b}" python3 "${tmp_dir}/udp_echo.py" "${tmp_dir}/udp-ready" "${tmp_dir}/udp-server.log" &
 udp_server=$!
 for _ in $(seq 1 50); do
     [[ -e ${tmp_dir}/udp-ready ]] && break
@@ -104,7 +183,7 @@ if [[ ! -e ${tmp_dir}/udp-ready ]]; then
     echo "UDP echo server did not become ready" >&2
     exit 1
 fi
-ip netns exec "${ns_a}" python3 -c 'import socket; p=bytes(range(256))*4; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.settimeout(3); s.sendto(p,("10.44.0.2",32123)); assert s.recv(4096)==p'
+ip netns exec "${ns_a}" python3 "${tmp_dir}/udp_client.py" "${tmp_dir}/udp-client.log"
 wait "${udp_server}"
 echo "PASS: byte-exact UDP payload delivery"
 
