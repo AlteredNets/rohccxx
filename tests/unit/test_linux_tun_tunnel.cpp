@@ -466,6 +466,20 @@ TEST_CASE("Linux TUN fixed UDP sequence remains byte exact across formal overlap
         rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
     REQUIRE(comp); REQUIRE(decomp);
     REQUIRE(rohc_comp_set_cid(comp.get(), 1U) == 0);
+    for(std::size_t index = 0U; index < 10U; ++index)
+    {
+        auto packet = stress_udp_packet(index, static_cast<std::uint16_t>(0x4000U + index));
+        std::array<std::uint8_t, 256> compressed{}, reconstructed{};
+        std::size_t compressed_len = compressed.size();
+        REQUIRE(rohc_compress4(comp.get(), packet.data(), packet.size(),
+                               compressed.data(), &compressed_len) == 0);
+        std::size_t reconstructed_len = reconstructed.size();
+        REQUIRE(rohc_decompress4(decomp.get(), compressed.data(), compressed_len,
+                                 reconstructed.data(), &reconstructed_len) == 0);
+    }
+    comp.reset(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(comp);
+    REQUIRE(rohc_comp_set_cid(comp.get(), 1U) == 0);
     const std::array<std::uint16_t, 10> ids{{
         0x9568U, 0x9569U, 0x956aU, 0x956bU, 0x956cU,
         0x956dU, 0x956eU, 0x956fU, 0x9570U, 0x9571U}};

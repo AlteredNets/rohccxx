@@ -159,16 +159,39 @@ int open_tun(const std::string& requested, std::string& actual)
 struct CodecContext
 {
     std::array<CompPtr, 16>* compressors;
+    std::array<DecompPtr, 16>* decompressors;
     rohc_comp* selected_comp;
-    rohc_decomp* decomp;
+    rohc_decomp* selected_decomp;
     Statistics* stats;
 };
 
 int decompress_adapter(void* context, const std::uint8_t* in, std::size_t in_len,
                        std::uint8_t* out, std::size_t* out_len)
 {
-    return rohc_decompress4(static_cast<CodecContext*>(context)->decomp,
-                            in, in_len, out, out_len);
+    auto& state = *static_cast<CodecContext*>(context);
+    if(!in || in_len == 0U)
+        return -1;
+    std::uint8_t cid = 0U;
+    std::size_t marker_offset = 0U;
+    if((in[0] & 0xf0U) == 0xe0U)
+    {
+        cid = static_cast<std::uint8_t>(in[0] & 0x0fU);
+        marker_offset = 1U;
+        if(in_len == marker_offset)
+            return -1;
+    }
+    const bool ir_family = (in[marker_offset] & 0xfeU) == 0xfcU;
+    if(!(*state.decompressors)[cid] || ir_family)
+    {
+        DecompPtr replacement(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+        if(!replacement)
+            return -1;
+        (*state.decompressors)[cid] = std::move(replacement);
+        if(ir_family)
+            ++state.stats->context_resets;
+    }
+    state.selected_decomp = (*state.decompressors)[cid].get();
+    return rohc_decompress4(state.selected_decomp, in, in_len, out, out_len);
 }
 
 int compress_combined_adapter(void* context, const std::uint8_t* in, std::size_t in_len,
@@ -259,16 +282,11 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    DecompPtr decomp(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
-    if(!decomp)
-    {
-        std::fprintf(stderr, "failed to initialize ROHCCXX contexts\n");
-        close(udp_fd); close(tun_fd); return 1;
-    }
     std::array<CompPtr, 16> compressors{};
+    std::array<DecompPtr, 16> decompressors{};
     rohccxx::tun::FlowTable flows;
     Statistics stats{};
-    CodecContext codec_context{&compressors, nullptr, decomp.get(), &stats};
+    CodecContext codec_context{&compressors, &decompressors, nullptr, nullptr, &stats};
     const rohccxx::tun::Codec codec{&codec_context, compress_combined_adapter,
                                     decompress_adapter, feedback_adapter};
     const std::size_t datagram_capacity = 65507U;
@@ -377,11 +395,13 @@ int main(int argc, char** argv)
                     if(result == rohccxx::tun::Result::CodecFailure)
                     {
                         ++stats.decompression_failures;
-                        if(rohc_decomp_has_feedback(decomp.get()) == 1)
+                        if(codec_context.selected_decomp &&
+                           rohc_decomp_has_feedback(codec_context.selected_decomp) == 1)
                         {
                             std::uint32_t cid = 0U; std::uint8_t feedback_type = 0U;
                             std::size_t payload_len = 0U, frame_len = 0U;
-                            if(rohc_decomp_get_feedback(decomp.get(), &cid, &feedback_type) == 0 &&
+                            if(rohc_decomp_get_feedback(codec_context.selected_decomp,
+                                                       &cid, &feedback_type) == 0 &&
                                rohccxx::tun::encode_feedback(cid, feedback_type,
                                    feedback_payload.data(), feedback_payload.size(), payload_len) == rohccxx::tun::Result::Ok &&
                                rohccxx::tun::encode_frame(rohccxx::tun::MessageType::Feedback,
