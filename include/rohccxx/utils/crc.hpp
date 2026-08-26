@@ -2,6 +2,7 @@
 // See LICENSE.md for licensing details.
 
 #pragma once
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
@@ -66,18 +67,32 @@ inline constexpr uint8_t crc_table_8[256] = {
         0x59,0xc8,0xbd,0x2c,0x5e,0xcf
     };
 
+inline constexpr uint8_t crc3_transition(uint8_t value)
+{
+    for(uint8_t bit = 0; bit < 8U; ++bit)
+        value = static_cast<uint8_t>((value & 0x01U) ?
+            ((value >> 1U) ^ 0x06U) : (value >> 1U));
+    return static_cast<uint8_t>(value & 0x07U);
+}
+
+inline constexpr std::array<uint8_t, 256> make_crc3_table()
+{
+    std::array<uint8_t, 256> table{};
+    for(size_t value = 0; value < table.size(); ++value)
+        table[value] = crc3_transition(static_cast<uint8_t>(value));
+    return table;
+}
+
+inline constexpr auto crc_table_3 = make_crc3_table();
+
 inline uint8_t crc3(const uint8_t* data, size_t len)
 {
-    uint8_t crc = 0x07;
+    uint8_t crc = 0x07U;
     for(size_t i = 0; i < len; ++i)
     {
-        crc ^= data[i];
-        for(uint8_t bit = 0; bit < 8U; ++bit)
-        {
-            crc = static_cast<uint8_t>((crc & 0x01U) ? ((crc >> 1U) ^ 0x06U) : (crc >> 1U));
-        }
+        crc = crc_table_3[static_cast<uint8_t>(crc ^ data[i])];
     }
-    return static_cast<uint8_t>(crc & 0x07U);
+    return crc;
 }
 
 inline uint8_t crc7(const uint8_t* data, size_t len)

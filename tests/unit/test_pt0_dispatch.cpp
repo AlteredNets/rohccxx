@@ -50,6 +50,39 @@ void put32(std::uint8_t* out, std::uint32_t value)
     out[3] = static_cast<std::uint8_t>(value);
 }
 
+std::vector<std::uint8_t> make_rtp_packet(std::uint16_t sequence,
+                                          std::uint32_t timestamp,
+                                          std::uint16_t ipv4_id,
+                                          unsigned flow = 0U,
+                                          std::uint8_t marker_payload_type = 96U)
+{
+    std::vector<std::uint8_t> packet(40U + 160U);
+    auto* ip = packet.data();
+    ip[0] = 0x45U;
+    put16(ip + 2U, static_cast<std::uint16_t>(packet.size()));
+    put16(ip + 4U, ipv4_id);
+    put16(ip + 6U, 0x4000U);
+    ip[8] = 64U;
+    ip[9] = 17U;
+    ip[12] = 10U;
+    ip[15] = static_cast<std::uint8_t>(1U + flow);
+    ip[16] = 10U;
+    ip[19] = static_cast<std::uint8_t>(101U + flow);
+    put16(ip + 20U, static_cast<std::uint16_t>(10000U + flow));
+    put16(ip + 22U, static_cast<std::uint16_t>(20000U + flow));
+    put16(ip + 24U, static_cast<std::uint16_t>(packet.size() - 20U));
+    put16(ip + 26U, 0U);
+    ip[28] = 0x80U;
+    ip[29] = marker_payload_type;
+    put16(ip + 30U, sequence);
+    put32(ip + 32U, timestamp);
+    put32(ip + 36U, 0x10203040U + flow);
+    for(std::size_t pos = 40U; pos < packet.size(); ++pos)
+        packet[pos] = static_cast<std::uint8_t>(pos + sequence + flow);
+    put16(ip + 10U, ipv4_checksum(ip));
+    return packet;
+}
+
 std::vector<std::uint8_t> make_packet(Pt0Profile profile,
                                       std::uint32_t ordinal,
                                       std::uint8_t tos = 0,
@@ -287,6 +320,16 @@ std::string hex_digest(const std::array<std::uint8_t, rohccxx::rohcoipsec::sha25
         text.push_back(hex[byte & 0x0fU]);
     }
     return text;
+}
+
+std::vector<std::uint8_t> compress_rtp(rohc_comp* comp, std::uint32_t cid,
+                                       const std::vector<std::uint8_t>& packet)
+{
+    REQUIRE(rohc_comp_set_cid(comp, cid) == 0);
+    std::array<std::uint8_t, 512> output{};
+    std::size_t length = output.size();
+    REQUIRE(rohc_compress4(comp, packet.data(), packet.size(), output.data(), &length) == 0);
+    return {output.begin(), output.begin() + static_cast<std::ptrdiff_t>(length)};
 }
 
 } // namespace
@@ -611,4 +654,117 @@ TEST_CASE("PT-0 collision contexts tolerate loss and reject stale reordering")
             if(ordinal == 13U) require_failed_transaction(decomp.get(), delayed);
         }
     }
+}
+
+TEST_CASE("RTP formal PT-0 round-trips four interleaved small-CID flows")
+{
+    CompPtr comp(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    DecompPtr decomp(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(comp);
+    REQUIRE(decomp);
+    for(unsigned ordinal = 0; ordinal < 4U; ++ordinal)
+    {
+        for(unsigned flow = 0; flow < 4U; ++flow)
+        {
+            const auto sequence = static_cast<std::uint16_t>(1000U + ordinal);
+            const auto packet = make_rtp_packet(sequence, 90000U + ordinal * 160U,
+                                                static_cast<std::uint16_t>(3000U + ordinal), flow);
+            const auto rohc = compress_rtp(comp.get(), flow, packet);
+            require_guarded_decode(decomp.get(), rohc, packet);
+            if(ordinal >= 2U)
+            {
+                REQUIRE(rohc.size() - 160U == (flow == 0U ? 1U : 2U));
+                if(flow != 0U) REQUIRE(rohc[0] == static_cast<std::uint8_t>(0xe0U | flow));
+            }
+        }
+    }
+}
+
+TEST_CASE("RTP formal PT-0 reconstructs sequence timestamp and IPv4-ID wrap")
+{
+    for(const bool constant_id : {false, true})
+    {
+        CAPTURE(constant_id);
+        CompPtr comp(rohc_comp_new2(0U, ROHCCXX_DIRECTION_UPLINK));
+        DecompPtr decomp(rohc_decomp_new2(0U, ROHCCXX_DIRECTION_UPLINK));
+        REQUIRE(comp);
+        REQUIRE(decomp);
+        for(unsigned ordinal = 0; ordinal < 4U; ++ordinal)
+        {
+            const auto sequence = static_cast<std::uint16_t>(0xfffeU + ordinal);
+            const auto timestamp = static_cast<std::uint32_t>(0xffffff00U + ordinal * 160U);
+            const auto id = constant_id ? 77U : static_cast<std::uint16_t>(0xfffeU + ordinal);
+            const auto packet = make_rtp_packet(sequence, timestamp, id);
+            const auto rohc = compress_rtp(comp.get(), 0U, packet);
+            require_guarded_decode(decomp.get(), rohc, packet);
+            if(ordinal >= 2U) REQUIRE(rohc.size() - 160U == 1U);
+        }
+    }
+}
+
+TEST_CASE("unsafe RTP field changes retain the private FO fallback")
+{
+    enum class Change { Timestamp, Sequence, Marker, PayloadType, Ssrc, Ports,
+                        IpAddress, IpTtl, UdpChecksum, Ipv4Id };
+    for(const auto change : {Change::Timestamp, Change::Sequence, Change::Marker,
+                             Change::PayloadType, Change::Ssrc, Change::Ports,
+                             Change::IpAddress, Change::IpTtl, Change::UdpChecksum,
+                             Change::Ipv4Id})
+    {
+        CAPTURE(static_cast<unsigned>(change));
+        CompPtr comp(rohc_comp_new2(0U, ROHCCXX_DIRECTION_UPLINK));
+        REQUIRE(comp);
+        for(unsigned ordinal = 0; ordinal < 3U; ++ordinal)
+        {
+            const auto packet = make_rtp_packet(static_cast<std::uint16_t>(100U + ordinal),
+                                                10000U + ordinal * 160U,
+                                                static_cast<std::uint16_t>(500U + ordinal));
+            (void) compress_rtp(comp.get(), 0U, packet);
+        }
+        auto packet = make_rtp_packet(103U, 10480U, 503U);
+        switch(change)
+        {
+        case Change::Timestamp: put32(packet.data() + 32U, 10481U); break;
+        case Change::Sequence:
+            put16(packet.data() + 30U, 122U);
+            put32(packet.data() + 32U, 13520U);
+            put16(packet.data() + 4U, 522U);
+            break;
+        case Change::Marker: packet[29] |= 0x80U; break;
+        case Change::PayloadType: packet[29] = 97U; break;
+        case Change::Ssrc: put32(packet.data() + 36U, 0x10203041U); break;
+        case Change::Ports: put16(packet.data() + 20U, 10001U); break;
+        case Change::IpAddress: packet[19] = 103U; break;
+        case Change::IpTtl: packet[8] = 63U; break;
+        case Change::UdpChecksum: put16(packet.data() + 26U, 0x1234U); break;
+        case Change::Ipv4Id: put16(packet.data() + 4U, 700U); break;
+        }
+        put16(packet.data() + 10U, 0U);
+        put16(packet.data() + 10U, ipv4_checksum(packet.data()));
+        const auto rohc = compress_rtp(comp.get(), 0U, packet);
+        REQUIRE(rohc.size() - 160U > 1U);
+    }
+}
+
+TEST_CASE("corrupted RTP PT-0 fails without changing output or context")
+{
+    CompPtr comp(rohc_comp_new2(0U, ROHCCXX_DIRECTION_UPLINK));
+    DecompPtr decomp(rohc_decomp_new2(0U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(comp);
+    REQUIRE(decomp);
+    std::vector<std::uint8_t> valid;
+    std::vector<std::uint8_t> expected;
+    for(unsigned ordinal = 0; ordinal < 3U; ++ordinal)
+    {
+        expected = make_rtp_packet(static_cast<std::uint16_t>(200U + ordinal),
+                                   20000U + ordinal * 160U,
+                                   static_cast<std::uint16_t>(800U + ordinal));
+        valid = compress_rtp(comp.get(), 0U, expected);
+        if(ordinal < 2U) require_guarded_decode(decomp.get(), valid, expected);
+    }
+    REQUIRE(valid.size() - 160U == 1U);
+    auto corrupt = valid;
+    corrupt[0] ^= 0x01U;
+    require_failed_transaction(decomp.get(), corrupt);
+    require_guarded_decode(decomp.get(), valid, expected);
 }

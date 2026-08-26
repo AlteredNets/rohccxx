@@ -301,10 +301,10 @@ static bool update_rtp_ipv4_id_behavior(rohccxx::Context& ctx,
     const auto swapped_previous = static_cast<std::uint16_t>((previous_ipv4_id >> 8U) |
                                                              (previous_ipv4_id << 8U));
     const auto swapped_delta = static_cast<std::uint16_t>(swapped_id - swapped_previous);
-    if(ctx.ipv4_id == 0)
-        ctx.ipv4_id_behavior = 3U;
-    else if(id_delta == seq_delta)
+    if(id_delta == seq_delta)
         ctx.ipv4_id_behavior = 0U;
+    else if(ctx.ipv4_id == 0)
+        ctx.ipv4_id_behavior = 3U;
     else if(swapped_delta == seq_delta)
         ctx.ipv4_id_behavior = 1U;
     else
@@ -371,6 +371,55 @@ static void update_rtp_timestamp_stride(rohccxx::Context& ctx,
 
     ctx.rtp.ts_stride = stride;
     ctx.rtp.ts_residue = residue;
+}
+
+static bool rtp_pt0_reconstructable(const rohccxx::Context& previous,
+                                    const rohccxx::Context& current)
+{
+    if(previous.profile != rohccxx::Profile::RTP ||
+       previous.rohc_state != rohccxx::RohcState::DynamicEstablished ||
+       previous.ip_version != 4 || current.ip_version != 4 ||
+       previous.rtp.ts_stride == 0U)
+        return false;
+    const auto delta = static_cast<std::uint16_t>(current.rtp.last_seq - previous.rtp.last_seq);
+    if(delta == 0U || delta > 15U ||
+       current.rtp.last_ts != previous.rtp.last_ts + previous.rtp.ts_stride * delta ||
+       current.rtp.vpxcc != previous.rtp.vpxcc || current.rtp.mpt != previous.rtp.mpt ||
+       current.rtp.ssrc != previous.rtp.ssrc ||
+       current.udp_sport != previous.udp_sport || current.udp_dport != previous.udp_dport ||
+       current.udp_check != previous.udp_check ||
+       current.ipv4_tos != previous.ipv4_tos || current.ipv4_ttl != previous.ipv4_ttl ||
+       current.ipv4_flags != previous.ipv4_flags ||
+       current.ipv4_protocol != previous.ipv4_protocol ||
+       current.ipv4_saddr != previous.ipv4_saddr || current.ipv4_daddr != previous.ipv4_daddr ||
+       current.ipv4_options_len != previous.ipv4_options_len ||
+       current.ipv4_options != previous.ipv4_options ||
+       current.ipv4_id_behavior != previous.ipv4_id_behavior)
+        return false;
+    if(current.ipv4_id_behavior == 0U)
+        return current.ipv4_id == static_cast<std::uint16_t>(previous.ipv4_id + delta);
+    return (current.ipv4_id_behavior == 2U || current.ipv4_id_behavior == 3U) &&
+           current.ipv4_id == previous.ipv4_id;
+}
+
+static bool emit_rtp_pt0_small_cid(std::uint8_t* out,
+                                   size_t* out_len,
+                                   std::uint32_t cid,
+                                   std::uint16_t msn,
+                                   const std::uint8_t* ipv4_udp_rtp_header)
+{
+    if(!out || !out_len || !ipv4_udp_rtp_header || cid > 0x0fU)
+        return false;
+    const size_t required = cid == 0U ? 1U : 2U;
+    if(*out_len < required)
+        return false;
+    size_t pos = 0U;
+    if(cid != 0U)
+        out[pos++] = static_cast<std::uint8_t>(0xe0U | cid);
+    out[pos++] = static_cast<std::uint8_t>(((msn & 0x0fU) << 3U) |
+                                           rohccxx::utils::crc3(ipv4_udp_rtp_header, 40U));
+    *out_len = pos;
+    return true;
 }
 
 static bool checked_packet_size(size_t base, size_t payload, size_t& total)
@@ -592,6 +641,62 @@ static bool build_rtp_packet(uint8_t* out,
         std::memcpy(rtp_out + rtp_pos, ctx.rtp.padding_bytes.data(), padding_len);
 
     *out_len = total;
+    return true;
+}
+
+static bool build_fixed_rtp_ipv4_header(std::array<std::uint8_t, 40>& out,
+                                        const rohccxx::Context& ctx,
+                                        size_t payload_len)
+{
+    if(ctx.ip_version != 4 || ctx.ipv4_options_len != 0U ||
+       (ctx.rtp.vpxcc & 0x3fU) != 0U || ctx.rtp.csrc_list_len != 0U ||
+       ctx.rtp.extension_len != 0U || ctx.rtp.padding_len != 0U ||
+       payload_len > 0xffffU - out.size())
+        return false;
+
+    out.fill(0U);
+    const auto total = static_cast<std::uint16_t>(out.size() + payload_len);
+    const auto udp_total = static_cast<std::uint16_t>(20U + payload_len);
+    out[0] = 0x45U;
+    out[1] = ctx.ipv4_tos;
+    out[2] = static_cast<std::uint8_t>(total >> 8U);
+    out[3] = static_cast<std::uint8_t>(total);
+    out[4] = static_cast<std::uint8_t>(ctx.ipv4_id >> 8U);
+    out[5] = static_cast<std::uint8_t>(ctx.ipv4_id);
+    out[6] = static_cast<std::uint8_t>(ctx.ipv4_flags << 5U);
+    out[8] = ctx.ipv4_ttl;
+    out[9] = 17U;
+    out[12] = static_cast<std::uint8_t>(ctx.ipv4_saddr >> 24U);
+    out[13] = static_cast<std::uint8_t>(ctx.ipv4_saddr >> 16U);
+    out[14] = static_cast<std::uint8_t>(ctx.ipv4_saddr >> 8U);
+    out[15] = static_cast<std::uint8_t>(ctx.ipv4_saddr);
+    out[16] = static_cast<std::uint8_t>(ctx.ipv4_daddr >> 24U);
+    out[17] = static_cast<std::uint8_t>(ctx.ipv4_daddr >> 16U);
+    out[18] = static_cast<std::uint8_t>(ctx.ipv4_daddr >> 8U);
+    out[19] = static_cast<std::uint8_t>(ctx.ipv4_daddr);
+    out[20] = static_cast<std::uint8_t>(ctx.udp_sport >> 8U);
+    out[21] = static_cast<std::uint8_t>(ctx.udp_sport);
+    out[22] = static_cast<std::uint8_t>(ctx.udp_dport >> 8U);
+    out[23] = static_cast<std::uint8_t>(ctx.udp_dport);
+    out[24] = static_cast<std::uint8_t>(udp_total >> 8U);
+    out[25] = static_cast<std::uint8_t>(udp_total);
+    out[26] = static_cast<std::uint8_t>(ctx.udp_check >> 8U);
+    out[27] = static_cast<std::uint8_t>(ctx.udp_check);
+    out[28] = ctx.rtp.vpxcc;
+    out[29] = ctx.rtp.mpt;
+    out[30] = static_cast<std::uint8_t>(ctx.rtp.last_seq >> 8U);
+    out[31] = static_cast<std::uint8_t>(ctx.rtp.last_seq);
+    out[32] = static_cast<std::uint8_t>(ctx.rtp.last_ts >> 24U);
+    out[33] = static_cast<std::uint8_t>(ctx.rtp.last_ts >> 16U);
+    out[34] = static_cast<std::uint8_t>(ctx.rtp.last_ts >> 8U);
+    out[35] = static_cast<std::uint8_t>(ctx.rtp.last_ts);
+    out[36] = static_cast<std::uint8_t>(ctx.rtp.ssrc >> 24U);
+    out[37] = static_cast<std::uint8_t>(ctx.rtp.ssrc >> 16U);
+    out[38] = static_cast<std::uint8_t>(ctx.rtp.ssrc >> 8U);
+    out[39] = static_cast<std::uint8_t>(ctx.rtp.ssrc);
+    const auto checksum = ipv4_checksum(out.data(), 20);
+    out[10] = static_cast<std::uint8_t>(checksum >> 8U);
+    out[11] = static_cast<std::uint8_t>(checksum);
     return true;
 }
 
@@ -1985,6 +2090,7 @@ rohc_compress4(struct rohc_comp* comp,
     Context* ctx = comp->impl.contexts.get(cid);
     if(!ctx)
         return -1;
+    const Context context_before_compress = *ctx;
     ctx->cid = cid;
     ctx->large_cid = comp->impl.large_cid_space;
 
@@ -2170,6 +2276,40 @@ rohc_compress4(struct rohc_comp* comp,
             {
                 if(!emit_ir_rtp(rohc_packet, rohc_packet_len, *ctx))
                     return -1;
+            }
+            else if(rtp_pt0_reconstructable(context_before_compress, *ctx))
+            {
+                if(!emit_rtp_pt0_small_cid(rohc_packet, rohc_packet_len, cid,
+                                           ctx->msn, ip_packet))
+                    return -1;
+                const std::size_t base_offset = cid == 0U ? 0U : 1U;
+                bool ambiguous_private_rtp = false;
+                if(cid != 0U)
+                {
+                    std::array<std::uint8_t, 32> candidate{};
+                    candidate[0] = rohc_packet[base_offset];
+                    const std::size_t copied_payload = std::min<std::size_t>(
+                        candidate.size() - 1U, rtp_payload.payload_len);
+                    std::memcpy(candidate.data() + 1U,
+                                ip_packet + rtp_offset + rtp_payload.payload_offset,
+                                copied_payload);
+                    Context private_context = context_before_compress;
+                    private_context.cid = cid;
+                    private_context.large_cid = false;
+                    std::uint16_t private_sequence = 0;
+                    std::uint32_t private_timestamp = 0;
+                    std::size_t private_header_len = 0;
+                    ambiguous_private_rtp = decode_fo_rtp(
+                        candidate.data(), copied_payload + 1U, private_context,
+                        private_sequence, private_timestamp, &private_header_len);
+                }
+                if(ambiguous_private_rtp ||
+                   (rohc_packet[base_offset] >= 0x77U && rohc_packet[base_offset] <= 0x7aU))
+                {
+                    *rohc_packet_len = out_capacity;
+                    if(!emit_ir_dyn_rtp(rohc_packet, rohc_packet_len, *ctx))
+                        return -1;
+                }
             }
             else if(!emit_rtp_fo(rohc_packet, rohc_packet_len, *ctx) ||
                     !prepend_private_rtp_small_cid(rohc_packet, rohc_packet_len,
@@ -2835,7 +2975,7 @@ rohc_decompress4(struct rohc_decomp* decomp,
     // parser expects an embedded CID. Resolve that ambiguity from the CID-0
     // context before looking up any CID inferred from those bits.
     if(!decomp->impl.large_cid_space && !parsed.has_add_cid &&
-       parsed.type == RohcPacketType::FO_RTP && parsed.packet_len > 0 &&
+       parsed.packet_len > 0 &&
        (parsed.packet[0] & 0x80U) == 0)
     {
         Context* const cid_zero = decomp->impl.contexts.get(0);
@@ -2905,6 +3045,109 @@ rohc_decompress4(struct rohc_decomp* decomp,
     size_t packet_len = parsed.packet_len;
     const uint8_t* decode_packet = decoder_packet_start(parsed);
     size_t decode_packet_len = decoder_packet_len(parsed);
+    bool prefer_private_rtp_fo = false;
+
+    // The unauthenticated fixed-header RTP PT-0 path authenticates a temporary
+    // context and a 40-byte reconstruction before touching live state or caller
+    // output. ROHCoIPsec retains its existing full-packet authenticated staging.
+    const bool fixed_rtp_pt0_candidate =
+        !stage_authenticated_output && parsed.type == RohcPacketType::FO_RTP &&
+        packet_len > 0U && (packet[0] & 0x80U) == 0U &&
+        context_before_decode.profile == Profile::RTP &&
+        context_before_decode.ipv4_options_len == 0U &&
+        (context_before_decode.rtp.vpxcc & 0x3fU) == 0U &&
+        context_before_decode.rtp.csrc_list_len == 0U &&
+        context_before_decode.rtp.extension_len == 0U &&
+        context_before_decode.rtp.padding_len == 0U &&
+        rfc5225::live_pt0_context_supported(context_before_decode,
+                                            decomp->impl.large_cid_space,
+                                            cid,
+                                            parsed.has_add_cid);
+    if(fixed_rtp_pt0_candidate)
+    {
+        Context formal_context = *ctx;
+        rfc5225::FormalCoPacket formal{};
+        bool formal_valid = rfc5225::read_formal_co_base(
+            packet, 1U, Profile::RTP, rfc5225::FormalCoVariant::Pt0Crc3, formal);
+        std::array<std::uint8_t, 40> formal_header{};
+        const uint8_t* formal_payload = nullptr;
+        size_t formal_payload_len = 0U;
+        if(formal_valid)
+        {
+            std::uint16_t next_msn = formal_context.msn;
+            for(std::uint16_t delta = 1U; delta <= 15U; ++delta)
+            {
+                const auto candidate = static_cast<std::uint16_t>(formal_context.msn + delta);
+                if((candidate & 0x0fU) == formal.msn)
+                {
+                    next_msn = candidate;
+                    break;
+                }
+            }
+            formal_valid = next_msn != formal_context.msn;
+            if(formal_valid)
+            {
+                const auto delta = static_cast<std::uint16_t>(next_msn - formal_context.msn);
+                formal_context.msn = next_msn;
+                if(formal_context.ipv4_id_behavior == 0U)
+                    formal_context.ipv4_id =
+                        static_cast<std::uint16_t>(formal_context.ipv4_id + delta);
+                formal_context.rtp.last_seq = next_msn;
+                formal_context.rtp.last_ts += formal_context.rtp.ts_stride * delta;
+                formal_valid = detail::payload_after_header(packet, packet_len, 1U,
+                                                             formal_payload,
+                                                             formal_payload_len) &&
+                    build_fixed_rtp_ipv4_header(formal_header, formal_context,
+                                                formal_payload_len) &&
+                    utils::crc3(formal_header.data(), formal_header.size()) ==
+                        formal.header_crc;
+            }
+        }
+
+        bool private_valid = false;
+        if(parsed.has_add_cid)
+        {
+            Context private_context = *ctx;
+            std::uint16_t private_sequence = 0U;
+            std::uint32_t private_timestamp = 0U;
+            size_t private_header_len = 0U;
+            if(decode_fo_rtp(packet, packet_len, private_context,
+                             private_sequence, private_timestamp,
+                             &private_header_len))
+            {
+                const uint8_t* private_payload = nullptr;
+                size_t private_payload_len = 0U;
+                std::array<std::uint8_t, 40> private_header{};
+                private_valid = detail::payload_after_header(
+                                    packet, packet_len, private_header_len,
+                                    private_payload, private_payload_len) &&
+                    build_fixed_rtp_ipv4_header(private_header, private_context,
+                                                private_payload_len);
+            }
+        }
+
+        if(formal_valid && private_valid)
+            return finish_decoding(fail_with_feedback(cid));
+        if(formal_valid)
+        {
+            if(formal_payload_len > std::numeric_limits<size_t>::max() - formal_header.size() ||
+               *ip_packet_len < formal_header.size() + formal_payload_len)
+                return finish_decoding(fail_with_feedback(cid));
+            const size_t final_len = formal_header.size() + formal_payload_len;
+            *ctx = formal_context;
+            decomp->impl.mode = formal_context.mode;
+            std::memcpy(ip_packet, formal_header.data(), formal_header.size());
+            if(formal_payload_len > 0U)
+                std::memcpy(ip_packet + formal_header.size(), formal_payload,
+                            formal_payload_len);
+            reconstruction_len = final_len;
+            return finish_decoding(0);
+        }
+        if(private_valid)
+            prefer_private_rtp_fo = true;
+        else
+            return finish_decoding(fail_with_feedback(cid));
+    }
 
     // RFC 5225 PT-0 uses the entire zero-MSB octet space.  The legacy/private
     // FO markers 0x77..0x7a therefore overlap valid CID-0 PT-0 values.  Resolve
@@ -2954,6 +3197,10 @@ rohc_decompress4(struct rohc_decomp* decomp,
             meaning.output_len = max_reconstructed_ip_packet;
             switch(meaning.context.profile)
             {
+            case Profile::RTP:
+                return build_rtp_packet(meaning.output.get(), &meaning.output_len,
+                                        meaning.context, candidate_payload,
+                                        candidate_payload_len);
             case Profile::UDP:
                 return build_udp_packet(meaning.output.get(), &meaning.output_len,
                                         meaning.context, candidate_payload,
@@ -3005,10 +3252,16 @@ rohc_decompress4(struct rohc_decomp* decomp,
             const std::uint16_t msn_delta =
                 static_cast<std::uint16_t>(next_msn - meaning.context.msn);
             meaning.context.msn = next_msn;
-            meaning.context.ipv4_id =
-                static_cast<std::uint16_t>(meaning.context.ipv4_id + msn_delta);
+            if(meaning.context.ipv4_id_behavior == 0U)
+                meaning.context.ipv4_id =
+                    static_cast<std::uint16_t>(meaning.context.ipv4_id + msn_delta);
             if(meaning.context.profile == Profile::ESP)
                 meaning.context.esp_sequence += msn_delta;
+            if(meaning.context.profile == Profile::RTP)
+            {
+                meaning.context.rtp.last_seq = next_msn;
+                meaning.context.rtp.last_ts += meaning.context.rtp.ts_stride * msn_delta;
+            }
 
             size_t candidate_header_len = 1U;
             if(meaning.context.profile == Profile::UDP &&
@@ -3024,7 +3277,8 @@ rohc_decompress4(struct rohc_decomp* decomp,
             if(!reconstruct_tentative(meaning, candidate_header_len))
                 return meaning;
             meaning.consumed_len = candidate_header_len;
-            const size_t crc_header_len = meaning.context.profile == Profile::IP ? 20U : 28U;
+            const size_t crc_header_len = meaning.context.profile == Profile::RTP ? 40U :
+                (meaning.context.profile == Profile::IP ? 20U : 28U);
             meaning.valid = meaning.output_len >= crc_header_len &&
                 utils::crc3(meaning.output.get(), crc_header_len) == formal.header_crc;
             return meaning;
@@ -3041,6 +3295,16 @@ rohc_decompress4(struct rohc_decomp* decomp,
             bool decoded = false;
             switch(parsed.type)
             {
+            case RohcPacketType::FO_RTP:
+            {
+                std::uint16_t sequence = 0;
+                std::uint32_t timestamp = 0;
+                decoded = parsed.has_add_cid &&
+                          decode_fo_rtp(packet, packet_len, meaning.context,
+                                        sequence, timestamp, &candidate_header_len) &&
+                          meaning.context.profile == Profile::RTP;
+                break;
+            }
             case RohcPacketType::FO_UDP:
                 decoded = decode_udp_fo(packet, packet_len, meaning.context,
                                         &candidate_header_len) &&
@@ -3075,9 +3339,9 @@ rohc_decompress4(struct rohc_decomp* decomp,
         };
 
         TentativeMeaning formal = try_formal_pt0();
+        TentativeMeaning private_fo = try_private_fo();
         if(formal.valid)
         {
-            TentativeMeaning private_fo = try_private_fo();
             if(private_fo.valid)
             {
                 const bool same_interpretation =
@@ -3101,6 +3365,10 @@ rohc_decompress4(struct rohc_decomp* decomp,
                 }
             }
             parsed.type = RohcPacketType::FO_RTP;
+        }
+        else if(parsed.type == RohcPacketType::FO_RTP && private_fo.valid)
+        {
+            prefer_private_rtp_fo = true;
         }
         // If formal authentication fails but the complete private packet,
         // including its CRC-8, succeeds below, preserve legacy compatibility.
@@ -3237,9 +3505,12 @@ rohc_decompress4(struct rohc_decomp* decomp,
         }
     }
     else if(parsed.type == RohcPacketType::FO_RTP &&
-            ctx->profile != Profile::RTP && ctx->profile != Profile::RTP_UDP_Lite &&
+            !prefer_private_rtp_fo &&
+            ctx->profile != Profile::RTP_UDP_Lite &&
             ctx->profile != Profile::Uncompressed && packet_len > 0 &&
-            (packet[0] & 0x80U) == 0)
+            (packet[0] & 0x80U) == 0 &&
+            rfc5225::live_pt0_context_supported(*ctx, decomp->impl.large_cid_space,
+                                                cid, parsed.has_add_cid))
     {
         const bool supported_context = rfc5225::live_pt0_context_supported(
             *ctx, decomp->impl.large_cid_space, cid, parsed.has_add_cid);
@@ -3336,11 +3607,12 @@ rohc_decompress4(struct rohc_decomp* decomp,
         uint16_t seq;
         uint32_t ts;
 
-        // Private/current RTP FO is explicitly framed with Add-CID in the
-        // small-CID space. A bare PT-0-shaped packet belongs to the formal
-        // RFC 5225 namespace, which is intentionally unsupported for RTP.
+        // Private/current RTP FO remains explicitly framed with Add-CID in the
+        // small-CID space; formal PT-0 was handled above.
         const bool private_rtp_framing = !decomp->impl.large_cid_space && parsed.has_add_cid;
         ok = private_rtp_framing && decode_fo_rtp(packet, packet_len, *ctx, seq, ts, &header_len);
+        if(ok)
+            ctx->msn = seq;
         if (ok && ctx->rohc_state != RohcState::DynamicEstablished)
             ok = false;
     }

@@ -10,6 +10,7 @@
 #include "rohccxx/core/classify.hpp"
 #include "rohccxx/core/decode_ir.hpp"
 #include "rohccxx/core/decode_ir_dyn.hpp"
+#include "rohccxx/utils/crc.hpp"
 #include "test_packet_helpers.hpp"
 #include "protocols/ip_numbers.h"
 
@@ -2110,16 +2111,22 @@ void require_profile_parity_fixture(const ProfileParityFixture& fixture)
             expected.erase(expected.begin() + static_cast<std::ptrdiff_t>(dynamic_offset + 3U),
                            expected.begin() + static_cast<std::ptrdiff_t>(dynamic_offset + 5U));
         }
-        if(i == 2 && (fixture.profile == ParityProfile::Rtp ||
-                      fixture.profile == ParityProfile::RtpUdpLite))
+        if(i == 2 && fixture.profile == ParityProfile::Rtp)
+        {
+            expected.clear();
+            expected.push_back(static_cast<std::uint8_t>(
+                ((1002U & 0x0fU) << 3U) | rohccxx::utils::crc3(packet, 40U)));
+            expected.insert(expected.end(), packet + 40U, packet + sizeof(packet));
+        }
+        else if(i == 2 && fixture.profile == ParityProfile::RtpUdpLite)
             expected.insert(expected.begin(), 0xE0U);
         REQUIRE(rohc_len == expected.size());
         REQUIRE(std::memcmp(rohc, expected.data(), rohc_len) == 0);
-        const std::uint8_t* decode_input = i == 2 &&
-            (fixture.profile == ParityProfile::Rtp || fixture.profile == ParityProfile::RtpUdpLite)
+        const std::uint8_t* decode_input = fixture.profile == ParityProfile::Rtp ||
+            (i == 2 && fixture.profile == ParityProfile::RtpUdpLite)
                 ? expected.data() : fixture.expected[i];
-        const size_t decode_len = i == 2 &&
-            (fixture.profile == ParityProfile::Rtp || fixture.profile == ParityProfile::RtpUdpLite)
+        const size_t decode_len = fixture.profile == ParityProfile::Rtp ||
+            (i == 2 && fixture.profile == ParityProfile::RtpUdpLite)
                 ? expected.size() : fixture.expected_len[i];
         REQUIRE(rohc_decompress4(decomp, decode_input, decode_len, out, &out_len) == 0);
         REQUIRE(out_len == sizeof(packet));
