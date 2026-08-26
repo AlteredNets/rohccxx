@@ -9,6 +9,7 @@
 #include "rohccxx/core/emit_ip_fo.hpp"
 #include "rohccxx/core/emit_udp_fo.hpp"
 #include "rohccxx/core/rohcoipsec.hpp"
+#include "rohccxx/utils/crc.hpp"
 
 #include <array>
 #include <cstdint>
@@ -128,6 +129,13 @@ std::vector<std::uint8_t> make_packet(Pt0Profile profile,
     if(profile == Pt0Profile::Udp) packet[28] &= 0x3fU;
     put16(ip + 10, ipv4_checksum(ip));
     return packet;
+}
+
+void set_ipv4_id(std::vector<std::uint8_t>& packet, std::uint16_t id)
+{
+    put16(packet.data() + 4U, id);
+    put16(packet.data() + 10U, 0U);
+    put16(packet.data() + 10U, ipv4_checksum(packet.data()));
 }
 
 std::size_t ordinal_for_octet(Pt0Profile profile, std::uint8_t octet)
@@ -985,6 +993,127 @@ TEST_CASE("malformed IP-only PT-0 fails transactionally and remains retryable")
     auto next = make_packet(Pt0Profile::Ip, 3U);
     const auto next_valid = compress_packet(comp.get(), 1U, next);
     require_failed_transaction(decomp.get(), {next_valid.front()}, 510U, true, 0U);
+    require_guarded_decode(decomp.get(), next_valid, next);
+}
+
+TEST_CASE("IP-only formal pt_1_seq_id has exact small-CID wire bytes")
+{
+    for(const std::uint32_t cid : {0U, 1U, 15U})
+    {
+        CAPTURE(cid);
+        CompPtr comp(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+        DecompPtr decomp(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+        REQUIRE(comp);
+        REQUIRE(decomp);
+        std::vector<std::uint8_t> rohc;
+        for(std::uint32_t ordinal = 0U; ordinal < 3U; ++ordinal)
+        {
+            auto packet = make_packet(Pt0Profile::Ip, ordinal);
+            set_ipv4_id(packet, ordinal == 2U ? 3U : static_cast<std::uint16_t>(ordinal));
+            rohc = compress_packet(comp.get(), cid, packet);
+            require_guarded_decode(decomp.get(), rohc, packet);
+            if(ordinal == 2U)
+            {
+                const std::size_t base = cid == 0U ? 0U : 1U;
+                const std::uint8_t crc = rohccxx::utils::crc3(packet.data(), 20U);
+                const std::array<std::uint8_t, 2> expected{{
+                    static_cast<std::uint8_t>(0xa0U | (crc << 2U)), 0x33U}};
+                REQUIRE(rohc.size() - 160U == (cid == 0U ? 2U : 3U));
+                if(cid != 0U)
+                    REQUIRE(rohc[0] == static_cast<std::uint8_t>(0xe0U | cid));
+                REQUIRE(rohc[base] == expected[0]);
+                REQUIRE(rohc[base + 1U] == expected[1]);
+            }
+        }
+    }
+}
+
+TEST_CASE("IP-only pt_1_seq_id decodes jumps wrap and sequential-swapped IDs")
+{
+    const std::array<std::array<std::uint16_t, 3>, 4> series{{
+        {{100U, 101U, 103U}},
+        {{100U, 101U, 106U}},
+        {{0xfffeU, 0xffffU, 1U}},
+        {{0x0100U, 0x0200U, 0x0400U}},
+    }};
+    for(const auto& ids : series)
+    {
+        CAPTURE(ids[0], ids[1], ids[2]);
+        CompPtr comp(rohc_comp_new2(0U, ROHCCXX_DIRECTION_UPLINK));
+        DecompPtr decomp(rohc_decomp_new2(0U, ROHCCXX_DIRECTION_UPLINK));
+        REQUIRE(comp);
+        REQUIRE(decomp);
+        for(std::uint32_t ordinal = 0U; ordinal < ids.size(); ++ordinal)
+        {
+            auto packet = make_packet(Pt0Profile::Ip, ordinal);
+            set_ipv4_id(packet, ids[ordinal]);
+            const auto rohc = compress_packet(comp.get(), 0U, packet);
+            require_guarded_decode(decomp.get(), rohc, packet);
+            if(ordinal == 2U)
+            {
+                REQUIRE(rohc.size() - 160U == 2U);
+                REQUIRE((rohc[0] & 0xe0U) == 0xa0U);
+            }
+        }
+    }
+}
+
+TEST_CASE("IP-only pt_1_seq_id enforces its forward W-LSB window")
+{
+    for(const std::uint16_t jump : {15U, 16U})
+    {
+        CAPTURE(jump);
+        CompPtr comp(rohc_comp_new2(0U, ROHCCXX_DIRECTION_UPLINK));
+        DecompPtr decomp(rohc_decomp_new2(0U, ROHCCXX_DIRECTION_UPLINK));
+        REQUIRE(comp);
+        REQUIRE(decomp);
+        for(std::uint32_t ordinal = 0U; ordinal < 3U; ++ordinal)
+        {
+            auto packet = make_packet(Pt0Profile::Ip, ordinal);
+            const std::uint16_t id = ordinal < 2U
+                ? static_cast<std::uint16_t>(100U + ordinal)
+                : static_cast<std::uint16_t>(101U + jump);
+            set_ipv4_id(packet, id);
+            const auto rohc = compress_packet(comp.get(), 0U, packet);
+            require_guarded_decode(decomp.get(), rohc, packet);
+            if(ordinal == 2U)
+            {
+                if(jump == 15U)
+                    REQUIRE((rohc[0] & 0xe0U) == 0xa0U);
+                else
+                    REQUIRE(rohc[0] == 0x79U);
+            }
+        }
+    }
+}
+
+TEST_CASE("IP-only pt_1_seq_id corruption and truncation fail transactionally")
+{
+    CompPtr comp(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    DecompPtr decomp(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(comp);
+    REQUIRE(decomp);
+    std::vector<std::uint8_t> valid;
+    std::vector<std::uint8_t> expected;
+    for(std::uint32_t ordinal = 0U; ordinal < 3U; ++ordinal)
+    {
+        expected = make_packet(Pt0Profile::Ip, ordinal);
+        set_ipv4_id(expected, ordinal == 2U ? 3U : static_cast<std::uint16_t>(ordinal));
+        valid = compress_packet(comp.get(), 1U, expected);
+        if(ordinal < 2U)
+            require_guarded_decode(decomp.get(), valid, expected);
+    }
+    REQUIRE(valid.size() - 160U == 3U);
+    auto corrupt = valid;
+    corrupt[1] ^= 0x04U;
+    require_failed_transaction(decomp.get(), corrupt, 510U, true, 1U);
+    require_failed_transaction(decomp.get(), {valid[0], valid[1]}, 510U, true, 1U);
+    require_guarded_decode(decomp.get(), valid, expected);
+
+    auto next = make_packet(Pt0Profile::Ip, 3U);
+    set_ipv4_id(next, 5U);
+    const auto next_valid = compress_packet(comp.get(), 1U, next);
+    REQUIRE(next_valid.size() - 160U == 3U);
     require_guarded_decode(decomp.get(), next_valid, next);
 }
 
