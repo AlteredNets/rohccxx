@@ -92,16 +92,40 @@ ip -n "${ns_b}" link set rohcb up mtu 1400
 
 ip netns exec "${ns_a}" ping -c 2 -W 2 10.44.0.2 >/dev/null
 ip netns exec "${ns_b}" ping -c 2 -W 2 10.44.0.1 >/dev/null
+echo "PASS: bidirectional ping"
 
 ip netns exec "${ns_b}" python3 -c 'import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.bind(("10.44.0.2",32123)); data,peer=s.recvfrom(4096); s.sendto(data,peer)' &
 udp_server=$!
 ip netns exec "${ns_a}" python3 -c 'import socket; p=bytes(range(256))*4; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.settimeout(3); s.sendto(p,("10.44.0.2",32123)); assert s.recv(4096)==p'
 wait "${udp_server}"
+echo "PASS: byte-exact UDP payload delivery"
 
 touch "${tmp_dir}/corrupt-a"
 if ip netns exec "${ns_a}" ping -c 1 -W 1 10.44.0.2 >/dev/null 2>&1; then
     echo "corrupted compressed datagram unexpectedly delivered" >&2
     exit 1
 fi
+echo "PASS: corrupted compressed datagram rejected"
 ip netns exec "${ns_a}" ping -c 2 -W 2 10.44.0.2 >/dev/null
-echo "PASS: bidirectional ping, UDP integrity, corrupted-frame rejection, and recovery"
+echo "PASS: recovery after corrupted compressed datagram"
+
+kill -TERM "${pid_a}" "${pid_b}"
+wait "${pid_a}"
+wait "${pid_b}"
+pid_a=""
+pid_b=""
+if ! grep -Eq 'feedback_received=[1-9][0-9]*' "${tmp_dir}/a.log" ||
+   ! grep -Eq 'feedback_sent=[1-9][0-9]*' "${tmp_dir}/b.log"; then
+    echo "feedback was not sent and received after corruption" >&2
+    exit 1
+fi
+echo "PASS: decompressor feedback sent and compressor feedback received"
+
+cleanup
+trap - EXIT INT TERM
+namespaces=$(ip netns list)
+if grep -Fq "${ns_a}" <<<"${namespaces}" || grep -Fq "${ns_b}" <<<"${namespaces}"; then
+    echo "network namespace cleanup failed" >&2
+    exit 1
+fi
+echo "PASS: processes, TUN devices, veth interfaces, and namespaces cleaned up"
