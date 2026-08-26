@@ -118,18 +118,21 @@ std::vector<std::uint8_t> kernel_style_packet(std::uint8_t protocol,
     return packet;
 }
 
-std::vector<std::uint8_t> stress_udp_packet(std::uint64_t sequence)
+std::vector<std::uint8_t> stress_udp_packet(std::uint64_t sequence,
+                                            std::uint16_t ipv4_id = 0U,
+                                            bool reverse = false)
 {
     constexpr std::size_t payload_size = 64U;
     std::vector<std::uint8_t> packet(28U + payload_size);
     packet[0] = 0x45U;
     put16(packet.data() + 2U, static_cast<std::uint16_t>(packet.size()));
+    put16(packet.data() + 4U, ipv4_id);
     put16(packet.data() + 6U, 0x4000U);
     packet[8] = 64U; packet[9] = 17U;
-    packet[12] = 10U; packet[15] = 1U;
-    packet[16] = 10U; packet[19] = 2U;
-    put16(packet.data() + 20U, 34000U);
-    put16(packet.data() + 22U, 33221U);
+    packet[12] = 10U; packet[15] = reverse ? 2U : 1U;
+    packet[16] = 10U; packet[19] = reverse ? 1U : 2U;
+    put16(packet.data() + 20U, reverse ? 33221U : 34000U);
+    put16(packet.data() + 22U, reverse ? 34000U : 33221U);
     put16(packet.data() + 24U, 8U + payload_size);
     const std::array<std::uint8_t, 4> magic{{'R', 'T', 'S', 'T'}};
     std::memcpy(packet.data() + 28U, magic.data(), magic.size());
@@ -450,6 +453,35 @@ TEST_CASE("Linux TUN mapped codec round-trips first three fixed-size UDP packets
              << " reconstructed_len=" << reconstructed_len
              << " feedback=" << rohc_decomp_has_feedback(decomp.get()));
         REQUIRE(decompress_status == 0);
+        REQUIRE(reconstructed_len == packet.size());
+        REQUIRE(std::memcmp(reconstructed.data(), packet.data(), packet.size()) == 0);
+    }
+}
+
+TEST_CASE("Linux TUN rejects no valid private UDP FO as ambiguous formal PT-0")
+{
+    std::unique_ptr<rohc_comp, CompDelete> comp(
+        rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    std::unique_ptr<rohc_decomp, DecompDelete> decomp(
+        rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(comp); REQUIRE(decomp);
+    REQUIRE(rohc_comp_set_cid(comp.get(), 1U) == 0);
+    const std::array<std::uint16_t, 3> ids{{0x858eU, 0x858fU, 0x8590U}};
+    for(std::size_t index = 0U; index < ids.size(); ++index)
+    {
+        auto packet = stress_udp_packet(index + 2U, ids[index], true);
+        std::array<std::uint8_t, 256> compressed{}, reconstructed{};
+        std::size_t compressed_len = compressed.size();
+        REQUIRE(rohc_compress4(comp.get(), packet.data(), packet.size(),
+                               compressed.data(), &compressed_len) == 0);
+        INFO("index=" << index << " checksum=" << std::hex
+             << unsigned(packet[26]) << unsigned(packet[27])
+             << " compressed_len=" << std::dec << compressed_len
+             << " first=" << std::hex << unsigned(compressed[0]) << ":"
+             << unsigned(compressed[1]) << ":" << unsigned(compressed[2]));
+        std::size_t reconstructed_len = reconstructed.size();
+        REQUIRE(rohc_decompress4(decomp.get(), compressed.data(), compressed_len,
+                                 reconstructed.data(), &reconstructed_len) == 0);
         REQUIRE(reconstructed_len == packet.size());
         REQUIRE(std::memcmp(reconstructed.data(), packet.data(), packet.size()) == 0);
     }

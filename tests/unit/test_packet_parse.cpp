@@ -2777,7 +2777,7 @@ TEST_CASE("ROHC decompressor rejects unknown IR-DYN profile identifiers")
 }
 
 
-TEST_CASE("ROHC compressor emits selected nonzero CID across UDP IR IR-DYN and FO")
+TEST_CASE("ROHC compressor emits selected nonzero CID across UDP state transitions")
 {
     rohc_comp* comp = rohc_comp_new2(4, ROHCCXX_DIRECTION_UPLINK);
     rohc_decomp* decomp = rohc_decomp_new2(4, ROHCCXX_DIRECTION_UPLINK);
@@ -2848,7 +2848,9 @@ TEST_CASE("ROHC compressor emits selected nonzero CID across UDP IR IR-DYN and F
     out_len = sizeof(out);
     REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
     REQUIRE(rohc[0] == 0xE3);
-    REQUIRE(rohc[1] == 0x7A);
+    // This packet's private FO bytes are also a valid formal PT-0 decoding.
+    // The compressor must fail closed with a refresh while retaining CID 3.
+    REQUIRE(rohc[1] == 0xFD);
     REQUIRE(rohc_decompress4(decomp, rohc, rohc_len, out, &out_len) == 0);
     REQUIRE(std::memcmp(out, ip, sizeof(ip)) == 0);
 

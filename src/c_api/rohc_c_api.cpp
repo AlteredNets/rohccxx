@@ -838,6 +838,57 @@ static bool build_fixed_udp_ipv4_header(std::array<std::uint8_t, 28>& out,
     return true;
 }
 
+static bool private_udp_fo_is_formal_pt0_ambiguous(
+    const rohccxx::Context& previous, const std::uint8_t* private_packet,
+    size_t private_packet_len, size_t payload_len)
+{
+    if(!private_packet || private_packet_len == 0U ||
+       previous.profile != rohccxx::Profile::UDP ||
+       previous.rohc_state != rohccxx::RohcState::DynamicEstablished)
+        return false;
+    rohccxx::rfc5225::FormalCoPacket formal{};
+    if(!rohccxx::rfc5225::read_formal_co_base(
+           private_packet, 1U, rohccxx::Profile::UDP,
+           rohccxx::rfc5225::FormalCoVariant::Pt0Crc3, formal))
+        return false;
+    rohccxx::Context formal_context = previous;
+    std::uint16_t next_msn = formal_context.msn;
+    for(std::uint16_t delta = 1U; delta <= 15U; ++delta)
+    {
+        const auto candidate = static_cast<std::uint16_t>(formal_context.msn + delta);
+        if((candidate & 0x0fU) == formal.msn)
+        {
+            next_msn = candidate;
+            break;
+        }
+    }
+    if(next_msn == formal_context.msn)
+        return false;
+    const auto delta = static_cast<std::uint16_t>(next_msn - formal_context.msn);
+    formal_context.msn = next_msn;
+    formal_context.ipv4_id =
+        static_cast<std::uint16_t>(formal_context.ipv4_id + delta);
+    size_t formal_header_len = 1U;
+    if(formal_context.udp_checksum_used)
+    {
+        if(private_packet_len < formal_header_len + 2U)
+            return false;
+        formal_context.udp_check = static_cast<std::uint16_t>(
+            (static_cast<std::uint16_t>(private_packet[formal_header_len]) << 8U) |
+            private_packet[formal_header_len + 1U]);
+        formal_header_len += 2U;
+    }
+    if(private_packet_len < formal_header_len ||
+       payload_len > std::numeric_limits<size_t>::max() -
+                     (private_packet_len - formal_header_len))
+        return false;
+    const size_t formal_payload_len =
+        private_packet_len - formal_header_len + payload_len;
+    std::array<std::uint8_t, 28> header{};
+    return build_fixed_udp_ipv4_header(header, formal_context, formal_payload_len) &&
+           rohccxx::utils::crc3(header.data(), header.size()) == formal.header_crc;
+}
+
 static bool build_fixed_esp_ipv4_header(std::array<std::uint8_t, 28>& out,
                                         const rohccxx::Context& ctx,
                                         size_t payload_len)
@@ -2560,6 +2611,21 @@ rohc_compress4(struct rohc_comp* comp,
         ctx->udp_checksum_used = ctx->udp_check != 0;
         ctx->msn = static_cast<std::uint16_t>(ctx->tx_count + 1U);
         const size_t out_capacity = *rohc_packet_len;
+        const size_t payload_len = ip_packet_len - (ip_view.header_len + sizeof(*udp));
+        auto emit_unambiguous_private_fo = [&]() -> bool
+        {
+            *rohc_packet_len = out_capacity;
+            if(!emit_udp_fo(rohc_packet, rohc_packet_len, *ctx))
+                return false;
+            if(private_udp_fo_is_formal_pt0_ambiguous(
+                   previous, rohc_packet, *rohc_packet_len, payload_len))
+            {
+                *rohc_packet_len = out_capacity;
+                return emit_ir_dyn_udp(rohc_packet, rohc_packet_len, *ctx);
+            }
+            return ctx->large_cid || prepend_small_cid(
+                rohc_packet, rohc_packet_len, out_capacity, cid);
+        };
         if(should_emit_ir(*ctx))
         {
             ctx->rohc_state = RohcState::StaticEstablished;
@@ -2590,9 +2656,7 @@ rohc_compress4(struct rohc_comp* comp,
                 if(!emitted || pt0_private_fo_ambiguous(
                        pt0, ip_packet + payload_offset, ip_packet_len - payload_offset))
                 {
-                    if(!emit_udp_fo(rohc_packet, rohc_packet_len, *ctx) ||
-                       (!ctx->large_cid && !prepend_small_cid(
-                           rohc_packet, rohc_packet_len, out_capacity, cid)))
+                    if(!emit_unambiguous_private_fo())
                         return -1;
                 }
                 else
@@ -2606,8 +2670,7 @@ rohc_compress4(struct rohc_comp* comp,
             }
             else
             {
-                if(!emit_udp_fo(rohc_packet, rohc_packet_len, *ctx) ||
-                   (!ctx->large_cid && !prepend_small_cid(rohc_packet, rohc_packet_len, out_capacity, cid)))
+                if(!emit_unambiguous_private_fo())
                     return -1;
             }
         }
