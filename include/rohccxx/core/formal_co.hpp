@@ -135,8 +135,11 @@ inline bool live_pt0_context_supported(const Context& ctx,
     if(ctx.profile == Profile::UDP)
         return ctx.ipv4_id_behavior == 0U && cid_value <= 0x0fU &&
                has_add_cid == (cid_value != 0U);
+    if(ctx.profile == Profile::ESP)
+        return ctx.ipv4_id_behavior == 0U && cid_value <= 0x0fU &&
+               has_add_cid == (cid_value != 0U);
     return ctx.ipv4_id_behavior == 0U && cid_value == 0U && !has_add_cid &&
-           (ctx.profile == Profile::ESP || ctx.profile == Profile::IP);
+           ctx.profile == Profile::IP;
 }
 
 inline bool formal_co_variant_valid_for_profile(Profile profile, FormalCoVariant variant)
