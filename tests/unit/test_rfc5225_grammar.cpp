@@ -1895,7 +1895,8 @@ TEST_CASE("RFC 5225 formal pt-0 CO variants encode decode across profiles and CI
     REQUIRE(rohccxx::rfc5225::live_pt0_context_supported(live, false, 1, true));
     REQUIRE(rohccxx::rfc5225::live_pt0_context_supported(live, false, 15, true));
     live.profile = rohccxx::Profile::IP;
-    REQUIRE_FALSE(rohccxx::rfc5225::live_pt0_context_supported(live, false, 1, true));
+    REQUIRE(rohccxx::rfc5225::live_pt0_context_supported(live, false, 1, true));
+    REQUIRE(rohccxx::rfc5225::live_pt0_context_supported(live, false, 15, true));
     live.profile = rohccxx::Profile::UDP;
     REQUIRE_FALSE(rohccxx::rfc5225::live_pt0_context_supported(live, true, 0, false));
     live.large_cid = true;
