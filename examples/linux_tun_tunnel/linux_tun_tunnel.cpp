@@ -204,6 +204,17 @@ void account_tunnel(Statistics& stats, std::size_t datagram_len)
     stats.complete_tunnel_bytes += datagram_len + rohccxx::tun::estimated_outer_ipv4_udp_size;
 }
 
+void trace_hex(const char* label, std::uint64_t ordinal, std::uint8_t cid,
+               const std::uint8_t* data, std::size_t length)
+{
+    std::fprintf(stderr, "trace %s=%llu cid=%u length=%zu bytes=",
+                 label, static_cast<unsigned long long>(ordinal),
+                 static_cast<unsigned>(cid), length);
+    for(std::size_t pos = 0U; pos < length; ++pos)
+        std::fprintf(stderr, "%02x", static_cast<unsigned>(data[pos]));
+    std::fputc('\n', stderr);
+}
+
 void print_statistics(const Statistics& s)
 {
     const double reduction = s.original_inner_bytes == 0U ? 0.0 :
@@ -268,6 +279,7 @@ int main(int argc, char** argv)
     std::array<CompPtr, 16> compressors{};
     rohccxx::tun::FlowTable flows;
     Statistics stats{};
+    const bool trace_first_three = std::getenv("ROHCCXX_TUN_TRACE_FIRST_THREE") != nullptr;
     CodecContext codec_context{&compressors, nullptr, decomp.get(), &stats};
     const rohccxx::tun::Codec codec{&codec_context, compress_combined_adapter,
                                     decompress_adapter, feedback_adapter};
@@ -339,6 +351,13 @@ int main(int argc, char** argv)
                     ++stats.drops;
                 else
                 {
+                    if(trace_first_three && stats.tx_packets < 3U)
+                    {
+                        trace_hex("original", stats.tx_packets, assignment.cid,
+                                  inner.data(), static_cast<std::size_t>(count));
+                        trace_hex("compressed", stats.tx_packets, assignment.cid,
+                                  compressed.data(), rohc_len);
+                    }
                     ++stats.tx_packets;
                     stats.original_inner_bytes += static_cast<std::size_t>(count);
                     stats.rohc_compressed_bytes += rohc_len;
@@ -373,6 +392,13 @@ int main(int argc, char** argv)
                 }
                 else
                 {
+                    if(trace_first_three && type == rohccxx::tun::MessageType::Compressed)
+                    {
+                        rohccxx::tun::FrameView failed_frame{};
+                        if(rohccxx::tun::decode_frame(datagram.data(), static_cast<std::size_t>(count), failed_frame) == rohccxx::tun::Result::Ok)
+                            trace_hex("decompression_failure", stats.decompression_failures,
+                                      0xffU, failed_frame.payload, failed_frame.payload_len);
+                    }
                     ++stats.drops;
                     if(result == rohccxx::tun::Result::CodecFailure)
                     {

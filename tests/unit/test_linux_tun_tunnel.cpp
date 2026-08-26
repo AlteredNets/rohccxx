@@ -118,6 +118,35 @@ std::vector<std::uint8_t> kernel_style_packet(std::uint8_t protocol,
     return packet;
 }
 
+std::vector<std::uint8_t> stress_udp_packet(std::uint64_t sequence)
+{
+    constexpr std::size_t payload_size = 64U;
+    std::vector<std::uint8_t> packet(28U + payload_size);
+    packet[0] = 0x45U;
+    put16(packet.data() + 2U, static_cast<std::uint16_t>(packet.size()));
+    put16(packet.data() + 6U, 0x4000U);
+    packet[8] = 64U; packet[9] = 17U;
+    packet[12] = 10U; packet[15] = 1U;
+    packet[16] = 10U; packet[19] = 2U;
+    put16(packet.data() + 20U, 34000U);
+    put16(packet.data() + 22U, 33221U);
+    put16(packet.data() + 24U, 8U + payload_size);
+    const std::array<std::uint8_t, 4> magic{{'R', 'T', 'S', 'T'}};
+    std::memcpy(packet.data() + 28U, magic.data(), magic.size());
+    for(std::size_t pos = 0U; pos < 8U; ++pos)
+        packet[32U + pos] = static_cast<std::uint8_t>(sequence >> (56U - pos * 8U));
+    packet[40U] = 0U;
+    put16(packet.data() + 41U, payload_size);
+    for(std::size_t pos = 43U; pos < packet.size(); ++pos)
+        packet[pos] = static_cast<std::uint8_t>(sequence + pos - 43U);
+    std::uint32_t pseudo = 0x0a00U + 0x0001U + 0x0a00U + 0x0002U +
+                           17U + static_cast<std::uint16_t>(8U + payload_size);
+    put16(packet.data() + 26U,
+          internet_checksum(packet.data() + 20U, 8U + payload_size, pseudo));
+    put16(packet.data() + 10U, internet_checksum(packet.data(), 20U));
+    return packet;
+}
+
 struct CompDelete { void operator()(rohc_comp* value) const { rohc_comp_free(value); } };
 struct DecompDelete { void operator()(rohc_decomp* value) const { rohc_decomp_free(value); } };
 }
@@ -376,4 +405,52 @@ TEST_CASE("Linux TUN mapped compressors round-trip interleaved flows and LRU IR 
     put16(seventeenth.data() + 20U, 50000U);
     round_trip(std::move(seventeenth), true, 4U);
     REQUIRE(table.evictions() == 1U);
+}
+
+TEST_CASE("Linux TUN mapped codec round-trips first three fixed-size UDP packets")
+{
+    std::array<std::unique_ptr<rohc_comp, CompDelete>, 16> compressors{};
+    std::unique_ptr<rohc_decomp, DecompDelete> decomp(
+        rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    rohccxx::tun::FlowTable flows;
+    REQUIRE(decomp);
+
+    // The integration establishes an ICMP mapping before starting UDP stress.
+    auto icmp = kernel_style_packet(1U, 0U);
+    rohccxx::tun::FlowAssignment icmp_assignment{};
+    REQUIRE(flows.select(icmp.data(), icmp.size(), icmp_assignment) == rohccxx::tun::Result::Ok);
+    REQUIRE(icmp_assignment.cid == 0U);
+
+    for(std::uint64_t sequence = 0U; sequence < 3U; ++sequence)
+    {
+        auto packet = stress_udp_packet(sequence);
+        rohccxx::tun::FlowAssignment assignment{};
+        REQUIRE(flows.select(packet.data(), packet.size(), assignment) == rohccxx::tun::Result::Ok);
+        REQUIRE(assignment.cid == 1U);
+        if(assignment.newly_assigned)
+        {
+            compressors[assignment.cid].reset(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+            REQUIRE(compressors[assignment.cid]);
+            REQUIRE(rohc_comp_set_cid(compressors[assignment.cid].get(), assignment.cid) == 0);
+        }
+        std::array<std::uint8_t, 256> compressed{}, reconstructed{};
+        std::size_t compressed_len = compressed.size();
+        const int compress_status = rohc_compress4(
+            compressors[assignment.cid].get(), packet.data(), packet.size(),
+            compressed.data(), &compressed_len);
+        INFO("sequence=" << sequence << " cid=" << unsigned(assignment.cid)
+             << " compress_status=" << compress_status
+             << " compressed_len=" << compressed_len);
+        REQUIRE(compress_status == 0);
+        std::size_t reconstructed_len = reconstructed.size();
+        const int decompress_status = rohc_decompress4(
+            decomp.get(), compressed.data(), compressed_len,
+            reconstructed.data(), &reconstructed_len);
+        INFO("decompress_status=" << decompress_status
+             << " reconstructed_len=" << reconstructed_len
+             << " feedback=" << rohc_decomp_has_feedback(decomp.get()));
+        REQUIRE(decompress_status == 0);
+        REQUIRE(reconstructed_len == packet.size());
+        REQUIRE(std::memcmp(reconstructed.data(), packet.data(), packet.size()) == 0);
+    }
 }

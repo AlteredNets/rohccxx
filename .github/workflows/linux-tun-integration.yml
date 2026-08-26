@@ -65,7 +65,8 @@ jobs:
         run: |
           set -o pipefail
           status=0
-          sudo timeout --signal=TERM --kill-after=10s 420s \
+          sudo env ROHCCXX_TUN_TRACE_FIRST_THREE=1 \
+            timeout --signal=TERM --kill-after=10s 420s \
             bash tests/integration/linux_tun_tunnel_netns.sh \
             "$PWD/build-linux-tun/examples/linux_tun_tunnel/rohccxx-tun-tunnel" || status=$?
           if [[ ${status} -eq 77 ]]; then
