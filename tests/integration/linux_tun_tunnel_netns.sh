@@ -295,9 +295,9 @@ fi
 echo "PASS: decompressor feedback sent and compressor feedback received"
 
 # Restart clean endpoints for the deterministic multi-flow campaign.
-ip netns exec "${ns_a}" "${tunnel}" --tun rohca --local 127.0.0.1:20000 --peer 127.0.0.1:20001 --max-packet 2000 --stats-interval 5 >"${tmp_dir}/a.log" 2>&1 &
+ip netns exec "${ns_a}" env ROHCCXX_TUN_TRACE_FIRST_THREE=1 "${tunnel}" --tun rohca --local 127.0.0.1:20000 --peer 127.0.0.1:20001 --max-packet 2000 --stats-interval 5 >"${tmp_dir}/a.log" 2>&1 &
 pid_a=$!
-ip netns exec "${ns_b}" "${tunnel}" --tun rohcb --local 127.0.0.1:20000 --peer 127.0.0.1:20001 --max-packet 2000 --stats-interval 5 >"${tmp_dir}/b.log" 2>&1 &
+ip netns exec "${ns_b}" env ROHCCXX_TUN_TRACE_FIRST_THREE=1 "${tunnel}" --tun rohcb --local 127.0.0.1:20000 --peer 127.0.0.1:20001 --max-packet 2000 --stats-interval 5 >"${tmp_dir}/b.log" 2>&1 &
 pid_b=$!
 for _ in $(seq 1 50); do
     ip -n "${ns_a}" link show rohca >/dev/null 2>&1 &&
