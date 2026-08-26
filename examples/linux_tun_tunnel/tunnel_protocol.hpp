@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
 
 namespace rohccxx::tun
 {
@@ -46,6 +47,45 @@ struct Codec
     int (*decompress)(void*, const std::uint8_t*, std::size_t,
                       std::uint8_t*, std::size_t*) = nullptr;
     void (*feedback)(void*, std::uint32_t, std::uint8_t) = nullptr;
+};
+
+struct FlowKey
+{
+    std::array<std::uint8_t, 20> bytes{};
+    std::uint8_t length = 0U;
+
+    bool operator==(const FlowKey& other) const;
+};
+
+struct FlowAssignment
+{
+    std::uint8_t cid = 0U;
+    bool newly_assigned = false;
+    bool evicted = false;
+};
+
+class FlowTable
+{
+public:
+    Result select(const std::uint8_t* packet, std::size_t packet_len,
+                  FlowAssignment& assignment);
+    std::size_t active_contexts() const;
+    std::uint64_t assignments() const { return assignments_; }
+    std::uint64_t evictions() const { return evictions_; }
+    std::uint64_t mapping_failures() const { return mapping_failures_; }
+
+private:
+    struct Entry
+    {
+        FlowKey key{};
+        std::uint64_t last_used = 0U;
+        bool used = false;
+    };
+    std::array<Entry, 16> entries_{};
+    std::uint64_t clock_ = 0U;
+    std::uint64_t assignments_ = 0U;
+    std::uint64_t evictions_ = 0U;
+    std::uint64_t mapping_failures_ = 0U;
 };
 
 Result encode_frame(MessageType type, const std::uint8_t* payload,

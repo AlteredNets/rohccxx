@@ -16,6 +16,141 @@ bool known_type(MessageType type)
 {
     return type == MessageType::Compressed || type == MessageType::Feedback;
 }
+
+void append16(FlowKey& key, std::uint16_t value)
+{
+    key.bytes[key.length++] = static_cast<std::uint8_t>(value >> 8U);
+    key.bytes[key.length++] = static_cast<std::uint8_t>(value);
+}
+
+void append32(FlowKey& key, const std::uint8_t* value)
+{
+    std::memcpy(key.bytes.data() + key.length, value, 4U);
+    key.length = static_cast<std::uint8_t>(key.length + 4U);
+}
+
+Result flow_key(const std::uint8_t* packet, std::size_t packet_len, FlowKey& key)
+{
+    key = {};
+    const Result valid = validate_ipv4_packet(packet, packet_len, packet_len);
+    if(valid != Result::Ok)
+        return valid;
+    const std::size_t ihl = static_cast<std::size_t>(packet[0] & 0x0fU) * 4U;
+    append32(key, packet + 12U);
+    append32(key, packet + 16U);
+    key.bytes[key.length++] = packet[9];
+    const std::uint16_t fragments = static_cast<std::uint16_t>(packet[6] << 8U) | packet[7];
+    if((fragments & 0x3fffU) != 0U)
+    {
+        key.bytes[key.length++] = 1U;
+        append16(key, static_cast<std::uint16_t>(packet[4] << 8U) | packet[5]);
+        return Result::Ok;
+    }
+    if(packet[9] == 17U)
+    {
+        if(packet_len < ihl + 8U)
+            return Result::Malformed;
+        const std::size_t udp_len = (static_cast<std::size_t>(packet[ihl + 4U]) << 8U) |
+                                    packet[ihl + 5U];
+        if(udp_len < 8U || udp_len != packet_len - ihl)
+            return Result::Malformed;
+        key.bytes[key.length++] = 2U;
+        append16(key, static_cast<std::uint16_t>(packet[ihl] << 8U) | packet[ihl + 1U]);
+        append16(key, static_cast<std::uint16_t>(packet[ihl + 2U] << 8U) | packet[ihl + 3U]);
+        const std::uint8_t* payload = packet + ihl + 8U;
+        const std::size_t payload_len = udp_len - 8U;
+        if(payload_len >= 12U && (payload[0] >> 6U) == 2U)
+        {
+            const std::size_t base = 12U + static_cast<std::size_t>(payload[0] & 0x0fU) * 4U;
+            bool valid_rtp = base <= payload_len;
+            std::size_t header = base;
+            if(valid_rtp && (payload[0] & 0x10U) != 0U)
+            {
+                valid_rtp = header + 4U <= payload_len;
+                if(valid_rtp)
+                {
+                    const std::size_t words = (static_cast<std::size_t>(payload[header + 2U]) << 8U) |
+                                              payload[header + 3U];
+                    header += 4U + words * 4U;
+                    valid_rtp = header <= payload_len;
+                }
+            }
+            if(valid_rtp && (payload[0] & 0x20U) != 0U)
+                valid_rtp = payload_len > header && payload[payload_len - 1U] != 0U &&
+                            payload[payload_len - 1U] <= payload_len - header;
+            if(valid_rtp)
+            {
+                key.bytes[9] = 3U;
+                append32(key, payload + 8U);
+            }
+        }
+        return Result::Ok;
+    }
+    if(packet[9] == 50U)
+    {
+        if(packet_len < ihl + 8U)
+            return Result::Malformed;
+        key.bytes[key.length++] = 4U;
+        append32(key, packet + ihl);
+        return Result::Ok;
+    }
+    key.bytes[key.length++] = 0U;
+    return Result::Ok;
+}
+}
+
+bool FlowKey::operator==(const FlowKey& other) const
+{
+    return length == other.length &&
+           std::memcmp(bytes.data(), other.bytes.data(), length) == 0;
+}
+
+Result FlowTable::select(const std::uint8_t* packet, std::size_t packet_len,
+                         FlowAssignment& assignment)
+{
+    assignment = {};
+    FlowKey key{};
+    const Result parsed = flow_key(packet, packet_len, key);
+    if(parsed != Result::Ok)
+    {
+        ++mapping_failures_;
+        return parsed;
+    }
+    ++clock_;
+    for(std::size_t cid = 0U; cid < entries_.size(); ++cid)
+    {
+        if(entries_[cid].used && entries_[cid].key == key)
+        {
+            entries_[cid].last_used = clock_;
+            assignment.cid = static_cast<std::uint8_t>(cid);
+            return Result::Ok;
+        }
+    }
+    std::size_t selected = entries_.size();
+    for(std::size_t cid = 0U; cid < entries_.size(); ++cid)
+        if(!entries_[cid].used) { selected = cid; break; }
+    if(selected == entries_.size())
+    {
+        selected = 0U;
+        for(std::size_t cid = 1U; cid < entries_.size(); ++cid)
+            if(entries_[cid].last_used < entries_[selected].last_used)
+                selected = cid;
+        assignment.evicted = true;
+        ++evictions_;
+    }
+    entries_[selected] = Entry{key, clock_, true};
+    assignment.cid = static_cast<std::uint8_t>(selected);
+    assignment.newly_assigned = true;
+    ++assignments_;
+    return Result::Ok;
+}
+
+std::size_t FlowTable::active_contexts() const
+{
+    std::size_t count = 0U;
+    for(const Entry& entry : entries_)
+        if(entry.used) ++count;
+    return count;
 }
 
 Result encode_frame(MessageType type, const std::uint8_t* payload,

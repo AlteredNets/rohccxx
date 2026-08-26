@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -55,6 +56,8 @@ struct Statistics
     std::uint64_t drops = 0, malformed = 0;
     std::uint64_t compression_failures = 0, decompression_failures = 0;
     std::uint64_t feedback_sent = 0, feedback_received = 0;
+    std::uint64_t flow_assignments = 0, active_contexts = 0, evictions = 0;
+    std::uint64_t context_resets = 0, mapping_failures = 0;
 };
 
 void usage(const char* program)
@@ -153,7 +156,13 @@ int open_tun(const std::string& requested, std::string& actual)
     return fd;
 }
 
-struct CodecContext { rohc_comp* comp; rohc_decomp* decomp; };
+struct CodecContext
+{
+    std::array<CompPtr, 16>* compressors;
+    rohc_comp* selected_comp;
+    rohc_decomp* decomp;
+    Statistics* stats;
+};
 
 int decompress_adapter(void* context, const std::uint8_t* in, std::size_t in_len,
                        std::uint8_t* out, std::size_t* out_len)
@@ -165,13 +174,17 @@ int decompress_adapter(void* context, const std::uint8_t* in, std::size_t in_len
 int compress_combined_adapter(void* context, const std::uint8_t* in, std::size_t in_len,
                               std::uint8_t* out, std::size_t* out_len)
 {
-    return rohc_compress4(static_cast<CodecContext*>(context)->comp,
+    return rohc_compress4(static_cast<CodecContext*>(context)->selected_comp,
                           in, in_len, out, out_len);
 }
 
 void feedback_adapter(void* context, std::uint32_t cid, std::uint8_t type)
 {
-    rohc_comp_handle_feedback(static_cast<CodecContext*>(context)->comp, cid, type);
+    auto& state = *static_cast<CodecContext*>(context);
+    if(cid >= state.compressors->size() || !(*state.compressors)[cid])
+        ++state.stats->mapping_failures;
+    else
+        rohc_comp_handle_feedback((*state.compressors)[cid].get(), cid, type);
 }
 
 bool write_all_packet(int fd, const std::uint8_t* data, std::size_t length)
@@ -200,7 +213,8 @@ void print_statistics(const Statistics& s)
         "stats tx_packets=%llu rx_packets=%llu inner_bytes=%llu rohc_bytes=%llu "
         "complete_udp_tunnel_bytes=%llu compression_reduction=%.2f%% drops=%llu "
         "malformed=%llu compression_failures=%llu decompression_failures=%llu "
-        "feedback_sent=%llu feedback_received=%llu\n",
+        "feedback_sent=%llu feedback_received=%llu flow_assignments=%llu "
+        "active_contexts=%llu evictions=%llu resets=%llu mapping_failures=%llu\n",
         static_cast<unsigned long long>(s.tx_packets),
         static_cast<unsigned long long>(s.rx_packets),
         static_cast<unsigned long long>(s.original_inner_bytes),
@@ -211,7 +225,12 @@ void print_statistics(const Statistics& s)
         static_cast<unsigned long long>(s.compression_failures),
         static_cast<unsigned long long>(s.decompression_failures),
         static_cast<unsigned long long>(s.feedback_sent),
-        static_cast<unsigned long long>(s.feedback_received));
+        static_cast<unsigned long long>(s.feedback_received),
+        static_cast<unsigned long long>(s.flow_assignments),
+        static_cast<unsigned long long>(s.active_contexts),
+        static_cast<unsigned long long>(s.evictions),
+        static_cast<unsigned long long>(s.context_resets),
+        static_cast<unsigned long long>(s.mapping_failures));
 }
 }
 
@@ -240,14 +259,16 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    CompPtr comp(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
     DecompPtr decomp(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
-    if(!comp || !decomp || rohc_comp_set_cid(comp.get(), 0U) != 0)
+    if(!decomp)
     {
         std::fprintf(stderr, "failed to initialize ROHCCXX contexts\n");
         close(udp_fd); close(tun_fd); return 1;
     }
-    CodecContext codec_context{comp.get(), decomp.get()};
+    std::array<CompPtr, 16> compressors{};
+    rohccxx::tun::FlowTable flows;
+    Statistics stats{};
+    CodecContext codec_context{&compressors, nullptr, decomp.get(), &stats};
     const rohccxx::tun::Codec codec{&codec_context, compress_combined_adapter,
                                     decompress_adapter, feedback_adapter};
     const std::size_t datagram_capacity = 65507U;
@@ -261,7 +282,6 @@ int main(int argc, char** argv)
     sigemptyset(&action.sa_mask);
     sigaction(SIGINT, &action, nullptr);
     sigaction(SIGTERM, &action, nullptr);
-    Statistics stats{};
     auto next_stats = std::chrono::steady_clock::now() +
         std::chrono::seconds(config.statistics_interval);
     std::fprintf(stderr, "ready tun=%s (no encryption)\n", actual_tun.c_str());
@@ -282,6 +302,28 @@ int main(int argc, char** argv)
             if(count <= 0) { ++stats.drops; }
             else
             {
+                rohccxx::tun::FlowAssignment assignment{};
+                const auto mapping = flows.select(inner.data(), static_cast<std::size_t>(count), assignment);
+                if(mapping != rohccxx::tun::Result::Ok)
+                {
+                    ++stats.drops; ++stats.mapping_failures;
+                    continue;
+                }
+                stats.flow_assignments = flows.assignments();
+                stats.active_contexts = flows.active_contexts();
+                stats.evictions = flows.evictions();
+                if(assignment.newly_assigned)
+                {
+                    CompPtr replacement(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+                    if(!replacement || rohc_comp_set_cid(replacement.get(), assignment.cid) != 0)
+                    {
+                        ++stats.drops; ++stats.mapping_failures;
+                        continue;
+                    }
+                    compressors[assignment.cid] = std::move(replacement);
+                    if(assignment.evicted) ++stats.context_resets;
+                }
+                codec_context.selected_comp = compressors[assignment.cid].get();
                 std::size_t rohc_len = 0U, frame_len = 0U;
                 const auto result = rohccxx::tun::prepare_compressed_datagram(
                     codec, inner.data(), static_cast<std::size_t>(count),
