@@ -236,18 +236,6 @@ echo "PASS: corrupted compressed datagram rejected"
 ip netns exec "${ns_a}" ping -c 2 -W 2 10.44.0.2 >/dev/null
 echo "PASS: recovery after corrupted compressed datagram"
 
-kill -TERM "${pid_a}" "${pid_b}"
-wait "${pid_a}"
-wait "${pid_b}"
-pid_a=""
-pid_b=""
-if ! grep -Eq 'feedback_received=[1-9][0-9]*' "${tmp_dir}/a.log" ||
-   ! grep -Eq 'feedback_sent=[1-9][0-9]*' "${tmp_dir}/b.log"; then
-    echo "feedback was not sent and received after corruption" >&2
-    exit 1
-fi
-echo "PASS: decompressor feedback sent and compressor feedback received"
-
 touch "${tmp_dir}/drop-a"
 if ip netns exec "${ns_a}" ping -c 1 -W 1 10.44.0.2 >/dev/null 2>&1; then
     echo "controlled packet loss unexpectedly delivered" >&2
@@ -284,6 +272,18 @@ touch "${tmp_dir}/reorder-a"
 ip netns exec "${ns_a}" ping -c 3 -W 2 10.44.0.2 >/dev/null
 grep -q 'action=reorder-release' "${tmp_dir}/relay-a.log"
 echo "PASS: controlled reordering without corruption"
+
+kill -TERM "${pid_a}" "${pid_b}"
+wait "${pid_a}"
+wait "${pid_b}"
+pid_a=""
+pid_b=""
+if ! grep -Eq 'feedback_received=[1-9][0-9]*' "${tmp_dir}/a.log" ||
+   ! grep -Eq 'feedback_sent=[1-9][0-9]*' "${tmp_dir}/b.log"; then
+    echo "feedback was not sent and received after corruption" >&2
+    exit 1
+fi
+echo "PASS: decompressor feedback sent and compressor feedback received"
 
 # Restart clean endpoints for the deterministic multi-flow campaign.
 ip netns exec "${ns_a}" "${tunnel}" --tun rohca --local 127.0.0.1:20000 --peer 127.0.0.1:20001 --max-packet 2000 --stats-interval 5 >"${tmp_dir}/a.log" 2>&1 &
