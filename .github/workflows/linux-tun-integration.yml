@@ -1,0 +1,115 @@
+name: Linux TUN Integration
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - CMakeLists.txt
+      - examples/linux_tun_tunnel/**
+      - tests/CMakeLists.txt
+      - tests/unit/test_linux_tun_tunnel.cpp
+      - tests/integration/linux_tun_tunnel_netns.sh
+      - tests/integration/linux_tun_tunnel_stress.py
+      - .github/workflows/linux-tun-integration.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-tun-integration:
+    name: Linux TUN build, tests, and namespaces
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source and submodules
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install required dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential \
+            cmake \
+            autoconf \
+            automake \
+            libtool \
+            pkg-config \
+            iproute2 \
+            iputils-ping \
+            python3
+
+      - name: Configure Release build
+        run: |
+          cmake -S . -B build-linux-tun \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DROHCCXX_BUILD_TESTS=ON
+
+      - name: Compile tunnel and tests with warnings
+        run: cmake --build build-linux-tun --parallel
+
+      - name: Run focused tunnel tests
+        run: build-linux-tun/tests/linux_tun_tunnel_tests
+
+      - name: Run ordinary Release CTest
+        run: ctest --test-dir build-linux-tun --output-on-failure
+
+      - name: Run privileged namespace integration
+        run: |
+          set -o pipefail
+          status=0
+          sudo timeout --signal=TERM --kill-after=10s 420s \
+            bash tests/integration/linux_tun_tunnel_netns.sh \
+            "$PWD/build-linux-tun/examples/linux_tun_tunnel/rohccxx-tun-tunnel" || status=$?
+          if [[ ${status} -eq 77 ]]; then
+            echo "Namespace integration skipped; CI requires a real pass" >&2
+            exit 1
+          fi
+          exit "${status}"
+
+      - name: Configure sanitizer stress build
+        run: |
+          cmake -S . -B build-linux-tun-sanitize \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DROHCCXX_BUILD_TESTS=ON \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+
+      - name: Run reduced sanitizer tunnel stress
+        run: |
+          cmake --build build-linux-tun-sanitize --target rohccxx-tun-tunnel linux_tun_tunnel_tests --parallel
+          ASAN_OPTIONS=detect_leaks=1 build-linux-tun-sanitize/tests/linux_tun_tunnel_tests
+          sudo env ASAN_OPTIONS=detect_leaks=1 ROHCCXX_STRESS_PACKETS=10000 ROHCCXX_STRESS_SECONDS=10 \
+            timeout --signal=TERM --kill-after=10s 150s \
+            bash tests/integration/linux_tun_tunnel_netns.sh \
+            "$PWD/build-linux-tun-sanitize/examples/linux_tun_tunnel/rohccxx-tun-tunnel"
+
+      - name: Clean up namespace integration resources
+        if: always()
+        run: |
+          sudo pkill -TERM -f 'rohccxx-tun-tunnel' 2>/dev/null || true
+          sudo pkill -TERM -f '/relay.py' 2>/dev/null || true
+          while read -r namespace _; do
+            case "${namespace}" in
+              rohccxx-a-*|rohccxx-b-*) sudo ip netns del "${namespace}" || true ;;
+            esac
+          done < <(sudo ip netns list)
+          while read -r interface _; do
+            interface=${interface%%@*}
+            case "${interface}" in
+              vetha*|vethb*) sudo ip link del "${interface}" || true ;;
+            esac
+          done < <(sudo ip -o link show)
+          if sudo ip netns list | grep -Eq '^rohccxx-(a|b)-'; then
+            echo "namespace cleanup failed" >&2
+            exit 1
+          fi
+          echo "PASS: CI cleanup complete"

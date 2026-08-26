@@ -24,11 +24,19 @@ add_executable(unit_tests
 target_link_libraries(unit_tests
     Catch2::Catch2WithMain
     rohccxx
+    rohccxx_tunnel_support
 )
 
 include(Catch)
 catch_discover_tests(unit_tests
     DISCOVERY_MODE PRE_TEST
+)
+
+add_executable(linux_tun_tunnel_tests unit/test_linux_tun_tunnel.cpp)
+target_link_libraries(linux_tun_tunnel_tests
+    Catch2::Catch2WithMain
+    rohccxx
+    rohccxx_tunnel_support
 )
 
 # -----------------------------
@@ -46,6 +54,7 @@ add_test(NAME version_resolution_and_source_package_metadata
         -DROHCCXX_TEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/version-resolution
         -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_version_resolution.cmake
 )
+
 set_tests_properties(version_resolution_and_source_package_metadata PROPERTIES
     LABELS "version;packaging"
     TIMEOUT 120

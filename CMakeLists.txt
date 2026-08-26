@@ -83,6 +83,10 @@ if((ROHCCXX_SANITIZERS OR ROHCCXX_THREAD_SANITIZER) AND NOT MSVC)
     endif()
 endif()
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR ROHCCXX_BUILD_TESTS)
+    add_subdirectory(examples/linux_tun_tunnel)
+endif()
+
 configure_file(
     ${PROJECT_SOURCE_DIR}/cmake/rohccxx_version.h.in
     ${PROJECT_BINARY_DIR}/generated/include/rohccxx/version.h
