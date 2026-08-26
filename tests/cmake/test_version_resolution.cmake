@@ -83,7 +83,7 @@ file(REMOVE_RECURSE "${ROHCCXX_TEST_ROOT}")
 file(MAKE_DIRECTORY "${ROHCCXX_TEST_ROOT}")
 
 # The current checkout must resolve through its checked-in release metadata.
-configure_and_verify(checkout "${ROHCCXX_SOURCE_DIR}" "0.5.0")
+configure_and_verify(checkout "${ROHCCXX_SOURCE_DIR}" "0.6.0")
 
 # Build the subset present in a source package without copying repository metadata.
 set(source_copy "${ROHCCXX_TEST_ROOT}/source-copy")
@@ -102,7 +102,7 @@ file(COPY
 if(EXISTS "${source_copy}/.git")
     message(FATAL_ERROR "Source-package fixture unexpectedly contains .git")
 endif()
-configure_and_verify(source_package "${source_copy}" "0.5.0")
+configure_and_verify(source_package "${source_copy}" "0.6.0")
 
 # An explicit value must retain highest precedence over checked-in metadata.
 configure_and_verify(explicit_override "${source_copy}" "9.8.7"
