@@ -52,15 +52,10 @@ jobs:
             -DROHCCXX_BUILD_TESTS=ON
 
       - name: Compile tunnel and tests with warnings
-        run: |
-          cmake --build build-linux-tun --parallel \
-            --target rohccxx-tun-tunnel unit_tests
+        run: cmake --build build-linux-tun --parallel
 
       - name: Run focused tunnel tests
-        run: |
-          ctest --test-dir build-linux-tun \
-            --output-on-failure \
-            -R '^Linux TUN'
+        run: build-linux-tun/tests/linux_tun_tunnel_tests
 
       - name: Run ordinary Release CTest
         run: ctest --test-dir build-linux-tun --output-on-failure

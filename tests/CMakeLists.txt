@@ -19,7 +19,6 @@ add_executable(unit_tests
     unit/test_sprint6_roundtrip.cpp
     unit/test_sprint7_crcs.cpp
     unit/test_sliding_windows.cpp
-    unit/test_linux_tun_tunnel.cpp
 )
 
 target_link_libraries(unit_tests
@@ -31,6 +30,13 @@ target_link_libraries(unit_tests
 include(Catch)
 catch_discover_tests(unit_tests
     DISCOVERY_MODE PRE_TEST
+)
+
+add_executable(linux_tun_tunnel_tests unit/test_linux_tun_tunnel.cpp)
+target_link_libraries(linux_tun_tunnel_tests
+    Catch2::Catch2WithMain
+    rohccxx
+    rohccxx_tunnel_support
 )
 
 # -----------------------------
@@ -49,15 +55,6 @@ add_test(NAME version_resolution_and_source_package_metadata
         -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_version_resolution.cmake
 )
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    add_test(NAME linux_tun_tunnel_network_namespaces
-        COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/integration/linux_tun_tunnel_netns.sh
-                $<TARGET_FILE:rohccxx-tun-tunnel>)
-    set_tests_properties(linux_tun_tunnel_network_namespaces PROPERTIES
-        LABELS "linux;integration;privileged"
-        SKIP_RETURN_CODE 77
-        TIMEOUT 60)
-endif()
 set_tests_properties(version_resolution_and_source_package_metadata PROPERTIES
     LABELS "version;packaging"
     TIMEOUT 120
