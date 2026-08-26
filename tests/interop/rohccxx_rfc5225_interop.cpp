@@ -218,17 +218,27 @@ int decode_co()
         {
             if(!establish_collision_context(index, *item.profile)) return false;
             auto malformed = item.rohc;
-            malformed[0] ^= 0x01U; // CRC-3 corruption
+            const std::size_t pt0_offset =
+                (malformed[0] & 0xf0U) == 0xe0U ? 1U : 0U;
+            malformed[pt0_offset] ^= 0x01U; // PT-0 CRC-3 corruption
             std::array<std::uint8_t, rfc5225_interop::max_rohc_size> bad_cid{};
-            bad_cid[0] = 0xe1U;
+            bad_cid[0] = 0xe2U;
             std::memcpy(bad_cid.data() + 1U, item.rohc.data(), item.rohc_length);
-            if(!reject(index, malformed.data(), item.rohc_length) ||
-               !reject(index, item.rohc.data(), item.rohc_length - 1U) ||
-               !reject_capacity(index, item) ||
-               !reject(index, bad_cid.data(), item.rohc_length + 1U) ||
-               rohc_decomp_has_feedback(decompressors[index]) != 1)
+            const bool rejects_bad_crc = reject(index, malformed.data(), item.rohc_length);
+            const bool rejects_truncated_header = reject(index, bad_cid.data(), 1U);
+            const bool rejects_small_output = reject_capacity(index, item);
+            const bool rejects_unknown_cid =
+                reject(index, bad_cid.data(), item.rohc_length + 1U);
+            const bool reports_feedback = rohc_decomp_has_feedback(decompressors[index]) == 1;
+            if(!rejects_bad_crc || !rejects_truncated_header || !rejects_small_output ||
+               !rejects_unknown_cid || !reports_feedback)
             {
-                std::fprintf(stderr, "rohccxx CO malformed check failed profile=%s step=%d\n", item.profile->name, item.step);
+                std::fprintf(stderr,
+                             "rohccxx CO malformed check failed profile=%s step=%d "
+                             "crc=%d truncated=%d capacity=%d cid=%d feedback=%d\n",
+                             item.profile->name, item.step, rejects_bad_crc,
+                             rejects_truncated_header, rejects_small_output,
+                             rejects_unknown_cid, reports_feedback);
                 return false;
             }
             rohc_decomp* fresh = rohc_decomp_new2(15, ROHCCXX_DIRECTION_UPLINK);
