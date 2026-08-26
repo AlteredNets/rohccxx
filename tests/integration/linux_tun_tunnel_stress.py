@@ -44,30 +44,29 @@ def server(address, port):
 
 
 def client(address, port, minimum_packets, duration):
-    sockets = []
+    sockets = {}
     selector = selectors.DefaultSelector()
-    for flow in range(16):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(2.0)
-        sock.bind(("10.44.0.1", 34000 + flow))
-        sock.connect((address, port))
-        sockets.append(sock)
-        selector.register(sock, selectors.EVENT_READ, flow)
     sizes = (64, 256, 1200)
+    flow_counts = (1, 4, 16)
+    for scenario in range(9):
+        for flow in range(flow_counts[scenario // 3]):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.settimeout(2.0)
+            sock.bind(("10.44.0.1", 34000 + scenario * 16 + flow))
+            sock.connect((address, port))
+            sockets[(scenario, flow)] = sock
+            selector.register(sock, selectors.EVENT_READ, (scenario, flow))
     start = time.monotonic()
     sequence = packets = byte_count = 0
     digest = hashlib.sha256()
     while packets < minimum_packets or time.monotonic() - start < duration:
-        if sequence < minimum_packets // 3:
-            flow_count = 1
-        elif sequence < (minimum_packets * 2) // 3:
-            flow_count = 4
-        else:
-            flow_count = 16
+        scenario_span = max(1, minimum_packets // 9)
+        scenario = min(8, sequence // scenario_span)
+        flow_count = flow_counts[scenario // 3]
         flow = sequence % flow_count
-        size = sizes[(sequence // 16) % len(sizes)]
+        size = sizes[scenario % 3]
         expected = body(sequence, size, flow)
-        sock = sockets[flow]
+        sock = sockets[(scenario, flow)]
         if sock.send(expected) != len(expected):
             raise RuntimeError("short stress request")
         ready = selector.select(2.0)
@@ -80,7 +79,7 @@ def client(address, port, minimum_packets, duration):
         packets += 1
         byte_count += len(reply)
         sequence += 1
-    sockets[0].send(STOP)
+    sockets[(0, 0)].send(STOP)
     elapsed = time.monotonic() - start
     print(f"STRESS_CLIENT packets={packets} flows=1,4,16 sizes=64,256,1200 "
           f"bytes={byte_count} seconds={elapsed:.3f} sha256={digest.hexdigest()}", flush=True)
