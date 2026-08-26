@@ -2303,6 +2303,17 @@ rohc_compress4(struct rohc_comp* comp,
     const Context context_before_compress = *ctx;
     ctx->cid = cid;
     ctx->large_cid = comp->impl.large_cid_space;
+    if(ctx->tx_count > 0U && ctx->profile != profile && profile != Profile::Uncompressed)
+    {
+        // A CID's static and dynamic state belongs to its established profile.
+        // Automatic reclassification must establish the new profile before any
+        // compact packet can safely omit profile-specific fields.
+        ctx->tx_count = 0U;
+        ctx->rohc_state = RohcState::NoContext;
+        ctx->static_acked = false;
+        ctx->dynamic_acked = false;
+        ctx->nack_count = 0U;
+    }
 
     auto append_payload_range = [&](size_t header_len,
                                     size_t payload_offset,
