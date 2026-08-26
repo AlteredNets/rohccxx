@@ -171,9 +171,8 @@ void require_collision_regression_round_trips(bool zero_payload)
 
         if(!zero_payload && (i == 41095U || i == 49016U))
         {
-            REQUIRE(compressed_len == 1206);
-            REQUIRE(compressed[0] == 0xE0);
-            REQUIRE(compressed[1] == 0x00);
+            REQUIRE(compressed_len == 1201);
+            REQUIRE((compressed[0] & 0x80U) == 0U);
         }
 
         std::size_t output_len = output.size();

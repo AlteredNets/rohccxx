@@ -125,9 +125,14 @@ inline bool live_pt0_context_supported(const Context& ctx,
                                        std::uint32_t cid_value,
                                        bool has_add_cid)
 {
-    return ctx.rohc_state == RohcState::DynamicEstablished &&
-           ctx.ip_version == 4 && ctx.ipv4_id_behavior == 0U &&
-           !large_cid_space && !ctx.large_cid && cid_value == 0U && !has_add_cid &&
+    if(ctx.rohc_state != RohcState::DynamicEstablished || ctx.ip_version != 4 ||
+       large_cid_space || ctx.large_cid)
+        return false;
+    if(ctx.profile == Profile::RTP)
+        return cid_value <= 0x0fU && has_add_cid == (cid_value != 0U) &&
+               (ctx.ipv4_id_behavior == 0U || ctx.ipv4_id_behavior == 2U ||
+                ctx.ipv4_id_behavior == 3U);
+    return ctx.ipv4_id_behavior == 0U && cid_value == 0U && !has_add_cid &&
            (ctx.profile == Profile::UDP || ctx.profile == Profile::ESP ||
             ctx.profile == Profile::IP);
 }

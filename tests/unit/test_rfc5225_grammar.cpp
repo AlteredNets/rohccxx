@@ -34,6 +34,19 @@
 namespace
 {
 
+std::uint8_t reference_crc3(const std::uint8_t* data, std::size_t len)
+{
+    std::uint8_t crc = 0x07U;
+    for(std::size_t pos = 0; pos < len; ++pos)
+    {
+        crc ^= data[pos];
+        for(std::uint8_t bit = 0; bit < 8U; ++bit)
+            crc = static_cast<std::uint8_t>((crc & 0x01U) ?
+                ((crc >> 1U) ^ 0x06U) : (crc >> 1U));
+    }
+    return static_cast<std::uint8_t>(crc & 0x07U);
+}
+
 rohccxx::Context grammar_context(rohccxx::Profile profile, std::uint8_t protocol)
 {
     rohccxx::Context ctx{};
@@ -906,6 +919,37 @@ void require_feedback_state_transition(const FeedbackStateCase& initial,
 }
 
 } // namespace
+
+TEST_CASE("PT-0 CRC-3 table is exactly equivalent to the bitwise reference")
+{
+    REQUIRE(rohccxx::utils::crc3(nullptr, 0U) == reference_crc3(nullptr, 0U));
+
+    std::array<std::uint8_t, 2> input{};
+    for(unsigned first = 0U; first <= 0xffU; ++first)
+    {
+        input[0] = static_cast<std::uint8_t>(first);
+        REQUIRE(rohccxx::utils::crc3(input.data(), 1U) ==
+                reference_crc3(input.data(), 1U));
+        for(unsigned second = 0U; second <= 0xffU; ++second)
+        {
+            input[1] = static_cast<std::uint8_t>(second);
+            REQUIRE(rohccxx::utils::crc3(input.data(), input.size()) ==
+                    reference_crc3(input.data(), input.size()));
+        }
+    }
+
+    std::array<std::uint8_t, 40> rtp_header{};
+    for(std::size_t pos = 0; pos < rtp_header.size(); ++pos)
+        rtp_header[pos] = static_cast<std::uint8_t>(pos * 37U + 11U);
+    REQUIRE(rohccxx::utils::crc3(rtp_header.data(), rtp_header.size()) ==
+            reference_crc3(rtp_header.data(), rtp_header.size()));
+
+    std::array<std::uint8_t, 257> longer{};
+    for(std::size_t pos = 0; pos < longer.size(); ++pos)
+        longer[pos] = static_cast<std::uint8_t>((pos * 131U) ^ (pos >> 1U));
+    REQUIRE(rohccxx::utils::crc3(longer.data(), longer.size()) ==
+            reference_crc3(longer.data(), longer.size()));
+}
 
 TEST_CASE("RFC 5225 shared chain helper emits canonical IPv4 and UDP chains")
 {
@@ -1850,7 +1894,17 @@ TEST_CASE("RFC 5225 formal pt-0 CO variants encode decode across profiles and CI
     live.large_cid = true;
     REQUIRE_FALSE(rohccxx::rfc5225::live_pt0_context_supported(live, false, 0, false));
     live.large_cid = false;
-    for(const auto profile : {rohccxx::Profile::RTP, rohccxx::Profile::RTP_UDP_Lite,
+    live.profile = rohccxx::Profile::RTP;
+    REQUIRE(rohccxx::rfc5225::live_pt0_context_supported(live, false, 0, false));
+    REQUIRE(rohccxx::rfc5225::live_pt0_context_supported(live, false, 3, true));
+    live.ipv4_id_behavior = 2;
+    REQUIRE(rohccxx::rfc5225::live_pt0_context_supported(live, false, 0, false));
+    live.ipv4_id_behavior = 3;
+    REQUIRE(rohccxx::rfc5225::live_pt0_context_supported(live, false, 0, false));
+    live.ipv4_id_behavior = 1;
+    REQUIRE_FALSE(rohccxx::rfc5225::live_pt0_context_supported(live, false, 0, false));
+    live.ipv4_id_behavior = 0;
+    for(const auto profile : {rohccxx::Profile::RTP_UDP_Lite,
                               rohccxx::Profile::UDP_Lite, rohccxx::Profile::Uncompressed})
     {
         live.profile = profile;
