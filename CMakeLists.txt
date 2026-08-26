@@ -69,6 +69,10 @@ option(ROHCCXX_SANITIZERS "Build with AddressSanitizer and UndefinedBehaviorSani
 option(ROHCCXX_THREAD_SANITIZER "Build with ThreadSanitizer" OFF)
 option(ROHCCXX_ENABLE_VALGRIND_TESTS "Add Valgrind-backed CTest memory tests" OFF)
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR ROHCCXX_BUILD_TESTS)
+    add_subdirectory(examples/linux_tun_tunnel)
+endif()
+
 if(ROHCCXX_SANITIZERS AND ROHCCXX_THREAD_SANITIZER)
     message(FATAL_ERROR "ROHCCXX_SANITIZERS and ROHCCXX_THREAD_SANITIZER are mutually exclusive")
 endif()

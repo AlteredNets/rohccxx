@@ -93,6 +93,7 @@ file(COPY
     "${ROHCCXX_SOURCE_DIR}/VERSION"
     "${ROHCCXX_SOURCE_DIR}/LICENSE.md"
     "${ROHCCXX_SOURCE_DIR}/cmake"
+    "${ROHCCXX_SOURCE_DIR}/examples"
     "${ROHCCXX_SOURCE_DIR}/include"
     "${ROHCCXX_SOURCE_DIR}/packaging"
     "${ROHCCXX_SOURCE_DIR}/src"

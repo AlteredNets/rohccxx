@@ -1,0 +1,13 @@
+add_library(rohccxx_tunnel_support STATIC tunnel_protocol.cpp)
+target_include_directories(rohccxx_tunnel_support PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_features(rohccxx_tunnel_support PUBLIC cxx_std_17)
+if(NOT MSVC)
+    target_compile_options(rohccxx_tunnel_support PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(rohccxx-tun-tunnel linux_tun_tunnel.cpp)
+    target_link_libraries(rohccxx-tun-tunnel PRIVATE rohccxx_tunnel_support rohccxx)
+    target_compile_features(rohccxx-tun-tunnel PRIVATE cxx_std_17)
+    target_compile_options(rohccxx-tun-tunnel PRIVATE -Wall -Wextra -Wpedantic)
+endif()
