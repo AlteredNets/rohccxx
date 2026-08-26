@@ -80,6 +80,59 @@ static std::uint16_t ipv4_checksum(const std::uint8_t* hdr, int len)
     return static_cast<std::uint16_t>(~sum);
 }
 
+struct InternetChecksum
+{
+    std::uint32_t sum = 0U;
+    std::uint8_t high = 0U;
+    bool has_high = false;
+
+    void add(const std::uint8_t* data, size_t len)
+    {
+        if(has_high && len > 0U)
+        {
+            sum += static_cast<std::uint16_t>((high << 8U) | *data++);
+            --len;
+            has_high = false;
+        }
+        while(len >= 2U)
+        {
+            sum += static_cast<std::uint16_t>((data[0] << 8U) | data[1]);
+            data += 2U;
+            len -= 2U;
+        }
+        if(len != 0U)
+        {
+            high = *data;
+            has_high = true;
+        }
+    }
+
+    bool valid()
+    {
+        if(has_high)
+            sum += static_cast<std::uint16_t>(high << 8U);
+        while(sum >> 16U)
+            sum = (sum & 0xffffU) + (sum >> 16U);
+        return static_cast<std::uint16_t>(sum) == 0xffffU;
+    }
+};
+
+static bool udp_checksum_valid(const std::array<std::uint8_t, 28>& header,
+                               const std::uint8_t* prefix, size_t prefix_len,
+                               const std::uint8_t* payload, size_t payload_len)
+{
+    if(header[26] == 0U && header[27] == 0U)
+        return false;
+    const std::array<std::uint8_t, 4> pseudo_tail{{0U, 17U, header[24], header[25]}};
+    InternetChecksum checksum{};
+    checksum.add(header.data() + 12U, 8U);
+    checksum.add(pseudo_tail.data(), pseudo_tail.size());
+    checksum.add(header.data() + 20U, 8U);
+    checksum.add(prefix, prefix_len);
+    checksum.add(payload, payload_len);
+    return checksum.valid();
+}
+
 static bool capture_ipv4_options(rohccxx::Context& ctx,
                                  const uint8_t* packet,
                                  size_t ip_hlen)
@@ -840,7 +893,7 @@ static bool build_fixed_udp_ipv4_header(std::array<std::uint8_t, 28>& out,
 
 static bool private_udp_fo_is_formal_pt0_ambiguous(
     const rohccxx::Context& previous, const std::uint8_t* private_packet,
-    size_t private_packet_len, size_t payload_len)
+    size_t private_packet_len, const std::uint8_t* payload, size_t payload_len)
 {
     if(!private_packet || private_packet_len == 0U ||
        previous.profile != rohccxx::Profile::UDP ||
@@ -885,8 +938,22 @@ static bool private_udp_fo_is_formal_pt0_ambiguous(
     const size_t formal_payload_len =
         private_packet_len - formal_header_len + payload_len;
     std::array<std::uint8_t, 28> header{};
-    return build_fixed_udp_ipv4_header(header, formal_context, formal_payload_len) &&
-           rohccxx::utils::crc3(header.data(), header.size()) == formal.header_crc;
+    if(!build_fixed_udp_ipv4_header(header, formal_context, formal_payload_len) ||
+       rohccxx::utils::crc3(header.data(), header.size()) != formal.header_crc)
+        return false;
+    if(!formal_context.udp_checksum_used)
+        return true;
+    const bool formal_checksum_valid = udp_checksum_valid(
+        header, private_packet + formal_header_len,
+        private_packet_len - formal_header_len, payload, payload_len);
+    rohccxx::Context private_context = previous;
+    size_t private_header_len = 0U;
+    std::array<std::uint8_t, 28> private_header{};
+    const bool private_checksum_valid = rohccxx::decode_udp_fo(
+            private_packet, private_packet_len, private_context, &private_header_len) &&
+        build_fixed_udp_ipv4_header(private_header, private_context, payload_len) &&
+        udp_checksum_valid(private_header, nullptr, 0U, payload, payload_len);
+    return formal_checksum_valid || !private_checksum_valid;
 }
 
 static bool build_fixed_esp_ipv4_header(std::array<std::uint8_t, 28>& out,
@@ -2618,7 +2685,8 @@ rohc_compress4(struct rohc_comp* comp,
             if(!emit_udp_fo(rohc_packet, rohc_packet_len, *ctx))
                 return false;
             if(private_udp_fo_is_formal_pt0_ambiguous(
-                   previous, rohc_packet, *rohc_packet_len, payload_len))
+                   previous, rohc_packet, *rohc_packet_len,
+                   ip_packet + ip_view.header_len + sizeof(*udp), payload_len))
             {
                 *rohc_packet_len = out_capacity;
                 if(!emit_ir_dyn_udp(rohc_packet, rohc_packet_len, *ctx))
@@ -3487,6 +3555,43 @@ rohc_decompress4(struct rohc_decomp* decomp,
             break;
         }
 
+        if(formal_valid && private_valid && formal_context.udp_checksum_used)
+        {
+            std::array<std::uint8_t, 28> private_header{};
+            const std::uint8_t* private_payload = nullptr;
+            size_t private_payload_len = 0U;
+            const bool private_checksum_valid =
+                detail::payload_after_header(packet, packet_len, private_header_len,
+                                             private_payload, private_payload_len) &&
+                build_fixed_udp_ipv4_header(private_header, private_context,
+                                            private_payload_len) &&
+                udp_checksum_valid(private_header, nullptr, 0U,
+                                   private_payload, private_payload_len);
+            const bool formal_checksum_valid = udp_checksum_valid(
+                formal_header, nullptr, 0U, formal_payload, formal_payload_len);
+            if(private_checksum_valid != formal_checksum_valid)
+            {
+                private_valid = private_checksum_valid;
+                formal_valid = formal_checksum_valid;
+                if(private_valid)
+                {
+                    if(private_payload_len > std::numeric_limits<size_t>::max() -
+                                             private_header.size() ||
+                       *ip_packet_len < private_header.size() + private_payload_len)
+                        return finish_decoding(fail_with_feedback(cid));
+                    private_context.msn = static_cast<std::uint16_t>(
+                        context_before_decode.msn + 1U);
+                    *ctx = private_context;
+                    decomp->impl.mode = private_context.mode;
+                    std::memcpy(ip_packet, private_header.data(), private_header.size());
+                    if(private_payload_len > 0U)
+                        std::memcpy(ip_packet + private_header.size(), private_payload,
+                                    private_payload_len);
+                    reconstruction_len = private_header.size() + private_payload_len;
+                    return finish_decoding(0);
+                }
+            }
+        }
         if(formal_valid && private_valid)
             return finish_decoding(fail_with_feedback(cid));
         if(formal_valid)

@@ -540,7 +540,8 @@ TEST_CASE("Linux TUN UDP private FO avoids PT-0 ambiguity after CID reuse and lo
 
     // This is the second generation for CID 15. Its first IR replaces the
     // evicted flow, then packet 37 is lost. Private FO subsequently refreshes
-    // the peer IPv4 ID while its MSN remains one behind the local MSN.
+    // the peer IPv4 ID while its MSN remains one behind the local MSN. The UDP
+    // checksum distinguishes that private packet from an accidental PT-0.
     for(std::size_t index = 0U; index <= 39U; ++index)
     {
         auto packet = stress_udp_packet(241112U + index,
@@ -553,13 +554,13 @@ TEST_CASE("Linux TUN UDP private FO avoids PT-0 ambiguity after CID reuse and lo
         if(index == 37U)
         {
             REQUIRE(compressed[0] == 0xefU);
-            REQUIRE((compressed[1] & 0xfeU) == 0xfcU);
+            REQUIRE(compressed[1] == 0x7aU);
             continue;
         }
         if(index == 38U)
         {
             REQUIRE(compressed[0] == 0xefU);
-            REQUIRE((compressed[1] & 0xfeU) == 0xfcU);
+            REQUIRE(compressed[1] == 0x7aU);
         }
         std::size_t reconstructed_len = reconstructed.size();
         INFO("generation=2 cid=15 sequence=" << 241112U + index
