@@ -88,7 +88,7 @@ ip -n "${ns_b}" link set "vethb${suffix}" up
 
 cat > "${tmp_dir}/relay.py" <<'PY'
 import os, select, socket, sys
-local_port, local_target, underlay, peer, marker, log_path = sys.argv[1:]
+local_port, local_target, underlay, peer, marker, log_path, ready_path = sys.argv[1:]
 local = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 local.bind(("127.0.0.1", int(local_port)))
 transport = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -97,6 +97,7 @@ transport.bind((host, int(port)))
 host, port = peer.rsplit(":", 1)
 transport.connect((host, int(port)))
 log = open(log_path, "w", buffering=1)
+open(ready_path, "w").close()
 held = None
 while True:
     readable, _, _ = select.select([local, transport], [], [])
@@ -153,10 +154,18 @@ while True:
             local.sendto(data, ("127.0.0.1", int(local_target)))
 PY
 
-ip netns exec "${ns_a}" python3 "${tmp_dir}/relay.py" 20001 20000 192.0.2.1:10000 192.0.2.2:10000 "${tmp_dir}/corrupt-a" "${tmp_dir}/relay-a.log" &
+ip netns exec "${ns_a}" python3 "${tmp_dir}/relay.py" 20001 20000 192.0.2.1:10000 192.0.2.2:10000 "${tmp_dir}/corrupt-a" "${tmp_dir}/relay-a.log" "${tmp_dir}/relay-a-ready" &
 relay_a=$!
-ip netns exec "${ns_b}" python3 "${tmp_dir}/relay.py" 20001 20000 192.0.2.2:10000 192.0.2.1:10000 "${tmp_dir}/corrupt-b" "${tmp_dir}/relay-b.log" &
+ip netns exec "${ns_b}" python3 "${tmp_dir}/relay.py" 20001 20000 192.0.2.2:10000 192.0.2.1:10000 "${tmp_dir}/corrupt-b" "${tmp_dir}/relay-b.log" "${tmp_dir}/relay-b-ready" &
 relay_b=$!
+for _ in $(seq 1 50); do
+    [[ -e ${tmp_dir}/relay-a-ready && -e ${tmp_dir}/relay-b-ready ]] && break
+    sleep 0.1
+done
+if [[ ! -e ${tmp_dir}/relay-a-ready || ! -e ${tmp_dir}/relay-b-ready ]]; then
+    echo "UDP relays did not become ready" >&2
+    exit 1
+fi
 
 ip netns exec "${ns_a}" "${tunnel}" --tun rohca --local 127.0.0.1:20000 --peer 127.0.0.1:20001 --max-packet 2000 --stats-interval 1 >"${tmp_dir}/a.log" 2>&1 &
 pid_a=$!
