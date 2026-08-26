@@ -772,6 +772,115 @@ TEST_CASE("unsafe UDP fields retain private FO and PT-0 failures are transaction
     }
 }
 
+TEST_CASE("ESP formal PT-0 uses RFC 5225 small-CID framing")
+{
+    for(const std::uint32_t cid : {0U, 1U, 15U})
+    {
+        CAPTURE(cid);
+        CompPtr comp(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+        DecompPtr decomp(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+        REQUIRE(comp);
+        REQUIRE(decomp);
+        for(std::uint32_t ordinal = 0; ordinal < 5U; ++ordinal)
+        {
+            const auto packet = make_packet(Pt0Profile::Esp, ordinal);
+            const auto rohc = compress_packet(comp.get(), cid, packet);
+            require_guarded_decode(decomp.get(), rohc, packet);
+            if(ordinal >= 2U)
+            {
+                REQUIRE(rohc.size() - 160U == (cid == 0U ? 1U : 2U));
+                if(cid != 0U)
+                    REQUIRE(rohc[0] == static_cast<std::uint8_t>(0xe0U | cid));
+            }
+        }
+    }
+}
+
+TEST_CASE("ESP formal PT-0 round-trips four interleaved small-CID flows")
+{
+    CompPtr comp(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    DecompPtr decomp(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(comp);
+    REQUIRE(decomp);
+    for(std::uint32_t ordinal = 0; ordinal < 128U; ++ordinal)
+    {
+        for(std::uint32_t flow = 0; flow < 4U; ++flow)
+        {
+            const auto packet = make_packet(Pt0Profile::Esp, ordinal, 0U, 0xffffU,
+                                            0U, flow);
+            const auto rohc = compress_packet(comp.get(), flow, packet);
+            require_guarded_decode(decomp.get(), rohc, packet);
+            if(ordinal >= 2U)
+                REQUIRE(rohc.size() - 160U == (flow == 0U ? 1U : 2U));
+        }
+    }
+}
+
+TEST_CASE("ESP PT-0 requires safely reconstructable fields and progression")
+{
+    for(const unsigned change : {0U, 1U, 2U, 3U})
+    {
+        CAPTURE(change);
+        CompPtr comp(rohc_comp_new2(0U, ROHCCXX_DIRECTION_UPLINK));
+        REQUIRE(comp);
+        for(std::uint32_t ordinal = 0; ordinal < 3U; ++ordinal)
+            (void) compress_packet(comp.get(), 0U,
+                                   make_packet(Pt0Profile::Esp, ordinal));
+        auto packet = make_packet(Pt0Profile::Esp, 3U);
+        if(change == 0U) put32(packet.data() + 20U, 0x55667788U); // SPI
+        if(change == 1U) put32(packet.data() + 24U, 35U); // sequence discontinuity
+        if(change == 2U) packet[8] = 63U; // dynamic IPv4 field
+        if(change == 3U) put16(packet.data() + 4U, 2U); // non-sequential ID
+        put16(packet.data() + 10U, 0U);
+        put16(packet.data() + 10U, ipv4_checksum(packet.data()));
+        const auto rohc = compress_packet(comp.get(), 0U, packet);
+        REQUIRE(rohc[0] == 0xfdU);
+    }
+
+    SECTION("ESP sequence wraps while the IPv4 ID remains sequential")
+    {
+        CompPtr comp(rohc_comp_new2(0U, ROHCCXX_DIRECTION_UPLINK));
+        DecompPtr decomp(rohc_decomp_new2(0U, ROHCCXX_DIRECTION_UPLINK));
+        REQUIRE(comp);
+        REQUIRE(decomp);
+        for(std::uint32_t ordinal = 0U; ordinal < 3U; ++ordinal)
+        {
+            auto packet = make_packet(Pt0Profile::Esp, ordinal, 0U,
+                                      static_cast<std::uint16_t>(100U + ordinal));
+            put32(packet.data() + 24U, 0xfffffffeU + ordinal);
+            const auto rohc = compress_packet(comp.get(), 0U, packet);
+            require_guarded_decode(decomp.get(), rohc, packet);
+            if(ordinal == 2U) REQUIRE(rohc.size() - 160U == 1U);
+        }
+    }
+}
+
+TEST_CASE("malformed ESP PT-0 fails transactionally and remains retryable")
+{
+    CompPtr comp(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    DecompPtr decomp(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(comp);
+    REQUIRE(decomp);
+    std::vector<std::uint8_t> valid;
+    std::vector<std::uint8_t> expected;
+    for(std::uint32_t ordinal = 0; ordinal < 3U; ++ordinal)
+    {
+        expected = make_packet(Pt0Profile::Esp, ordinal);
+        valid = compress_packet(comp.get(), 1U, expected);
+        if(ordinal < 2U) require_guarded_decode(decomp.get(), valid, expected);
+    }
+    REQUIRE(valid.size() - 160U == 2U);
+    auto corrupt = valid;
+    corrupt[1] ^= 0x01U;
+    require_failed_transaction(decomp.get(), corrupt, 510U, true, 1U);
+    require_guarded_decode(decomp.get(), valid, expected);
+
+    auto next = make_packet(Pt0Profile::Esp, 3U);
+    const auto next_valid = compress_packet(comp.get(), 1U, next);
+    require_failed_transaction(decomp.get(), {next_valid.front()}, 510U, true, 0U);
+    require_guarded_decode(decomp.get(), next_valid, next);
+}
+
 TEST_CASE("RTP formal PT-0 round-trips four interleaved small-CID flows")
 {
     CompPtr comp(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
