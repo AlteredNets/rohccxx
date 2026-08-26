@@ -458,7 +458,7 @@ TEST_CASE("Linux TUN mapped codec round-trips first three fixed-size UDP packets
     }
 }
 
-TEST_CASE("Linux TUN rejects no valid private UDP FO as ambiguous formal PT-0")
+TEST_CASE("Linux TUN fixed UDP sequence remains byte exact across formal overlap")
 {
     std::unique_ptr<rohc_comp, CompDelete> comp(
         rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
@@ -466,17 +466,22 @@ TEST_CASE("Linux TUN rejects no valid private UDP FO as ambiguous formal PT-0")
         rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
     REQUIRE(comp); REQUIRE(decomp);
     REQUIRE(rohc_comp_set_cid(comp.get(), 1U) == 0);
-    const std::array<std::uint16_t, 3> ids{{0x858eU, 0x858fU, 0x8590U}};
+    const std::array<std::uint16_t, 10> ids{{
+        0x9568U, 0x9569U, 0x956aU, 0x956bU, 0x956cU,
+        0x956dU, 0x956eU, 0x956fU, 0x9570U, 0x9571U}};
     for(std::size_t index = 0U; index < ids.size(); ++index)
     {
-        auto packet = stress_udp_packet(index + 2U, ids[index], true);
+        auto packet = stress_udp_packet(index, ids[index], true);
         std::array<std::uint8_t, 256> compressed{}, reconstructed{};
         std::size_t compressed_len = compressed.size();
         REQUIRE(rohc_compress4(comp.get(), packet.data(), packet.size(),
                                compressed.data(), &compressed_len) == 0);
-        REQUIRE(compressed_len == packet.size());
         REQUIRE(compressed[0] == 0xe1U);
-        REQUIRE(compressed[1] == 0xfdU);
+        if(index < 2U)
+        {
+            REQUIRE(compressed_len == packet.size());
+            REQUIRE(compressed[1] == 0xfdU);
+        }
         INFO("index=" << index << " checksum=" << std::hex
              << unsigned(packet[26]) << unsigned(packet[27])
              << " compressed_len=" << std::dec << compressed_len

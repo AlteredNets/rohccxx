@@ -3436,7 +3436,21 @@ rohc_decompress4(struct rohc_decomp* decomp,
                 formal_context.msn = next_msn;
                 formal_context.ipv4_id =
                     static_cast<std::uint16_t>(formal_context.ipv4_id + delta);
-                formal_valid = detail::payload_after_header(packet, packet_len, 1U,
+                size_t formal_header_len = 1U;
+                if(formal_context.udp_checksum_used)
+                {
+                    if(packet_len < formal_header_len + 2U)
+                        formal_valid = false;
+                    else
+                    {
+                        formal_context.udp_check = static_cast<std::uint16_t>(
+                            (static_cast<std::uint16_t>(packet[formal_header_len]) << 8U) |
+                            packet[formal_header_len + 1U]);
+                        formal_header_len += 2U;
+                    }
+                }
+                formal_valid = formal_valid && detail::payload_after_header(
+                                                             packet, packet_len, formal_header_len,
                                                              formal_payload,
                                                              formal_payload_len) &&
                     build_fixed_udp_ipv4_header(formal_header, formal_context,
