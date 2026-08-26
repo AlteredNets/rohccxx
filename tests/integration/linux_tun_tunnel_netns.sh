@@ -94,8 +94,16 @@ ip netns exec "${ns_a}" ping -c 2 -W 2 10.44.0.2 >/dev/null
 ip netns exec "${ns_b}" ping -c 2 -W 2 10.44.0.1 >/dev/null
 echo "PASS: bidirectional ping"
 
-ip netns exec "${ns_b}" python3 -c 'import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.bind(("10.44.0.2",32123)); data,peer=s.recvfrom(4096); s.sendto(data,peer)' &
+ip netns exec "${ns_b}" python3 -c 'import socket,sys; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.bind(("10.44.0.2",32123)); open(sys.argv[1],"w").close(); data,peer=s.recvfrom(4096); s.sendto(data,peer)' "${tmp_dir}/udp-ready" &
 udp_server=$!
+for _ in $(seq 1 50); do
+    [[ -e ${tmp_dir}/udp-ready ]] && break
+    sleep 0.1
+done
+if [[ ! -e ${tmp_dir}/udp-ready ]]; then
+    echo "UDP echo server did not become ready" >&2
+    exit 1
+fi
 ip netns exec "${ns_a}" python3 -c 'import socket; p=bytes(range(256))*4; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.settimeout(3); s.sendto(p,("10.44.0.2",32123)); assert s.recv(4096)==p'
 wait "${udp_server}"
 echo "PASS: byte-exact UDP payload delivery"
