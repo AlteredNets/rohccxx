@@ -2621,7 +2621,13 @@ rohc_compress4(struct rohc_comp* comp,
                    previous, rohc_packet, *rohc_packet_len, payload_len))
             {
                 *rohc_packet_len = out_capacity;
-                return emit_ir_dyn_udp(rohc_packet, rohc_packet_len, *ctx);
+                if(!emit_ir_dyn_udp(rohc_packet, rohc_packet_len, *ctx))
+                    return false;
+                // This refresh is part of context establishment. Keep the
+                // state static so the next packet repeats the establishment
+                // step instead of assuming that this datagram reached peer.
+                ctx->rohc_state = RohcState::StaticEstablished;
+                return true;
             }
             return ctx->large_cid || prepend_small_cid(
                 rohc_packet, rohc_packet_len, out_capacity, cid);

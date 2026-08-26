@@ -120,9 +120,11 @@ std::vector<std::uint8_t> kernel_style_packet(std::uint8_t protocol,
 
 std::vector<std::uint8_t> stress_udp_packet(std::uint64_t sequence,
                                             std::uint16_t ipv4_id = 0U,
-                                            bool reverse = false)
+                                            bool reverse = false,
+                                            std::size_t payload_size = 64U,
+                                            std::uint16_t source_port = 34000U,
+                                            std::uint8_t flow = 0U)
 {
-    constexpr std::size_t payload_size = 64U;
     std::vector<std::uint8_t> packet(28U + payload_size);
     packet[0] = 0x45U;
     put16(packet.data() + 2U, static_cast<std::uint16_t>(packet.size()));
@@ -131,17 +133,17 @@ std::vector<std::uint8_t> stress_udp_packet(std::uint64_t sequence,
     packet[8] = 64U; packet[9] = 17U;
     packet[12] = 10U; packet[15] = reverse ? 2U : 1U;
     packet[16] = 10U; packet[19] = reverse ? 1U : 2U;
-    put16(packet.data() + 20U, reverse ? 33221U : 34000U);
-    put16(packet.data() + 22U, reverse ? 34000U : 33221U);
+    put16(packet.data() + 20U, reverse ? 33221U : source_port);
+    put16(packet.data() + 22U, reverse ? source_port : 33221U);
     put16(packet.data() + 24U, 8U + payload_size);
     const std::array<std::uint8_t, 4> magic{{'R', 'T', 'S', 'T'}};
     std::memcpy(packet.data() + 28U, magic.data(), magic.size());
     for(std::size_t pos = 0U; pos < 8U; ++pos)
         packet[32U + pos] = static_cast<std::uint8_t>(sequence >> (56U - pos * 8U));
-    packet[40U] = 0U;
+    packet[40U] = flow;
     put16(packet.data() + 41U, payload_size);
     for(std::size_t pos = 43U; pos < packet.size(); ++pos)
-        packet[pos] = static_cast<std::uint8_t>(sequence + pos - 43U);
+        packet[pos] = static_cast<std::uint8_t>(sequence + flow * 17U + pos - 43U);
     std::uint32_t pseudo = 0x0a00U + 0x0001U + 0x0a00U + 0x0002U +
                            17U + static_cast<std::uint16_t>(8U + payload_size);
     put16(packet.data() + 26U,
@@ -506,5 +508,69 @@ TEST_CASE("Linux TUN fixed UDP sequence remains byte exact across formal overlap
                                  reconstructed.data(), &reconstructed_len) == 0);
         REQUIRE(reconstructed_len == packet.size());
         REQUIRE(std::memcmp(reconstructed.data(), packet.data(), packet.size()) == 0);
+    }
+}
+
+TEST_CASE("Linux TUN UDP private FO avoids PT-0 ambiguity after CID reuse and loss")
+{
+    std::unique_ptr<rohc_comp, CompDelete> comp(
+        rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    std::unique_ptr<rohc_decomp, DecompDelete> decomp(
+        rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(comp); REQUIRE(decomp);
+    REQUIRE(rohc_comp_set_cid(comp.get(), 15U) == 0);
+
+    for(std::size_t index = 0U; index < 3U; ++index)
+    {
+        auto old_flow = stress_udp_packet(index,
+            static_cast<std::uint16_t>(0x9000U + index), true, 1200U);
+        std::array<std::uint8_t, 1400> compressed{}, reconstructed{};
+        std::size_t compressed_len = compressed.size();
+        REQUIRE(rohc_compress4(comp.get(), old_flow.data(), old_flow.size(),
+                               compressed.data(), &compressed_len) == 0);
+        std::size_t reconstructed_len = reconstructed.size();
+        REQUIRE(rohc_decompress4(decomp.get(), compressed.data(), compressed_len,
+                                 reconstructed.data(), &reconstructed_len) == 0);
+        REQUIRE(reconstructed_len == old_flow.size());
+        REQUIRE(std::memcmp(reconstructed.data(), old_flow.data(), old_flow.size()) == 0);
+    }
+    comp.reset(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(comp);
+    REQUIRE(rohc_comp_set_cid(comp.get(), 15U) == 0);
+
+    // This is the second generation for CID 15. Its first IR replaces the
+    // evicted flow, then packet 37 is lost. Private FO subsequently refreshes
+    // the peer IPv4 ID while its MSN remains one behind the local MSN.
+    for(std::size_t index = 0U; index <= 39U; ++index)
+    {
+        auto packet = stress_udp_packet(241112U + index,
+                                        static_cast<std::uint16_t>(14U + index),
+                                        false, 1200U, 34143U, 15U);
+        std::array<std::uint8_t, 1400> compressed{}, reconstructed{};
+        std::size_t compressed_len = compressed.size();
+        REQUIRE(rohc_compress4(comp.get(), packet.data(), packet.size(),
+                               compressed.data(), &compressed_len) == 0);
+        if(index == 37U)
+        {
+            REQUIRE(compressed[0] == 0xefU);
+            REQUIRE((compressed[1] & 0xfeU) == 0xfcU);
+            continue;
+        }
+        if(index == 38U)
+        {
+            REQUIRE(compressed[0] == 0xefU);
+            REQUIRE((compressed[1] & 0xfeU) == 0xfcU);
+        }
+        std::size_t reconstructed_len = reconstructed.size();
+        INFO("generation=2 cid=15 sequence=" << 241112U + index
+             << " local_msn=" << index + 1U
+             << " peer_msn_after_decode=" << index + 1U
+             << " ipv4_id=" << 14U + index
+             << " compressed_len=" << compressed_len);
+        REQUIRE(rohc_decompress4(decomp.get(), compressed.data(), compressed_len,
+                                 reconstructed.data(), &reconstructed_len) == 0);
+        REQUIRE(reconstructed_len == packet.size());
+        REQUIRE(std::memcmp(reconstructed.data(), packet.data(), packet.size()) == 0);
+        REQUIRE(rohc_decomp_has_feedback(decomp.get()) == 0);
     }
 }
