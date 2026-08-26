@@ -402,6 +402,57 @@ static bool rtp_pt0_reconstructable(const rohccxx::Context& previous,
            current.ipv4_id == previous.ipv4_id;
 }
 
+static bool udp_pt0_reconstructable(const rohccxx::Context& previous,
+                                    const rohccxx::Context& current)
+{
+    if(previous.profile != rohccxx::Profile::UDP ||
+       previous.rohc_state != rohccxx::RohcState::DynamicEstablished ||
+       previous.ip_version != 4 || current.ip_version != 4 ||
+       current.msn != static_cast<std::uint16_t>(previous.msn + 1U) ||
+       current.ipv4_id_behavior != 0U ||
+       current.ipv4_id != static_cast<std::uint16_t>(previous.ipv4_id + 1U) ||
+       current.udp_sport != previous.udp_sport || current.udp_dport != previous.udp_dport ||
+       current.udp_check != 0U || previous.udp_check != 0U ||
+       current.ipv4_tos != previous.ipv4_tos || current.ipv4_ttl != previous.ipv4_ttl ||
+       current.ipv4_flags != previous.ipv4_flags ||
+       current.ipv4_protocol != previous.ipv4_protocol ||
+       current.ipv4_saddr != previous.ipv4_saddr || current.ipv4_daddr != previous.ipv4_daddr ||
+       current.ipv4_options_len != previous.ipv4_options_len ||
+       current.ipv4_options != previous.ipv4_options)
+        return false;
+    return true;
+}
+
+static bool udp_pt0_private_fo_ambiguous(std::uint8_t pt0,
+                                         const std::uint8_t* payload,
+                                         size_t payload_len)
+{
+    const auto type = rohccxx::detect_packet_type(pt0);
+    size_t private_header_len = 0U;
+    if(type == rohccxx::RohcPacketType::FO_UDP)
+        private_header_len = 6U;
+    else if(type == rohccxx::RohcPacketType::FO_ESP ||
+            type == rohccxx::RohcPacketType::FO_IP)
+        private_header_len = 4U;
+    else
+        return false;
+    if(!payload || payload_len < private_header_len - 1U)
+        return false;
+    std::array<std::uint8_t, 6> candidate{};
+    candidate[0] = pt0;
+    std::memcpy(candidate.data() + 1U, payload, private_header_len - 1U);
+    rohccxx::Context tentative{};
+    size_t consumed = 0U;
+    if(type == rohccxx::RohcPacketType::FO_UDP)
+        return rohccxx::decode_udp_fo(candidate.data(), private_header_len,
+                                      tentative, &consumed);
+    if(type == rohccxx::RohcPacketType::FO_ESP)
+        return rohccxx::decode_esp_fo(candidate.data(), private_header_len,
+                                      tentative, &consumed);
+    return rohccxx::decode_ip_fo(candidate.data(), private_header_len,
+                                 tentative, &consumed);
+}
+
 static bool emit_rtp_pt0_small_cid(std::uint8_t* out,
                                    size_t* out_len,
                                    std::uint32_t cid,
@@ -694,6 +745,47 @@ static bool build_fixed_rtp_ipv4_header(std::array<std::uint8_t, 40>& out,
     out[37] = static_cast<std::uint8_t>(ctx.rtp.ssrc >> 16U);
     out[38] = static_cast<std::uint8_t>(ctx.rtp.ssrc >> 8U);
     out[39] = static_cast<std::uint8_t>(ctx.rtp.ssrc);
+    const auto checksum = ipv4_checksum(out.data(), 20);
+    out[10] = static_cast<std::uint8_t>(checksum >> 8U);
+    out[11] = static_cast<std::uint8_t>(checksum);
+    return true;
+}
+
+static bool build_fixed_udp_ipv4_header(std::array<std::uint8_t, 28>& out,
+                                        const rohccxx::Context& ctx,
+                                        size_t payload_len)
+{
+    if(ctx.profile != rohccxx::Profile::UDP || ctx.ip_version != 4 ||
+       ctx.ipv4_options_len != 0U || payload_len > 0xffffU - out.size())
+        return false;
+    out.fill(0U);
+    const auto total = static_cast<std::uint16_t>(out.size() + payload_len);
+    const auto udp_total = static_cast<std::uint16_t>(8U + payload_len);
+    out[0] = 0x45U;
+    out[1] = ctx.ipv4_tos;
+    out[2] = static_cast<std::uint8_t>(total >> 8U);
+    out[3] = static_cast<std::uint8_t>(total);
+    out[4] = static_cast<std::uint8_t>(ctx.ipv4_id >> 8U);
+    out[5] = static_cast<std::uint8_t>(ctx.ipv4_id);
+    out[6] = static_cast<std::uint8_t>(ctx.ipv4_flags << 5U);
+    out[8] = ctx.ipv4_ttl;
+    out[9] = 17U;
+    out[12] = static_cast<std::uint8_t>(ctx.ipv4_saddr >> 24U);
+    out[13] = static_cast<std::uint8_t>(ctx.ipv4_saddr >> 16U);
+    out[14] = static_cast<std::uint8_t>(ctx.ipv4_saddr >> 8U);
+    out[15] = static_cast<std::uint8_t>(ctx.ipv4_saddr);
+    out[16] = static_cast<std::uint8_t>(ctx.ipv4_daddr >> 24U);
+    out[17] = static_cast<std::uint8_t>(ctx.ipv4_daddr >> 16U);
+    out[18] = static_cast<std::uint8_t>(ctx.ipv4_daddr >> 8U);
+    out[19] = static_cast<std::uint8_t>(ctx.ipv4_daddr);
+    out[20] = static_cast<std::uint8_t>(ctx.udp_sport >> 8U);
+    out[21] = static_cast<std::uint8_t>(ctx.udp_sport);
+    out[22] = static_cast<std::uint8_t>(ctx.udp_dport >> 8U);
+    out[23] = static_cast<std::uint8_t>(ctx.udp_dport);
+    out[24] = static_cast<std::uint8_t>(udp_total >> 8U);
+    out[25] = static_cast<std::uint8_t>(udp_total);
+    out[26] = static_cast<std::uint8_t>(ctx.udp_check >> 8U);
+    out[27] = static_cast<std::uint8_t>(ctx.udp_check);
     const auto checksum = ipv4_checksum(out.data(), 20);
     out[10] = static_cast<std::uint8_t>(checksum >> 8U);
     out[11] = static_cast<std::uint8_t>(checksum);
@@ -2324,6 +2416,7 @@ rohc_compress4(struct rohc_comp* comp,
 
     if(profile == Profile::UDP && udp)
     {
+        const Context previous = *ctx;
         ctx->profile = Profile::UDP;
         ctx->mode = comp->impl.mode;
         const bool had_ipv4_context = ctx->ip_version == 4 && ctx->tx_count > 0;
@@ -2353,14 +2446,34 @@ rohc_compress4(struct rohc_comp* comp,
         else
         {
             ctx->rohc_state = RohcState::DynamicEstablished;
-            if(ctx->ip_version == 4 && ctx->ipv4_id_behavior == 0U && !ctx->large_cid && cid == 0U)
+            if(!ctx->large_cid && cid <= 0x0fU &&
+               udp_pt0_reconstructable(previous, *ctx))
             {
                 const rfc5225::FormalCoFields fields{ctx->msn, 0, 0, false};
                 const rfc5225::FormalCoCrcInput crc_input{ip_packet, ip_view.header_len + sizeof(*udp)};
-                if(!rfc5225::emit_formal_co(rohc_packet, rohc_packet_len, ctx->profile,
-                                            rfc5225::FormalCoVariant::Pt0Crc3, cid,
-                                            ctx->large_cid, fields, crc_input))
-                    return -1;
+                std::array<std::uint8_t, 2> formal{};
+                size_t formal_len = formal.size();
+                const bool emitted = rfc5225::emit_formal_co(
+                    formal.data(), &formal_len, ctx->profile,
+                    rfc5225::FormalCoVariant::Pt0Crc3, cid, false, fields, crc_input);
+                const size_t payload_offset = ip_view.header_len + sizeof(*udp);
+                const std::uint8_t pt0 = formal[cid == 0U ? 0U : 1U];
+                if(!emitted || udp_pt0_private_fo_ambiguous(
+                       pt0, ip_packet + payload_offset, ip_packet_len - payload_offset))
+                {
+                    if(!emit_udp_fo(rohc_packet, rohc_packet_len, *ctx) ||
+                       (!ctx->large_cid && !prepend_small_cid(
+                           rohc_packet, rohc_packet_len, out_capacity, cid)))
+                        return -1;
+                }
+                else
+                {
+                    if(*rohc_packet_len < formal_len)
+                        return -1;
+                    std::memset(rohc_packet, 0, *rohc_packet_len);
+                    std::memcpy(rohc_packet, formal.data(), formal_len);
+                    *rohc_packet_len = formal_len;
+                }
             }
             else
             {
@@ -3047,6 +3160,98 @@ rohc_decompress4(struct rohc_decomp* decomp,
     size_t decode_packet_len = decoder_packet_len(parsed);
     bool prefer_private_rtp_fo = false;
 
+    // The unauthenticated fixed-header UDP PT-0 path authenticates a temporary
+    // context and a 28-byte reconstruction before touching live state or caller
+    // output. Authenticated packets retain the full-packet staging path below.
+    const bool fixed_udp_pt0_candidate =
+        !stage_authenticated_output && packet_len > 0U &&
+        (packet[0] & 0x80U) == 0U &&
+        context_before_decode.profile == Profile::UDP &&
+        context_before_decode.ipv4_options_len == 0U &&
+        rfc5225::live_pt0_context_supported(context_before_decode,
+                                            decomp->impl.large_cid_space,
+                                            cid, parsed.has_add_cid);
+    if(fixed_udp_pt0_candidate)
+    {
+        Context formal_context = context_before_decode;
+        rfc5225::FormalCoPacket formal{};
+        bool formal_valid = rfc5225::read_formal_co_base(
+            packet, 1U, Profile::UDP, rfc5225::FormalCoVariant::Pt0Crc3, formal);
+        std::array<std::uint8_t, 28> formal_header{};
+        const std::uint8_t* formal_payload = nullptr;
+        size_t formal_payload_len = 0U;
+        if(formal_valid)
+        {
+            std::uint16_t next_msn = formal_context.msn;
+            for(std::uint16_t delta = 1U; delta <= 15U; ++delta)
+            {
+                const auto candidate = static_cast<std::uint16_t>(formal_context.msn + delta);
+                if((candidate & 0x0fU) == formal.msn)
+                {
+                    next_msn = candidate;
+                    break;
+                }
+            }
+            formal_valid = next_msn != formal_context.msn;
+            if(formal_valid)
+            {
+                const auto delta = static_cast<std::uint16_t>(next_msn - formal_context.msn);
+                formal_context.msn = next_msn;
+                formal_context.ipv4_id =
+                    static_cast<std::uint16_t>(formal_context.ipv4_id + delta);
+                formal_valid = detail::payload_after_header(packet, packet_len, 1U,
+                                                             formal_payload,
+                                                             formal_payload_len) &&
+                    build_fixed_udp_ipv4_header(formal_header, formal_context,
+                                                formal_payload_len) &&
+                    utils::crc3(formal_header.data(), formal_header.size()) ==
+                        formal.header_crc;
+            }
+        }
+
+        bool private_valid = false;
+        Context private_context = context_before_decode;
+        size_t private_header_len = 0U;
+        switch(parsed.type)
+        {
+        case RohcPacketType::FO_UDP:
+            private_valid = decode_udp_fo(packet, packet_len, private_context,
+                                          &private_header_len);
+            break;
+        case RohcPacketType::FO_ESP:
+            private_valid = decode_esp_fo(packet, packet_len, private_context,
+                                          &private_header_len);
+            break;
+        case RohcPacketType::FO_IP:
+            private_valid = decode_ip_fo(packet, packet_len, private_context,
+                                         &private_header_len);
+            break;
+        default:
+            break;
+        }
+
+        if(formal_valid && private_valid)
+            return finish_decoding(fail_with_feedback(cid));
+        if(formal_valid)
+        {
+            if(formal_payload_len > std::numeric_limits<size_t>::max() - formal_header.size() ||
+               *ip_packet_len < formal_header.size() + formal_payload_len)
+                return finish_decoding(fail_with_feedback(cid));
+            const size_t final_len = formal_header.size() + formal_payload_len;
+            *ctx = formal_context;
+            decomp->impl.mode = formal_context.mode;
+            std::memcpy(ip_packet, formal_header.data(), formal_header.size());
+            if(formal_payload_len > 0U)
+                std::memcpy(ip_packet + formal_header.size(), formal_payload,
+                            formal_payload_len);
+            reconstruction_len = final_len;
+            return finish_decoding(0);
+        }
+        if(!private_valid)
+            return finish_decoding(fail_with_feedback(cid));
+        // A valid private packet continues through the unchanged decoder below.
+    }
+
     // The unauthenticated fixed-header RTP PT-0 path authenticates a temporary
     // context and a 40-byte reconstruction before touching live state or caller
     // output. ROHCoIPsec retains its existing full-packet authenticated staging.
@@ -3580,7 +3785,10 @@ rohc_decompress4(struct rohc_decomp* decomp,
     }
     else if(parsed.type == RohcPacketType::FO_UDP)
     {
+        const std::uint16_t previous_msn = ctx->msn;
         ok = decode_udp_fo(packet, packet_len, *ctx, &header_len);
+        if(ok)
+            ctx->msn = static_cast<std::uint16_t>(previous_msn + 1U);
         if (ok && ctx->profile != Profile::UDP)
             ok = false;
     }
