@@ -10,6 +10,7 @@ on:
       - tests/CMakeLists.txt
       - tests/unit/test_linux_tun_tunnel.cpp
       - tests/integration/linux_tun_tunnel_netns.sh
+      - tests/integration/linux_tun_tunnel_stress.py
       - .github/workflows/linux-tun-integration.yml
   workflow_dispatch:
 
@@ -64,7 +65,7 @@ jobs:
         run: |
           set -o pipefail
           status=0
-          sudo timeout --signal=TERM --kill-after=10s 90s \
+          sudo timeout --signal=TERM --kill-after=10s 420s \
             bash tests/integration/linux_tun_tunnel_netns.sh \
             "$PWD/build-linux-tun/examples/linux_tun_tunnel/rohccxx-tun-tunnel" || status=$?
           if [[ ${status} -eq 77 ]]; then
@@ -72,6 +73,24 @@ jobs:
             exit 1
           fi
           exit "${status}"
+
+      - name: Configure sanitizer stress build
+        run: |
+          cmake -S . -B build-linux-tun-sanitize \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DROHCCXX_BUILD_TESTS=ON \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+
+      - name: Run reduced sanitizer tunnel stress
+        run: |
+          cmake --build build-linux-tun-sanitize --target rohccxx-tun-tunnel linux_tun_tunnel_tests --parallel
+          ASAN_OPTIONS=detect_leaks=1 build-linux-tun-sanitize/tests/linux_tun_tunnel_tests
+          sudo env ASAN_OPTIONS=detect_leaks=1 ROHCCXX_STRESS_PACKETS=10000 ROHCCXX_STRESS_SECONDS=10 \
+            timeout --signal=TERM --kill-after=10s 150s \
+            bash tests/integration/linux_tun_tunnel_netns.sh \
+            "$PWD/build-linux-tun-sanitize/examples/linux_tun_tunnel/rohccxx-tun-tunnel"
 
       - name: Clean up namespace integration resources
         if: always()
