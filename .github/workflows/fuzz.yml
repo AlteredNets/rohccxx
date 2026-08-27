@@ -1,0 +1,87 @@
+name: ROHCCXX fuzz hardening
+
+on:
+  pull_request:
+    paths:
+      - 'fuzz/**'
+      - 'include/**'
+      - 'src/**'
+      - 'examples/linux_tun_tunnel/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/fuzz.yml'
+  schedule:
+    - cron: '23 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  fuzz:
+    name: Clang libFuzzer ASan UBSan
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ github.event_name == 'schedule' && 30 || 15 }}
+    env:
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:allocator_may_return_null=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libclang-rt-dev cmake ninja-build
+      - name: Configure and build fuzzers
+        run: |
+          cmake -S . -B build-fuzz -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DROHCCXX_BUILD_FUZZERS=ON \
+            -DROHCCXX_BUILD_TESTS=OFF
+          cmake --build build-fuzz
+      - name: Run bounded fuzz campaign
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p fuzz-artifacts
+          seconds=90
+          if [[ "${{ github.event_name }}" == schedule ]]; then seconds=300; fi
+          for spec in \
+            'fuzz_stateless_decompress stateless' \
+            'fuzz_stateful_decompress stateful' \
+            'fuzz_structured_roundtrip roundtrip' \
+            'fuzz_tunnel_parser tunnel'; do
+            read -r target corpus <<<"$spec"
+            timeout --signal=TERM --kill-after=15 "$((seconds + 20))" \
+              "build-fuzz/fuzz/$target" "fuzz/corpus/$corpus" \
+              -artifact_prefix="fuzz-artifacts/${target}-" \
+              -max_total_time="$seconds" -timeout=10 -rss_limit_mb=2048 \
+              -max_len=65535 -print_final_stats=1 \
+              2>&1 | tee "fuzz-artifacts/${target}.log"
+          done
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-failure-${{ github.run_id }}
+          path: |
+            fuzz-artifacts/*
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Preserve scheduled corpus and logs
+        if: ${{ always() && github.event_name == 'schedule' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: scheduled-fuzz-corpus-${{ github.run_id }}
+          path: |
+            fuzz/corpus
+            fuzz-artifacts
+          if-no-files-found: error
+          retention-days: 30
+      - name: Clean fuzz processes and temporary files
+        if: always()
+        run: |
+          pgrep -f '^.*/build-fuzz/fuzz/fuzz_' | xargs -r kill -TERM
+          rm -rf build-fuzz fuzz-artifacts
