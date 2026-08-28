@@ -2941,10 +2941,13 @@ rohc_compress4(struct rohc_comp* comp,
     ctx->dynamic_acked = true;
 
     DBG("FALLBACK: emitting uncompressed 2");
-    return emit_uncompressed(rohc_packet,
-                             rohc_packet_len,
-                             ip_packet,
-                             ip_packet_len) ? 0 : -1;
+    const size_t out_capacity = *rohc_packet_len;
+    if(!emit_uncompressed(rohc_packet, rohc_packet_len, ip_packet, ip_packet_len))
+        return -1;
+    if(!ctx->large_cid && !prepend_small_cid(rohc_packet, rohc_packet_len,
+                                             out_capacity, cid))
+        return -1;
+    return 0;
 }
 
 ROHCCXX_API int

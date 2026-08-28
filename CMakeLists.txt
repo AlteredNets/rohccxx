@@ -68,6 +68,22 @@ option(ROHCCXX_BUILD_TESTS "Build tests" OFF)
 option(ROHCCXX_SANITIZERS "Build with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 option(ROHCCXX_THREAD_SANITIZER "Build with ThreadSanitizer" OFF)
 option(ROHCCXX_ENABLE_VALGRIND_TESTS "Add Valgrind-backed CTest memory tests" OFF)
+option(ROHCCXX_BUILD_FUZZERS "Build Clang/libFuzzer hardening targets" OFF)
+
+if(ROHCCXX_BUILD_FUZZERS AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "ROHCCXX_BUILD_FUZZERS requires Clang")
+endif()
+
+if(ROHCCXX_BUILD_FUZZERS)
+    add_compile_options(
+        -fsanitize=fuzzer-no-link,address,undefined
+        -fno-omit-frame-pointer
+        -fno-sanitize-recover=all
+        -g
+        -O1
+    )
+    add_link_options(-fsanitize=address,undefined)
+endif()
 
 if(ROHCCXX_SANITIZERS AND ROHCCXX_THREAD_SANITIZER)
     message(FATAL_ERROR "ROHCCXX_SANITIZERS and ROHCCXX_THREAD_SANITIZER are mutually exclusive")
@@ -83,7 +99,7 @@ if((ROHCCXX_SANITIZERS OR ROHCCXX_THREAD_SANITIZER) AND NOT MSVC)
     endif()
 endif()
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR ROHCCXX_BUILD_TESTS)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR ROHCCXX_BUILD_TESTS OR ROHCCXX_BUILD_FUZZERS)
     add_subdirectory(examples/linux_tun_tunnel)
 endif()
 
@@ -114,6 +130,10 @@ if(ROHCCXX_BUILD_TESTS)
     FetchContent_MakeAvailable(Catch2)
     enable_testing()
     add_subdirectory(tests)
+endif()
+
+if(ROHCCXX_BUILD_FUZZERS)
+    add_subdirectory(fuzz)
 endif()
 
 include(CMakePackageConfigHelpers)
