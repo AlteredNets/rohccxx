@@ -21,9 +21,9 @@ This repository is source-available under those terms, not OSI open-source.
   small-CID-0, no-IP-options flows in the RFC 5225 RTP/UDP/IP, UDP/IP, ESP/IP,
   and IP-only profiles, plus the remaining optional oracle hooks,
   is documented in [`docs/external_oracle.md`](docs/external_oracle.md).
-- Version 0.6.0 release details, including the Linux TUN-to-UDP laboratory
-  tunnel and its validated multi-flow context handling, are documented in
-  [`docs/release_v0.6.0.md`](docs/release_v0.6.0.md).
+- Version 0.6.1 release details, including the fuzzing and small-CID context
+  isolation hardening, are documented in
+  [`docs/release_v0.6.1.md`](docs/release_v0.6.1.md).
 
 ## Dependencies
 
