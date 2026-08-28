@@ -741,6 +741,52 @@ TEST_CASE("ROHC uncompressed profile preserves Add-CID context isolation")
     rohc_decomp_free(decomp);
 }
 
+TEST_CASE("ROHC compressor preserves nonzero small CID on uncompressed fallback")
+{
+    rohc_comp* comp = rohc_comp_new2(15, ROHCCXX_DIRECTION_UPLINK);
+    rohc_decomp* decomp = rohc_decomp_new2(15, ROHCCXX_DIRECTION_DOWNLINK);
+    REQUIRE(comp != nullptr);
+    REQUIRE(decomp != nullptr);
+
+    std::array<std::uint8_t, 64> rtp{};
+    make_valid_rtp(rtp.data(), 1, 160, 0x12345678U);
+    std::array<std::uint8_t, 128> compressed{};
+    std::array<std::uint8_t, 128> output{};
+    std::size_t compressed_len = compressed.size();
+    std::size_t output_len = output.size();
+    REQUIRE(rohc_comp_set_cid(comp, 0) == 0);
+    REQUIRE(rohc_compress4(comp, rtp.data(), rtp.size(), compressed.data(), &compressed_len) == 0);
+    REQUIRE(rohc_decompress4(decomp, compressed.data(), compressed_len,
+                             output.data(), &output_len) == 0);
+
+    const std::array<std::uint8_t, 44> unsupported{{
+        0x45, 0x74, 0x00, 0x2c, 0x5d, 0x2d, 0x40, 0x00,
+        0x40, 0x11, 0xc8, 0x84, 0x0a, 0x00, 0x00, 0x0e,
+        0x0a, 0x00, 0x00, 0x8e, 0x40, 0x5d, 0x50, 0x5d,
+        0x00, 0x18, 0xc9, 0x66, 0xb5, 0xff, 0xff, 0x01,
+        0xff, 0xff, 0x08, 0x00, 0xff, 0xff, 0xff, 0xff,
+        0x01, 0xd2, 0xd2, 0x2d,
+    }};
+
+    REQUIRE(rohc_comp_set_cid(comp, 3) == 0);
+    compressed_len = compressed.size();
+    REQUIRE(rohc_compress4(comp, unsupported.data(), unsupported.size(),
+                           compressed.data(), &compressed_len) == 0);
+    REQUIRE(compressed_len == unsupported.size() + 2U);
+    REQUIRE(compressed[0] == 0xe3U);
+    REQUIRE(compressed[1] == 0x00U);
+
+    output.fill(0xa5U);
+    output_len = output.size();
+    REQUIRE(rohc_decompress4(decomp, compressed.data(), compressed_len,
+                             output.data(), &output_len) == 0);
+    REQUIRE(output_len == unsupported.size());
+    REQUIRE(std::equal(unsupported.begin(), unsupported.end(), output.begin()));
+
+    rohc_decomp_free(decomp);
+    rohc_comp_free(comp);
+}
+
 
 TEST_CASE("ROHC RFC 3243 zero-byte assumptions are validated before NHP use")
 {
