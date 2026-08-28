@@ -1398,6 +1398,12 @@ static void set_feedback(rohccxx_internal::Decompressor& decomp,
     rohccxx::Feedback feedback{};
     feedback.cid = cid;
     feedback.type = type;
+    if(const auto* context = decomp.contexts.get(cid))
+    {
+        feedback.acknowledgment_number = context->msn;
+        feedback.acknowledgment_bits = 14U;
+        feedback.acknowledgment_valid = true;
+    }
     decomp.last_feedback = feedback;
     decomp.has_feedback = true;
 }
@@ -2029,6 +2035,110 @@ rohc_comp_deliver_feedback_packet(struct rohc_comp* comp,
     return delivered ? 0 : -1;
 }
 
+static rohccxx_feedback_status_t feedback_status_to_c(rohccxx::FeedbackStatus status)
+{
+    return static_cast<rohccxx_feedback_status_t>(static_cast<uint8_t>(status));
+}
+
+static bool feedback_v1_header_valid(const rohccxx_feedback_v1_t* feedback)
+{
+    return feedback && feedback->api_version == ROHCCXX_FEEDBACK_API_V1 &&
+           feedback->struct_size >= sizeof(rohccxx_feedback_v1_t);
+}
+
+static rohccxx_feedback_status_t feedback_core_to_c(rohccxx_direction_t channel,
+                                                     const rohccxx::Feedback& core,
+                                                     rohccxx_feedback_v1_t* out)
+{
+    if(!out)
+        return ROHCCXX_FEEDBACK_MALFORMED;
+    std::memset(out, 0, sizeof(*out));
+    out->api_version = ROHCCXX_FEEDBACK_API_V1;
+    out->struct_size = sizeof(*out);
+    out->channel = channel;
+    out->cid = core.cid;
+    out->feedback_type = static_cast<uint8_t>(core.type);
+    out->acknowledgment_number = core.acknowledgment_number;
+    out->acknowledgment_bits = core.acknowledgment_bits;
+    out->acknowledgment_valid = core.acknowledgment_valid ? 1 : 0;
+    out->crc_present = 1;
+    size_t raw_len = sizeof(out->raw);
+    if(!rohccxx::write_feedback2_v1(out->raw, &raw_len, core))
+        return ROHCCXX_FEEDBACK_UNSUPPORTED;
+    out->raw_len = raw_len;
+    out->crc_valid = 1;
+    return ROHCCXX_FEEDBACK_ACCEPTED;
+}
+
+ROHCCXX_API rohccxx_feedback_status_t
+rohc_feedback_parse_v1(rohccxx_direction_t channel,
+                       const uint8_t* packet,
+                       size_t packet_len,
+                       rohccxx_feedback_v1_t* feedback)
+{
+    if(!feedback || !packet || packet_len == 0U || packet_len > ROHCCXX_FEEDBACK_RAW_MAX ||
+       (channel != ROHCCXX_DIRECTION_UPLINK && channel != ROHCCXX_DIRECTION_DOWNLINK))
+        return ROHCCXX_FEEDBACK_MALFORMED;
+    rohccxx::Feedback core{};
+    const auto status = rohccxx::read_feedback2_v1(packet, packet_len, core);
+    std::memset(feedback, 0, sizeof(*feedback));
+    feedback->api_version = ROHCCXX_FEEDBACK_API_V1;
+    feedback->struct_size = sizeof(*feedback);
+    feedback->channel = channel;
+    feedback->cid = core.cid;
+    feedback->feedback_type = static_cast<uint8_t>(core.type);
+    feedback->acknowledgment_number = core.acknowledgment_number;
+    feedback->acknowledgment_bits = core.acknowledgment_bits;
+    feedback->acknowledgment_valid = core.acknowledgment_valid ? 1 : 0;
+    feedback->crc_present = core.crc_present ? 1 : 0;
+    feedback->crc_valid = core.crc_valid ? 1 : 0;
+    feedback->raw_len = packet_len;
+    std::memcpy(feedback->raw, packet, packet_len);
+    return feedback_status_to_c(status);
+}
+
+ROHCCXX_API rohccxx_feedback_status_t
+rohc_comp_deliver_feedback_v1(struct rohc_comp* comp,
+                              const rohccxx_feedback_v1_t* feedback)
+{
+    if(!comp || !feedback_v1_header_valid(feedback) ||
+       feedback->raw_len == 0U || feedback->raw_len > ROHCCXX_FEEDBACK_RAW_MAX)
+        return ROHCCXX_FEEDBACK_MALFORMED;
+    const auto expected_channel = comp->impl.direction == rohccxx::Direction::Uplink
+        ? ROHCCXX_DIRECTION_UPLINK : ROHCCXX_DIRECTION_DOWNLINK;
+    if(feedback->channel != expected_channel)
+        return ROHCCXX_FEEDBACK_UNCORRELATED;
+
+    rohccxx_feedback_v1_t parsed{};
+    const auto parse_status = rohc_feedback_parse_v1(feedback->channel, feedback->raw,
+                                                     feedback->raw_len, &parsed);
+    if(parse_status != ROHCCXX_FEEDBACK_ACCEPTED)
+        return parse_status;
+    if(parsed.cid != feedback->cid || parsed.feedback_type != feedback->feedback_type ||
+       parsed.acknowledgment_number != feedback->acknowledgment_number ||
+       parsed.acknowledgment_bits != feedback->acknowledgment_bits ||
+       parsed.acknowledgment_valid != feedback->acknowledgment_valid ||
+       parsed.crc_present != feedback->crc_present || parsed.crc_valid != feedback->crc_valid)
+        return ROHCCXX_FEEDBACK_MALFORMED;
+    if(!parsed.acknowledgment_valid)
+        return ROHCCXX_FEEDBACK_UNCORRELATED;
+
+    std::lock_guard<std::recursive_mutex> lock(comp->impl.mutex);
+    rohccxx::Context* context = comp->impl.contexts.get(parsed.cid);
+    if(!context)
+        return ROHCCXX_FEEDBACK_UNCORRELATED;
+    if(!rohccxx::transmitted_msn_matches(*context, parsed.acknowledgment_number,
+                                        parsed.acknowledgment_bits))
+        return ROHCCXX_FEEDBACK_STALE;
+
+    rohccxx::Feedback core{};
+    const auto core_status = rohccxx::read_feedback2_v1(parsed.raw, parsed.raw_len, core);
+    if(core_status != rohccxx::FeedbackStatus::Accepted)
+        return feedback_status_to_c(core_status);
+    rohccxx::apply_feedback_to_context(*context, core);
+    return ROHCCXX_FEEDBACK_ACCEPTED;
+}
+
 ROHCCXX_API int
 rohc_comp_set_mode(struct rohc_comp* comp, rohccxx_mode_t mode)
 {
@@ -2431,6 +2541,8 @@ rohc_compress4(struct rohc_comp* comp,
         ctx->static_acked = false;
         ctx->dynamic_acked = false;
         ctx->nack_count = 0U;
+        ctx->transmitted_msn_head = 0U;
+        ctx->transmitted_msn_count = 0U;
     }
 
     auto append_payload_range = [&](size_t header_len,
@@ -2446,6 +2558,7 @@ rohc_compress4(struct rohc_comp* comp,
             std::memcpy(rohc_packet + header_len, ip_packet + payload_offset, payload_len);
         *rohc_packet_len = header_len + payload_len;
         ++ctx->tx_count;
+        record_transmitted_msn(*ctx, ctx->msn);
         if(ctx->mode != Mode::Reliable)
         {
             if(ctx->tx_count > 0)
@@ -2981,6 +3094,20 @@ rohc_decomp_get_feedback(const struct rohc_decomp* decomp,
     return 0;
 }
 
+ROHCCXX_API rohccxx_feedback_status_t
+rohc_decomp_get_feedback_v1(const struct rohc_decomp* decomp,
+                            rohccxx_feedback_v1_t* feedback)
+{
+    if(!decomp || !feedback)
+        return ROHCCXX_FEEDBACK_MALFORMED;
+    std::lock_guard<std::recursive_mutex> lock(decomp->impl.mutex);
+    if(!decomp->impl.has_feedback)
+        return ROHCCXX_FEEDBACK_UNCORRELATED;
+    const auto channel = decomp->impl.direction == rohccxx::Direction::Uplink
+        ? ROHCCXX_DIRECTION_UPLINK : ROHCCXX_DIRECTION_DOWNLINK;
+    return feedback_core_to_c(channel, decomp->impl.last_feedback, feedback);
+}
+
 ROHCCXX_API struct rohc_decomp*
 rohc_decomp_new2(uint32_t max_cid,
                  rohccxx_direction_t d)
@@ -3319,6 +3446,12 @@ rohc_decompress4(struct rohc_decomp* decomp,
         Feedback feedback{};
         feedback.cid = feedback_cid;
         feedback.type = FeedbackType::NACK;
+        if(const auto* context = decomp->impl.contexts.get(feedback_cid))
+        {
+            feedback.acknowledgment_number = context->msn;
+            feedback.acknowledgment_bits = 14U;
+            feedback.acknowledgment_valid = true;
+        }
         decomp->impl.last_feedback = feedback;
         decomp->impl.has_feedback = true;
         return -1;

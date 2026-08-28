@@ -3,11 +3,13 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 
 #include "rohccxx/core/context.hpp"
+#include "rohccxx/utils/crc.hpp"
 
 namespace rohccxx
 {
@@ -27,6 +29,15 @@ enum class FeedbackOptionType : uint8_t
     Crc = 4
 };
 
+enum class FeedbackStatus : uint8_t
+{
+    Accepted = 0,
+    Stale = 1,
+    Malformed = 2,
+    Uncorrelated = 3,
+    Unsupported = 4
+};
+
 struct FeedbackOption
 {
     FeedbackOptionType type = FeedbackOptionType::Mode;
@@ -42,7 +53,130 @@ struct Feedback
     Mode mode = Mode::Optimistic;
     uint8_t option_count = 0;
     FeedbackOption options[4] = {};
+    uint16_t acknowledgment_number = 0;
+    uint8_t acknowledgment_bits = 0;
+    bool acknowledgment_valid = false;
+    bool crc_present = false;
+    bool crc_valid = false;
 };
+
+inline bool is_feedback_packet_start(std::uint8_t value);
+inline std::uint8_t feedback_ack_type(FeedbackType type);
+inline bool feedback_type_from_ack_type(std::uint8_t ack_type, FeedbackType& type);
+
+inline void record_transmitted_msn(Context& context, uint16_t msn)
+{
+    context.transmitted_msn_history[context.transmitted_msn_head] = msn;
+    context.transmitted_msn_head = static_cast<uint8_t>(
+        (context.transmitted_msn_head + 1U) % context.transmitted_msn_history.size());
+    if(context.transmitted_msn_count < context.transmitted_msn_history.size())
+        ++context.transmitted_msn_count;
+}
+
+inline bool transmitted_msn_matches(const Context& context,
+                                    uint16_t acknowledgment,
+                                    uint8_t bits)
+{
+    if(bits == 0U || bits > 16U || context.transmitted_msn_count == 0U)
+        return false;
+    const uint16_t mask = bits == 16U ? 0xffffU : static_cast<uint16_t>((1U << bits) - 1U);
+    for(uint8_t offset = 0; offset < context.transmitted_msn_count; ++offset)
+    {
+        const auto index = static_cast<uint8_t>(
+            (context.transmitted_msn_head + context.transmitted_msn_history.size() - 1U - offset) %
+            context.transmitted_msn_history.size());
+        if((context.transmitted_msn_history[index] & mask) == (acknowledgment & mask))
+            return true;
+    }
+    return false;
+}
+
+inline bool write_feedback2_v1(uint8_t* out, size_t* out_len, const Feedback& feedback)
+{
+    if(!out || !out_len || feedback.cid > 0x0fU ||
+       (feedback.acknowledgment_valid && feedback.acknowledgment_bits != 14U))
+        return false;
+    const bool add_cid = feedback.cid != 0U;
+    const bool not_valid = !feedback.acknowledgment_valid;
+    const size_t body_len = (add_cid ? 1U : 0U) + 3U + (not_valid ? 1U : 0U);
+    const size_t required = 1U + body_len;
+    if(body_len > 7U || *out_len < required)
+        return false;
+    std::memset(out, 0, *out_len);
+    size_t pos = 0;
+    out[pos++] = static_cast<uint8_t>(0xf0U | body_len);
+    if(add_cid)
+        out[pos++] = static_cast<uint8_t>(0xe0U | feedback.cid);
+    const uint16_t ack = feedback.acknowledgment_valid ? feedback.acknowledgment_number : 0U;
+    out[pos++] = static_cast<uint8_t>((feedback_ack_type(feedback.type) << 6U) |
+                                      ((ack >> 8U) & 0x3fU));
+    out[pos++] = static_cast<uint8_t>(ack & 0xffU);
+    const size_t crc_pos = pos++;
+    if(not_valid)
+        out[pos++] = 0x30U; // RFC 5225 ACKNUMBER-NOT-VALID option, type 3/length 0
+    // RFC 4995/5225 CRC-8 covers the feedback data (including Add-CID), not
+    // the outer Feedback packet type/size octet.
+    out[crc_pos] = utils::crc8(out + 1U, pos - 1U);
+    *out_len = pos;
+    return true;
+}
+
+inline FeedbackStatus read_feedback2_v1(const uint8_t* in, size_t len, Feedback& feedback,
+                                        size_t* consumed = nullptr)
+{
+    feedback = Feedback{};
+    if(!in || len < 4U || !is_feedback_packet_start(in[0]))
+        return FeedbackStatus::Malformed;
+    const uint8_t body_len = static_cast<uint8_t>(in[0] & 0x07U);
+    if(body_len == 0U || len < 1U + body_len)
+        return FeedbackStatus::Malformed;
+    const size_t end = 1U + body_len;
+    size_t pos = 1U;
+    if((in[pos] & 0xf0U) == 0xe0U)
+    {
+        feedback.cid = in[pos] & 0x0fU;
+        if(feedback.cid == 0U) return FeedbackStatus::Malformed;
+        ++pos;
+    }
+    if(end - pos < 3U)
+        return FeedbackStatus::Malformed;
+    if(!feedback_type_from_ack_type(static_cast<uint8_t>(in[pos] >> 6U), feedback.type))
+        return FeedbackStatus::Unsupported;
+    feedback.acknowledgment_number = static_cast<uint16_t>(((in[pos] & 0x3fU) << 8U) |
+                                                            in[pos + 1U]);
+    feedback.acknowledgment_bits = 14U;
+    const size_t crc_pos = pos + 2U;
+    const uint8_t received_crc = in[crc_pos];
+    std::array<uint8_t, 260> copy{};
+    if(end - 1U > copy.size()) return FeedbackStatus::Malformed;
+    std::memcpy(copy.data(), in + 1U, end - 1U);
+    copy[crc_pos - 1U] = 0U;
+    feedback.crc_present = true;
+    feedback.crc_valid = utils::crc8(copy.data(), end - 1U) == received_crc;
+    pos += 3U;
+    bool not_valid = false;
+    while(pos < end)
+    {
+        const uint8_t option = in[pos++];
+        const uint8_t type = option >> 4U;
+        const uint8_t option_len = option & 0x0fU;
+        if(option_len > end - pos) return FeedbackStatus::Malformed;
+        if(type == 3U)
+        {
+            if(option_len != 0U) return FeedbackStatus::Malformed;
+            not_valid = true;
+        }
+        else
+        {
+            return FeedbackStatus::Unsupported;
+        }
+        pos += option_len;
+    }
+    feedback.acknowledgment_valid = !not_valid;
+    if(consumed) *consumed = end;
+    else if(end != len) return FeedbackStatus::Malformed;
+    return feedback.crc_valid ? FeedbackStatus::Accepted : FeedbackStatus::Malformed;
+}
 
 inline bool is_known_feedback_type(std::uint8_t value)
 {

@@ -79,6 +79,9 @@ struct Context
     bool      dynamic_acked = false;
     uint16_t  msn = 0;
     uint8_t   reorder_ratio = 0;
+    std::array<uint16_t, 64> transmitted_msn_history{};
+    uint8_t transmitted_msn_head = 0;
+    uint8_t transmitted_msn_count = 0;
 
     uint8_t   ip_version = 4;
     uint8_t   ipv4_tos = 0;
