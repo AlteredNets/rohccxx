@@ -3580,6 +3580,28 @@ rohc_decompress4(struct rohc_decomp* decomp,
         return output_length_guard.finish(rc);
     };
 
+    // Resolve a structurally valid uncompressed-profile packet before using
+    // the previous context's profile to select a compressed-only decoder.
+    // In particular, an Add-CID/uncompressed IPv6 packet following a UDP
+    // context also begins with the PT-0 discriminator byte (0x00).
+    if(parsed.type == RohcPacketType::Uncompressed && parsed.packet_len > 1 &&
+       is_uncompressed_ip_payload(parsed.packet + 1, parsed.packet_len - 1))
+    {
+        const size_t original_len = parsed.packet_len - 1;
+        if(reconstruction_len < original_len)
+            return fail_with_feedback(cid);
+
+        std::memcpy(reconstruction_packet, parsed.packet + 1, original_len);
+        reconstruction_len = original_len;
+        ctx->profile = Profile::Uncompressed;
+        ctx->mode = Mode::Uncompressed;
+        ctx->rohc_state = RohcState::DynamicEstablished;
+        ctx->tx_count++;
+        ctx->nack_count = 0;
+        decomp->impl.mode = ctx->mode;
+        return finish_decoding(verify_rohcoipsec_icv(0));
+    }
+
     // In the small-CID space, CID 0 FO-RTP and the uncompressed profile both
     // start with 0x00.  Payload bytes in a valid FO-RTP packet may therefore
     // accidentally satisfy the uncompressed IPv4/IPv6 length heuristic.  An
@@ -4288,24 +4310,6 @@ rohc_decompress4(struct rohc_decomp* decomp,
         decomp->impl.expected_segment_sequence = 0;
         return output_length_guard.finish(
             rohc_decompress4(decomp, reassembled, reassembled_len, ip_packet, ip_packet_len));
-    }
-
-    if(parsed.type == RohcPacketType::Uncompressed && packet_len > 1 &&
-       is_uncompressed_ip_payload(packet + 1, packet_len - 1))
-    {
-        const size_t original_len = packet_len - 1;
-        if(reconstruction_len < original_len)
-            return fail_with_feedback(cid);
-
-        std::memcpy(reconstruction_packet, packet + 1, original_len);
-        reconstruction_len = original_len;
-        ctx->profile = Profile::Uncompressed;
-        ctx->mode = Mode::Uncompressed;
-        ctx->rohc_state = RohcState::DynamicEstablished;
-        ctx->tx_count++;
-        ctx->nack_count = 0;
-        decomp->impl.mode = ctx->mode;
-        return finish_decoding(verify_rohcoipsec_icv(0));
     }
 
     if(parsed.type == RohcPacketType::IR)
