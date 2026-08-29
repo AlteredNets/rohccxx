@@ -56,6 +56,34 @@ typedef enum
     ROHCCXX_DIRECTION_DOWNLINK = 1
 } rohccxx_direction_t;
 
+#define ROHCCXX_FEEDBACK_API_V1 1U
+#define ROHCCXX_FEEDBACK_RAW_MAX 260U
+
+typedef enum
+{
+    ROHCCXX_FEEDBACK_ACCEPTED = 0,
+    ROHCCXX_FEEDBACK_STALE = 1,
+    ROHCCXX_FEEDBACK_MALFORMED = 2,
+    ROHCCXX_FEEDBACK_UNCORRELATED = 3,
+    ROHCCXX_FEEDBACK_UNSUPPORTED = 4
+} rohccxx_feedback_status_t;
+
+typedef struct
+{
+    uint32_t api_version;
+    size_t struct_size;
+    rohccxx_direction_t channel;
+    uint32_t cid;
+    uint8_t feedback_type;
+    uint16_t acknowledgment_number;
+    uint8_t acknowledgment_bits;
+    int acknowledgment_valid;
+    int crc_present;
+    int crc_valid;
+    size_t raw_len;
+    uint8_t raw[ROHCCXX_FEEDBACK_RAW_MAX];
+} rohccxx_feedback_v1_t;
+
 typedef enum
 {
     ROHCCXX_MODE_U = 0,
@@ -333,6 +361,18 @@ rohc_comp_deliver_feedback_packet(struct rohc_comp* comp,
                                   const uint8_t* packet,
                                   size_t packet_len);
 
+/* Correlates standards feedback with this compressor's transmitted MSN history. */
+ROHCCXX_API rohccxx_feedback_status_t
+rohc_comp_deliver_feedback_v1(struct rohc_comp* comp,
+                              const rohccxx_feedback_v1_t* feedback);
+
+/* Parses one complete standards feedback packet without applying it. */
+ROHCCXX_API rohccxx_feedback_status_t
+rohc_feedback_parse_v1(rohccxx_direction_t channel,
+                       const uint8_t* packet,
+                       size_t packet_len,
+                       rohccxx_feedback_v1_t* feedback);
+
 ROHCCXX_API int
 rohc_comp_set_mode(struct rohc_comp* comp,
                    rohccxx_mode_t mode);
@@ -431,6 +471,11 @@ ROHCCXX_API int
 rohc_decomp_get_feedback(const struct rohc_decomp* decomp,
                           uint32_t* cid,
                           uint8_t* feedback_type);
+
+/* Retrieves complete, standards-compliant feedback and its parsed identity. */
+ROHCCXX_API rohccxx_feedback_status_t
+rohc_decomp_get_feedback_v1(const struct rohc_decomp* decomp,
+                            rohccxx_feedback_v1_t* feedback);
 
 ROHCCXX_API struct rohc_decomp*
 rohc_decomp_new2(uint32_t max_cid,

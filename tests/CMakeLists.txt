@@ -10,6 +10,7 @@ add_executable(stub_test dummy.cpp)
 add_executable(unit_tests 
     unit/test_packet_parse.cpp
     unit/test_pt0_dispatch.cpp
+    unit/test_feedback_correlation.cpp
     unit/test_rfc5225_grammar.cpp
     unit/test_encoding_methods.cpp
     unit/test_version.cpp
