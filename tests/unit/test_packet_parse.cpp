@@ -741,6 +741,49 @@ TEST_CASE("ROHC uncompressed profile preserves Add-CID context isolation")
     rohc_decomp_free(decomp);
 }
 
+TEST_CASE("Add-CID uncompressed IPv6 supersedes a prior UDP context")
+{
+    // Minimized from the two-record CID-11 live-lab reproducer. The first
+    // record establishes a UDP context; the second is a standards-compatible
+    // Add-CID/uncompressed IPv6 fallback for the same CID.
+    const std::uint8_t udp_fo[] = {
+        0xeb, 0x7a, 0xbc, 0x60, 0xae, 0xfb, 0x05, 0x52, 0x37, 0x49,
+        0x44, 0x00, 0x02, 0x01, 0x04, 0x00, 0x0a, 0x00, 0x12, 0x50,
+        0x62, 0x47, 0xe2, 0x87, 0xe3, 0x2b, 0x4a, 0x24, 0xfb, 0x0a,
+        0xd6, 0x79, 0xe3, 0x5b, 0x3d, 0xce, 0xad, 0x11, 0x4d,
+    };
+    const std::uint8_t uncompressed_ipv6[] = {
+        0xeb, 0x00, 0x60, 0x0c, 0xab, 0x83, 0x00, 0x28, 0x11, 0x40,
+        0xfd, 0x77, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xfd, 0x77, 0x00, 0x01,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x01, 0x8b, 0xa7, 0x4e, 0x24, 0x00, 0x28, 0xe0, 0xa3,
+        0x52, 0x37, 0x49, 0x44, 0x00, 0x02, 0x01, 0x06, 0x00, 0x00,
+        0x00, 0x00, 0x54, 0x8e, 0x51, 0xf0, 0x86, 0x6f, 0xe0, 0x00,
+        0xcb, 0xf2, 0x95, 0xfe, 0x03, 0xe4, 0xd7, 0xc0, 0xaf, 0x5d,
+        0xb3, 0xd3,
+    };
+
+    rohc_decomp* decomp = rohc_decomp_new2(15, ROHCCXX_DIRECTION_UPLINK);
+    REQUIRE(decomp != nullptr);
+    std::array<std::uint8_t, 128> output{};
+    std::size_t output_len = output.size();
+    REQUIRE(rohc_decompress4(decomp, udp_fo, sizeof(udp_fo),
+                             output.data(), &output_len) == 0);
+
+    output.fill(0xa5);
+    output_len = output.size() - 8;
+    REQUIRE(rohc_decompress4(decomp, uncompressed_ipv6, sizeof(uncompressed_ipv6),
+                             output.data() + 4, &output_len) == 0);
+    REQUIRE(output_len == sizeof(uncompressed_ipv6) - 2);
+    REQUIRE(std::memcmp(output.data() + 4, uncompressed_ipv6 + 2, output_len) == 0);
+    REQUIRE(std::all_of(output.begin(), output.begin() + 4,
+                        [](std::uint8_t value) { return value == 0xa5; }));
+    REQUIRE(std::all_of(output.begin() + 4 + output_len, output.end(),
+                        [](std::uint8_t value) { return value == 0xa5; }));
+    rohc_decomp_free(decomp);
+}
+
 TEST_CASE("ROHC compressor preserves nonzero small CID on uncompressed fallback")
 {
     rohc_comp* comp = rohc_comp_new2(15, ROHCCXX_DIRECTION_UPLINK);
