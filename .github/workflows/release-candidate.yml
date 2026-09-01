@@ -22,11 +22,11 @@ concurrency:
 
 jobs:
   build-release-candidate:
-    name: Build and validate v0.6.1
+    name: Build and validate v0.7.0
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      EXPECTED_VERSION: "0.6.1"
+      EXPECTED_VERSION: "0.7.0"
       EXPECTED_ROHC_LIB_COMMIT: "70589cc2b8650f82453815c84ba41b0ab80a52a0"
       CC: gcc
       CXX: g++
@@ -199,9 +199,9 @@ jobs:
             "${build_dir}/generated/include/rohccxx/version.h"
           grep -Fq "#define ROHCCXX_VERSION_MAJOR 0" \
             "${build_dir}/generated/include/rohccxx/version.h"
-          grep -Fq "#define ROHCCXX_VERSION_MINOR 6" \
+          grep -Fq "#define ROHCCXX_VERSION_MINOR 7" \
             "${build_dir}/generated/include/rohccxx/version.h"
-          grep -Fq "#define ROHCCXX_VERSION_PATCH 1" \
+          grep -Fq "#define ROHCCXX_VERSION_PATCH 0" \
             "${build_dir}/generated/include/rohccxx/version.h"
 
           printf 'build_dir=%s\n' "${build_dir}" >> "${GITHUB_OUTPUT}"
@@ -215,7 +215,7 @@ jobs:
           test_log="${{ steps.artifact-paths.outputs.rc_root }}/ctest.log"
 
           cmake --build "${build_dir}" --parallel
-          test "$(ctest --test-dir "${build_dir}" -N | sed -n 's/^Total Tests: //p')" -eq 246
+          test "$(ctest --test-dir "${build_dir}" -N | sed -n 's/^Total Tests: //p')" -eq 247
           ctest --test-dir "${build_dir}" --output-on-failure 2>&1 | tee "${test_log}"
 
           registered="$(grep -Eo '[0-9]+ tests failed out of [0-9]+' "${test_log}" | tail -1 | awk '{print $6}')"
@@ -223,7 +223,7 @@ jobs:
           passed="$(grep -Ec 'Test +#[0-9]+:.* +Passed +' "${test_log}")"
           skipped="$(grep -Ec '\*\*\*Skipped' "${test_log}")"
 
-          test "${registered}" -eq 246
+          test "${registered}" -eq 247
           test "${passed}" -eq 243
           test "${failed}" -eq 0
           test "${skipped}" -eq 3
@@ -359,7 +359,7 @@ jobs:
 
           int main(void)
           {
-              if(strcmp(rohccxx_version_string(), "0.6.1") != 0 ||
+              if(strcmp(rohccxx_version_string(), "0.7.0") != 0 ||
                  rohccxx_version_major() != 0 ||
                  rohccxx_version_minor() != 6 ||
                  rohccxx_version_patch() != 1)
@@ -396,7 +396,7 @@ jobs:
           cat > "${cmake_source}/CMakeLists.txt" <<'EOF'
           cmake_minimum_required(VERSION 3.16)
           project(rohccxx_consumer LANGUAGES C CXX)
-          find_package(rohccxx 0.6.1 CONFIG REQUIRED)
+          find_package(rohccxx 0.7.0 CONFIG REQUIRED)
           add_executable(consumer_shared consumer.c)
           target_link_libraries(consumer_shared PRIVATE rohccxx::rohccxx)
           set_property(TARGET consumer_shared PROPERTY LINKER_LANGUAGE CXX)
@@ -509,11 +509,11 @@ jobs:
       - name: Upload release candidate bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: rohccxx-0.6.1-release-candidate-${{ github.sha }}
+          name: rohccxx-0.7.0-release-candidate-${{ github.sha }}
           path: |
-            ${{ steps.artifact-paths.outputs.artifact_dir }}/rohccxx-0.6.1-source-with-submodules.tar.gz
-            ${{ steps.artifact-paths.outputs.artifact_dir }}/librohccxx-0.6.1.deb
-            ${{ steps.artifact-paths.outputs.artifact_dir }}/rohccxx-0.6.1-buildinfo.txt
+            ${{ steps.artifact-paths.outputs.artifact_dir }}/rohccxx-0.7.0-source-with-submodules.tar.gz
+            ${{ steps.artifact-paths.outputs.artifact_dir }}/librohccxx-0.7.0.deb
+            ${{ steps.artifact-paths.outputs.artifact_dir }}/rohccxx-0.7.0-buildinfo.txt
             ${{ steps.artifact-paths.outputs.artifact_dir }}/SHA256SUMS
           if-no-files-found: error
           retention-days: 14
