@@ -361,8 +361,8 @@ jobs:
           {
               if(strcmp(rohccxx_version_string(), "0.7.0") != 0 ||
                  rohccxx_version_major() != 0 ||
-                 rohccxx_version_minor() != 6 ||
-                 rohccxx_version_patch() != 1)
+                 rohccxx_version_minor() != 7 ||
+                 rohccxx_version_patch() != 0)
               {
                   return 1;
               }
