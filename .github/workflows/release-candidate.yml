@@ -224,7 +224,7 @@ jobs:
           skipped="$(grep -Ec '\*\*\*Skipped' "${test_log}")"
 
           test "${registered}" -eq 247
-          test "${passed}" -eq 243
+          test "${passed}" -eq 244
           test "${failed}" -eq 0
           test "${skipped}" -eq 3
 
