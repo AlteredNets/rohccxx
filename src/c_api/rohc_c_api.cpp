@@ -522,6 +522,36 @@ static bool ip_pt0_reconstructable(const rohccxx::Context& previous,
            current.ipv4_id == static_cast<std::uint16_t>(previous.ipv4_id + 1U);
 }
 
+static std::uint16_t byte_swap_u16(std::uint16_t value)
+{
+    return static_cast<std::uint16_t>((value >> 8U) | (value << 8U));
+}
+
+static bool ip_pt1_seq_id_reconstructable(const rohccxx::Context& previous,
+                                          const rohccxx::Context& current,
+                                          std::uint16_t& encoded_ip_id)
+{
+    encoded_ip_id = 0U;
+    if(!ip_private_fo_reconstructable(previous, current) ||
+       current.msn != static_cast<std::uint16_t>(previous.msn + 1U) ||
+       previous.ipv4_id_behavior > 1U || current.ipv4_id == 0U)
+        return false;
+
+    const bool swapped = previous.ipv4_id_behavior == 1U;
+    const std::uint16_t reference = swapped ? byte_swap_u16(previous.ipv4_id) : previous.ipv4_id;
+    const std::uint16_t value = swapped ? byte_swap_u16(current.ipv4_id) : current.ipv4_id;
+    std::uint32_t decoded = 0U;
+    const std::uint16_t lsb = static_cast<std::uint16_t>(
+        rohccxx::encoding::encode_field_lsb(rohccxx::encoding::EncodedField::IpId,
+                                            value, 4U));
+    if(!rohccxx::encoding::decode_field_lsb_with_p(
+           rohccxx::encoding::EncodedField::IpId, lsb, reference, 4U, 0U, decoded) ||
+       static_cast<std::uint16_t>(decoded) != value || value == reference)
+        return false;
+    encoded_ip_id = value;
+    return true;
+}
+
 static bool pt0_private_fo_ambiguous(std::uint8_t pt0,
                                      const std::uint8_t* payload,
                                      size_t payload_len)
@@ -2918,6 +2948,36 @@ rohc_compress4(struct rohc_comp* comp,
                     *rohc_packet_len = formal_len;
                 }
             }
+            else if(!ctx->large_cid && cid <= 0x0fU && ctx->ip_version == 4U)
+            {
+                std::uint16_t encoded_ip_id = 0U;
+                if(ip_pt1_seq_id_reconstructable(previous, *ctx, encoded_ip_id))
+                {
+                    ctx->ipv4_id_behavior = previous.ipv4_id_behavior;
+                    ctx->ipv4_id_sequential = true;
+                    const rfc5225::FormalCoFields fields{ctx->msn, encoded_ip_id, 0, false};
+                    const rfc5225::FormalCoCrcInput crc_input{ip_packet, ip_view.header_len};
+                    std::array<std::uint8_t, 3> formal{};
+                    size_t formal_len = formal.size();
+                    if(!rfc5225::emit_formal_co(
+                           formal.data(), &formal_len, ctx->profile,
+                           rfc5225::FormalCoVariant::Pt1SeqId, cid, false, fields, crc_input) ||
+                       *rohc_packet_len < formal_len)
+                        return -1;
+                    std::memcpy(rohc_packet, formal.data(), formal_len);
+                    *rohc_packet_len = formal_len;
+                }
+                else if(ip_private_fo_reconstructable(previous, *ctx))
+                {
+                    if(!emit_ip_fo(rohc_packet, rohc_packet_len, *ctx) ||
+                       !prepend_small_cid(rohc_packet, rohc_packet_len, out_capacity, cid))
+                        return -1;
+                }
+                else if(!emit_ir_ip(rohc_packet, rohc_packet_len, *ctx))
+                {
+                    return -1;
+                }
+            }
             else
             {
                 if(ctx->ip_version != 4 || ip_private_fo_reconstructable(previous, *ctx))
@@ -3476,8 +3536,39 @@ rohc_decompress4(struct rohc_decomp* decomp,
     rohc_packet += feedback_prefix_len;
     rohc_packet_len -= feedback_prefix_len;
 
+    auto parse_live_packet = [&](const uint8_t* wire, size_t wire_len,
+                                 ParsedRohcPacket& result) -> bool
+    {
+        if(parse_rohc_packet(wire, wire_len, result, decomp->impl.large_cid_space))
+            return true;
+        if(decomp->impl.large_cid_space || !wire || wire_len == 0U)
+            return false;
+        size_t base = 0U;
+        std::uint32_t candidate_cid = 0U;
+        bool has_add_cid = false;
+        if((wire[0] & 0xf0U) == 0xe0U)
+        {
+            if(wire_len < 2U)
+                return false;
+            has_add_cid = true;
+            candidate_cid = wire[0] & 0x0fU;
+            base = 1U;
+        }
+        if((wire[base] & 0xe0U) != 0xa0U)
+            return false;
+        result = {};
+        result.wire = wire;
+        result.wire_len = wire_len;
+        result.packet = wire + base;
+        result.packet_len = wire_len - base;
+        result.has_add_cid = has_add_cid;
+        result.cid = candidate_cid;
+        result.type = RohcPacketType::Unknown;
+        return true;
+    };
+
     ParsedRohcPacket parsed{};
-    if(!parse_rohc_packet(rohc_packet, rohc_packet_len, parsed, decomp->impl.large_cid_space))
+    if(!parse_live_packet(rohc_packet, rohc_packet_len, parsed))
         return fail_with_feedback(0);
 
     uint8_t received_icv[rohccxx::rohcoipsec::sha256_digest_len] = {};
@@ -3490,7 +3581,7 @@ rohc_decompress4(struct rohc_decomp* decomp,
         std::memcpy(received_icv, rohc_packet + rohc_packet_len - received_icv_len, received_icv_len);
         rohc_packet_len -= received_icv_len;
         parsed = ParsedRohcPacket{};
-        if(!parse_rohc_packet(rohc_packet, rohc_packet_len, parsed, decomp->impl.large_cid_space))
+        if(!parse_live_packet(rohc_packet, rohc_packet_len, parsed))
             return fail_with_feedback(0);
     }
 
@@ -3770,6 +3861,76 @@ rohc_decompress4(struct rohc_decomp* decomp,
         if(!private_valid)
             return finish_decoding(fail_with_feedback(cid));
         // A valid private packet continues through the unchanged decoder below.
+    }
+
+    // IP-only pt_1_seq_id carries a six-bit MSN and a four-bit sequential
+    // IPv4-ID. Decode both through the shared W-LSB implementation and
+    // authenticate a fixed-header reconstruction before committing any state.
+    const bool fixed_ip_pt1_candidate =
+        packet_len >= 2U && (packet[0] & 0xe0U) == 0xa0U &&
+        context_before_decode.profile == Profile::IP &&
+        context_before_decode.rohc_state == RohcState::DynamicEstablished &&
+        context_before_decode.ip_version == 4U &&
+        context_before_decode.ipv4_options_len == 0U &&
+        context_before_decode.ipv4_id_behavior <= 1U &&
+        !decomp->impl.large_cid_space && !context_before_decode.large_cid &&
+        cid <= 0x0fU && parsed.has_add_cid == (cid != 0U);
+    if(fixed_ip_pt1_candidate)
+    {
+        Context formal_context = context_before_decode;
+        rfc5225::FormalCoPacket formal{};
+        bool formal_valid = rfc5225::read_formal_co_base(
+            packet, 2U, Profile::IP, rfc5225::FormalCoVariant::Pt1SeqId, formal);
+        std::array<std::uint8_t, 20> formal_header{};
+        const uint8_t* formal_payload = nullptr;
+        size_t formal_payload_len = 0U;
+        if(formal_valid)
+        {
+            std::uint32_t decoded_msn = 0U;
+            std::uint32_t decoded_id = 0U;
+            const bool swapped = formal_context.ipv4_id_behavior == 1U;
+            const std::uint16_t reference_id = swapped
+                ? byte_swap_u16(formal_context.ipv4_id) : formal_context.ipv4_id;
+            formal_valid = encoding::decode_field_lsb_with_p(
+                    encoding::EncodedField::RtpSequence, formal.msn,
+                    formal_context.msn, 6U, 0U, decoded_msn) &&
+                static_cast<std::uint16_t>(decoded_msn) ==
+                    static_cast<std::uint16_t>(formal_context.msn + 1U) &&
+                encoding::decode_field_lsb_with_p(
+                    encoding::EncodedField::IpId, formal.ip_id,
+                    reference_id, 4U, 0U, decoded_id) &&
+                static_cast<std::uint16_t>(decoded_id) != reference_id;
+            if(formal_valid)
+            {
+                formal_context.msn = static_cast<std::uint16_t>(decoded_msn);
+                const auto decoded_id16 = static_cast<std::uint16_t>(decoded_id);
+                formal_context.ipv4_id = swapped ? byte_swap_u16(decoded_id16) : decoded_id16;
+                formal_context.ipv4_id_sequential = true;
+                formal_valid = formal_context.ipv4_id != 0U &&
+                    detail::payload_after_header(packet, packet_len, 2U,
+                                                 formal_payload, formal_payload_len) &&
+                    build_fixed_ip_ipv4_header(formal_header, formal_context,
+                                               formal_payload_len) &&
+                    utils::crc3(formal_header.data(), formal_header.size()) ==
+                        formal.header_crc;
+            }
+        }
+        if(!formal_valid ||
+           formal_payload_len > std::numeric_limits<size_t>::max() - formal_header.size() ||
+           reconstruction_len < formal_header.size() + formal_payload_len)
+        {
+            return finish_decoding(fail_with_feedback(cid));
+        }
+
+        const size_t final_len = formal_header.size() + formal_payload_len;
+        *ctx = formal_context;
+        decomp->impl.mode = formal_context.mode;
+        std::memcpy(reconstruction_packet, formal_header.data(), formal_header.size());
+        if(formal_payload_len > 0U)
+            std::memcpy(reconstruction_packet + formal_header.size(), formal_payload,
+                        formal_payload_len);
+        reconstruction_len = final_len;
+        return finish_decoding(verify_rohcoipsec_icv(0));
     }
 
     // The unauthenticated fixed-header ESP PT-0 path authenticates a temporary
