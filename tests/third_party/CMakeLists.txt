@@ -5,6 +5,10 @@ set(ROHC_LIB_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/rohc-lib)
 set(ROHC_LIB_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/rohc-lib-build)
 set(ROHC_LIB_ARCHIVE ${ROHC_LIB_BUILD_DIR}/src/.libs/librohc.a)
 set(ROHC_LIB_ARCHIVE ${ROHC_LIB_ARCHIVE} PARENT_SCOPE)
+find_program(ROHC_LIB_MAKE_EXECUTABLE NAMES gmake make)
+if(NOT ROHC_LIB_MAKE_EXECUTABLE)
+    message(FATAL_ERROR "Building the bundled rohc-lib interoperability oracle requires make or gmake")
+endif()
 
 set(ROHC_LIB_INCLUDE_DIR
     ${ROHC_LIB_BUILD_DIR}/src/common
@@ -23,7 +27,7 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${ROHC_LIB_SOURCE_DIR} ${ROHC_LIB_BUILD_DIR}
     COMMAND ${CMAKE_COMMAND} -E chdir ${ROHC_LIB_BUILD_DIR} autoreconf -fi
     COMMAND ${CMAKE_COMMAND} -E chdir ${ROHC_LIB_BUILD_DIR} ./configure --disable-shared --enable-static --disable-fail-on-warning
-    COMMAND ${CMAKE_COMMAND} -E chdir ${ROHC_LIB_BUILD_DIR} ${CMAKE_MAKE_PROGRAM} -C src all
+    COMMAND ${CMAKE_COMMAND} -E chdir ${ROHC_LIB_BUILD_DIR} ${ROHC_LIB_MAKE_EXECUTABLE} -C src all
     DEPENDS ${ROHC_LIB_SOURCE_DIR}/configure.ac
     COMMENT [[Building rohc-lib static library for interop tests]]
     VERBATIM
