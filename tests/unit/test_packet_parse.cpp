@@ -1333,6 +1333,29 @@ TEST_CASE("ROHC RFC 4362 NHP reconstructs RTP packets through assisting-layer AP
 
     std::uint8_t nhp[1] = {0xAA};
     std::size_t nhp_len = sizeof(nhp);
+    constexpr std::size_t reconstruction_fields[] = {
+        1U, 5U, 6U, 8U, 15U, 19U, 21U, 23U, 27U, 29U, 31U, 35U, 39U
+    };
+    for(const auto offset : reconstruction_fields)
+    {
+        CAPTURE(offset);
+        auto changed = std::array<std::uint8_t, sizeof(ip3)>{};
+        std::memcpy(changed.data(), ip3, sizeof(ip3));
+        changed[offset] ^= 0x01U;
+        if(offset < 20U)
+        {
+            changed[10] = 0;
+            changed[11] = 0;
+            const auto changed_checksum = ipv4_checksum(changed.data(), 20);
+            changed[10] = static_cast<std::uint8_t>(changed_checksum >> 8U);
+            changed[11] = static_cast<std::uint8_t>(changed_checksum);
+        }
+        nhp_len = sizeof(nhp);
+        REQUIRE(rohc_comp_rfc4362_emit_nhp(comp, changed.data(), changed.size(),
+                                           nhp, &nhp_len) != 0);
+    }
+
+    nhp_len = sizeof(nhp);
     REQUIRE(rohc_comp_rfc4362_emit_nhp(comp, ip3, sizeof(ip3), nhp, &nhp_len) == 0);
     REQUIRE(nhp_len == 0);
 
@@ -1344,6 +1367,7 @@ TEST_CASE("ROHC RFC 4362 NHP reconstructs RTP packets through assisting-layer AP
     REQUIRE(out[32] == ip3[32]);
     REQUIRE(out[35] == ip3[35]);
     REQUIRE(std::memcmp(out + 40, ip3 + 40, sizeof(ip3) - 40) == 0);
+    REQUIRE(std::memcmp(out, ip3, sizeof(ip3)) == 0);
 
     rohc_decomp_free(decomp);
     rohc_comp_free(comp);

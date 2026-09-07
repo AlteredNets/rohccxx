@@ -2310,6 +2310,19 @@ rohc_comp_rfc4362_emit_nhp(struct rohc_comp* c,
         return -1;
     if(ctx->mode == rohccxx::Mode::Reliable && !ctx->dynamic_acked)
         return -1;
+    constexpr size_t fixed_header_len = 40U;
+    if(ip_packet_len < fixed_header_len)
+        return -1;
+    rohccxx::Context predicted = *ctx;
+    ++predicted.rtp.last_seq;
+    if(predicted.ip_version == 4 && predicted.ipv4_id_sequential)
+        ++predicted.ipv4_id;
+    predicted.rtp.last_ts += predicted.rtp.ts_stride != 0 ? predicted.rtp.ts_stride : 160U;
+    std::array<std::uint8_t, fixed_header_len> expected_header{};
+    if(!build_fixed_rtp_ipv4_header(expected_header, predicted,
+                                    ip_packet_len - fixed_header_len) ||
+       std::memcmp(expected_header.data(), ip_packet, expected_header.size()) != 0)
+        return -1;
     uint8_t scratch[rohccxx_internal::segment_buffer_max] = {};
     size_t scratch_len = sizeof(scratch);
     c->impl.suppress_segmentation = true;
