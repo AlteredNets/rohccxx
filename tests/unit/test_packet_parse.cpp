@@ -743,15 +743,23 @@ TEST_CASE("ROHC uncompressed profile preserves Add-CID context isolation")
 
 TEST_CASE("Add-CID uncompressed IPv6 supersedes a prior UDP context")
 {
-    // Minimized from the two-record CID-11 live-lab reproducer. The first
-    // record establishes a UDP context; the second is a standards-compatible
-    // Add-CID/uncompressed IPv6 fallback for the same CID.
-    const std::uint8_t udp_fo[] = {
-        0xeb, 0x7a, 0xbc, 0x60, 0xae, 0xfb, 0x05, 0x52, 0x37, 0x49,
-        0x44, 0x00, 0x02, 0x01, 0x04, 0x00, 0x0a, 0x00, 0x12, 0x50,
-        0x62, 0x47, 0xe2, 0x87, 0xe3, 0x2b, 0x4a, 0x24, 0xfb, 0x0a,
-        0xd6, 0x79, 0xe3, 0x5b, 0x3d, 0xce, 0xad, 0x11, 0x4d,
-    };
+    // Minimized from the two-record CID-11 live-lab reproducer. Establish the
+    // prior UDP context with a complete IR before the standards-compatible
+    // Add-CID/uncompressed IPv6 fallback supersedes that CID.
+    rohccxx::Context udp_context{};
+    udp_context.cid = 11U;
+    udp_context.profile = rohccxx::Profile::UDP;
+    udp_context.mode = rohccxx::Mode::Optimistic;
+    udp_context.ipv4_ttl = 64U;
+    udp_context.ipv4_protocol = 17U;
+    udp_context.ipv4_saddr = 0xc0000201U;
+    udp_context.ipv4_daddr = 0xc6336402U;
+    udp_context.udp_sport = 0x1234U;
+    udp_context.udp_dport = 0x5678U;
+    udp_context.udp_length_or_coverage = 8U;
+    std::array<std::uint8_t, 128> udp_ir{};
+    std::size_t udp_ir_len = udp_ir.size();
+    REQUIRE(rohccxx::emit_ir_udp(udp_ir.data(), &udp_ir_len, udp_context));
     const std::uint8_t uncompressed_ipv6[] = {
         0xeb, 0x00, 0x60, 0x0c, 0xab, 0x83, 0x00, 0x28, 0x11, 0x40,
         0xfd, 0x77, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -768,7 +776,7 @@ TEST_CASE("Add-CID uncompressed IPv6 supersedes a prior UDP context")
     REQUIRE(decomp != nullptr);
     std::array<std::uint8_t, 128> output{};
     std::size_t output_len = output.size();
-    REQUIRE(rohc_decompress4(decomp, udp_fo, sizeof(udp_fo),
+    REQUIRE(rohc_decompress4(decomp, udp_ir.data(), udp_ir_len,
                              output.data(), &output_len) == 0);
 
     output.fill(0xa5);

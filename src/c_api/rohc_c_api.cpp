@@ -3658,6 +3658,15 @@ rohc_decompress4(struct rohc_decomp* decomp,
     if (!ctx)
         return fail_with_feedback(cid);
     const Context context_before_decode = *ctx;
+
+    // Private FO packets carry dynamic deltas only. They require an existing
+    // matching profile context, but the check must happen after formal PT-0
+    // disambiguation because the private marker bytes overlap valid PT-0.
+    const auto private_fo_context_ready = [&](Profile profile) -> bool
+    {
+        return context_before_decode.rohc_state != RohcState::NoContext &&
+               context_before_decode.profile == profile;
+    };
     const Mode decompressor_mode_before = decomp->impl.mode;
     ctx->cid = cid;
     ctx->large_cid = decomp->impl.large_cid_space;
@@ -4604,38 +4613,38 @@ rohc_decompress4(struct rohc_decomp* decomp,
     }
     else if(parsed.type == RohcPacketType::FO_UDP)
     {
-        const std::uint16_t previous_msn = ctx->msn;
-        ok = decode_udp_fo(packet, packet_len, *ctx, &header_len);
-        if(ok)
-            ctx->msn = static_cast<std::uint16_t>(previous_msn + 1U);
-        if (ok && ctx->profile != Profile::UDP)
-            ok = false;
+        if(private_fo_context_ready(Profile::UDP))
+        {
+            const std::uint16_t previous_msn = ctx->msn;
+            ok = decode_udp_fo(packet, packet_len, *ctx, &header_len);
+            if(ok)
+                ctx->msn = static_cast<std::uint16_t>(previous_msn + 1U);
+        }
     }
     else if(parsed.type == RohcPacketType::FO_IP)
     {
-        const std::uint16_t previous_msn = ctx->msn;
-        const std::uint16_t previous_ipv4_id = ctx->ipv4_id;
-        const bool had_ipv4_context = ctx->ip_version == 4;
-        ok = decode_ip_fo(packet, packet_len, *ctx, &header_len);
-        if(ok)
+        if(private_fo_context_ready(Profile::IP))
         {
-            ctx->msn = static_cast<std::uint16_t>(previous_msn + 1U);
-            update_ipv4_id_behavior(*ctx, had_ipv4_context, previous_ipv4_id);
+            const std::uint16_t previous_msn = ctx->msn;
+            const std::uint16_t previous_ipv4_id = ctx->ipv4_id;
+            const bool had_ipv4_context = ctx->ip_version == 4;
+            ok = decode_ip_fo(packet, packet_len, *ctx, &header_len);
+            if(ok)
+            {
+                ctx->msn = static_cast<std::uint16_t>(previous_msn + 1U);
+                update_ipv4_id_behavior(*ctx, had_ipv4_context, previous_ipv4_id);
+            }
         }
-        if (ok && ctx->profile != Profile::IP)
-            ok = false;
     }
     else if(parsed.type == RohcPacketType::FO_ESP)
     {
-        ok = decode_esp_fo(packet, packet_len, *ctx, &header_len);
-        if (ok && ctx->profile != Profile::ESP)
-            ok = false;
+        if(private_fo_context_ready(Profile::ESP))
+            ok = decode_esp_fo(packet, packet_len, *ctx, &header_len);
     }
     else if(parsed.type == RohcPacketType::FO_UDP_Lite)
     {
-        ok = decode_udp_lite_fo(packet, packet_len, *ctx, &header_len);
-        if (ok && ctx->profile != Profile::UDP_Lite)
-            ok = false;
+        if(private_fo_context_ready(Profile::UDP_Lite))
+            ok = decode_udp_lite_fo(packet, packet_len, *ctx, &header_len);
     }
     else if(parsed.type == RohcPacketType::FO_RTP)
     {
