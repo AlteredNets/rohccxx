@@ -18,6 +18,7 @@ enum class RohcPacketType : uint8_t
     Uncompressed = 0x00,
     IR           = 0xFC,
     IR_DYN       = 0xF8,
+    FormalCO     = 0x80,
     FO_RTP       = 0x01,
     FO_UDP       = 0x7A,
     FO_IP        = 0x79,
@@ -92,6 +93,8 @@ inline RohcPacketType detect_packet_type(uint8_t b)
         return RohcPacketType::FO_ESP;
     if(b == 0x77)
         return RohcPacketType::FO_UDP_Lite;
+    if((b & 0xE0) == 0xA0)
+        return RohcPacketType::FormalCO;
     if((b & 0x80) == 0x00)
         return RohcPacketType::FO_RTP;
     return RohcPacketType::Unknown;
