@@ -50,6 +50,29 @@ void put32(std::uint8_t* out, std::uint32_t value)
     out[3] = static_cast<std::uint8_t>(value);
 }
 
+std::vector<std::uint8_t> hex_bytes(const char* text)
+{
+    const auto size = std::strlen(text);
+    REQUIRE(size % 2U == 0U);
+    std::vector<std::uint8_t> bytes(size / 2U);
+    auto nibble = [](char value) -> int
+    {
+        if(value >= '0' && value <= '9') return value - '0';
+        if(value >= 'a' && value <= 'f') return value - 'a' + 10;
+        if(value >= 'A' && value <= 'F') return value - 'A' + 10;
+        return -1;
+    };
+    for(std::size_t index = 0U; index < bytes.size(); ++index)
+    {
+        const int high = nibble(text[index * 2U]);
+        const int low = nibble(text[index * 2U + 1U]);
+        REQUIRE(high >= 0);
+        REQUIRE(low >= 0);
+        bytes[index] = static_cast<std::uint8_t>((high << 4U) | low);
+    }
+    return bytes;
+}
+
 std::vector<std::uint8_t> make_rtp_packet(std::uint16_t sequence,
                                           std::uint32_t timestamp,
                                           std::uint16_t ipv4_id,
@@ -852,6 +875,102 @@ TEST_CASE("ESP PT-0 requires safely reconstructable fields and progression")
             require_guarded_decode(decomp.get(), rohc, packet);
             if(ordinal == 2U) REQUIRE(rohc.size() - 160U == 1U);
         }
+    }
+}
+
+TEST_CASE("public decoder accepts rohc-lib ESP PT-1 seq-ID across IPv4 ID wrap",
+          "[issue36]")
+{
+    struct OraclePacket
+    {
+        const char* expected;
+        const char* compressed;
+    };
+    static constexpr std::array<OraclePacket, 19> packets{{
+        {"450f0040ffee0000b53226300a22be010a390d0210b6da7dfc87314180000d160c11b98237eaf3514370df27b91d26b9cabf67a5110f5ef1a4c873dacf213df3", "fd039e40320a22be010a390d0210b6da7d000fb5ffeefc8731410080000d160c11b98237eaf3514370df27b91d26b9cabf67a5110f5ef1a4c873dacf213df3"},
+        {"450f0040ffef0000b532262f0a22be010a390d0210b6da7dfc87314280000d170c11ba2237eaf3513bb945af221d0c8cc997544cd79fb633245a7cb751911d38", "fd031e40320a22be010a390d0210b6da7d000fb5ffeffc8731420080000d170c11ba2237eaf3513bb945af221d0c8cc997544cd79fb633245a7cb751911d38"},
+        {"450f0040fff00000b532262e0a22be010a390d0210b6da7dfc87314380000d180c11bac237eaf351125cf2b636644e4d31ff666e81bd07dd8788b57f516d3ee2", "fd037d40320a22be010a390d0210b6da7d000fb5fff0fc8731430080000d180c11bac237eaf351125cf2b636644e4d31ff666e81bd07dd8788b57f516d3ee2"},
+        {"450f0040fff10000b532262d0a22be010a390d0210b6da7dfc87314480000d190c11bb6237eaf351e74e9bd10e2d66d3e5bb94f1dd6486e21bb769f49f39a4b4", "fd038840320a22be010a390d0210b6da7d000fb5fff1fc8731440080000d190c11bb6237eaf351e74e9bd10e2d66d3e5bb94f1dd6486e21bb769f49f39a4b4"},
+        {"450f0040fff20000b532262c0a22be010a390d0210b6da7dfc87314580000d1a0c11bc0237eaf351c5a78c63f9f2de7fb96ce1fb47cb239e43f1adc31bf55c9a", "2e80000d1a0c11bc0237eaf351c5a78c63f9f2de7fb96ce1fb47cb239e43f1adc31bf55c9a"},
+        {"450f0040fff30000b532262b0a22be010a390d0210b6da7dfc87314680000d1b0c11bca237eaf351ba76cb0dfc1460db35c464e1543d3eaedff4d03c82711b57", "3080000d1b0c11bca237eaf351ba76cb0dfc1460db35c464e1543d3eaedff4d03c82711b57"},
+        {"450f0040fff40000b532262a0a22be010a390d0210b6da7dfc87314780000d1c0c11bd4237eaf3513e03af7da529bf8e5e005ef9f896161497f26fa1db789e1c", "3d80000d1c0c11bd4237eaf3513e03af7da529bf8e5e005ef9f896161497f26fa1db789e1c"},
+        {"450f0040fff50000b53226290a22be010a390d0210b6da7dfc87314880000d1d0c11bde237eaf3515e465149e4376890002c1836be17fbd67a8d39132984e77d", "4380000d1d0c11bde237eaf3515e465149e4376890002c1836be17fbd67a8d39132984e77d"},
+        {"450f0040fff60000b53226280a22be010a390d0210b6da7dfc87314980000d1e0c11be8237eaf3513db0adb17219834a051c4c6d21b7cc6be53dc2e83af7da72", "4f80000d1e0c11be8237eaf3513db0adb17219834a051c4c6d21b7cc6be53dc2e83af7da72"},
+        {"450f0040fff70000b53226270a22be010a390d0210b6da7dfc87314a80000d1f0c11bf2237eaf351cb9509950091702c8fe42761d432ce54c03e313d7eea4ee0", "5080000d1f0c11bf2237eaf351cb9509950091702c8fe42761d432ce54c03e313d7eea4ee0"},
+        {"450f0040fff80000b53226260a22be010a390d0210b6da7dfc87314b80000d200c11bfc237eaf351f15f683841ec8177de7889a7ce69fc1620ec8a808d065850", "5f80000d200c11bfc237eaf351f15f683841ec8177de7889a7ce69fc1620ec8a808d065850"},
+        {"450f0040fff90000b53226250a22be010a390d0210b6da7dfc87314c80000d210c11c06237eaf3519e7aeeaee6632278f77bacb09189e3c297d50cd9d17b5208", "6580000d210c11c06237eaf3519e7aeeaee6632278f77bacb09189e3c297d50cd9d17b5208"},
+        {"450f0040fffa0000b53226240a22be010a390d0210b6da7dfc87314d80000d220c11c10237eaf351f7574812a99f20bb72c1c4d01cdc7f5dfaa2cd3cab14286c", "6980000d220c11c10237eaf351f7574812a99f20bb72c1c4d01cdc7f5dfaa2cd3cab14286c"},
+        {"450f0040fffb0000b53226230a22be010a390d0210b6da7dfc87314e80000d230c11c1a237eaf351e7e462d854188883a591455c60043263f5a1e864930da726", "7780000d230c11c1a237eaf351e7e462d854188883a591455c60043263f5a1e864930da726"},
+        {"450f0040fffc0000b53226220a22be010a390d0210b6da7dfc87314f80000d240c11c24237eaf351d8836954c43a616eb7fdf59963049a1155e5f2a67df6cbc8", "7a80000d240c11c24237eaf351d8836954c43a616eb7fdf59963049a1155e5f2a67df6cbc8"},
+        {"450f0040fffd0000b53226210a22be010a390d0210b6da7dfc87315080000d250c11c2e237eaf351611c52312e488ad9a3a970e0e2fbc0063c4390cfbf08f21c", "0180000d250c11c2e237eaf351611c52312e488ad9a3a970e0e2fbc0063c4390cfbf08f21c"},
+        {"450f0040fffe0000b53226200a22be010a390d0210b6da7dfc87315180000d260c11c38237eaf3513eaf59a9134990ed195e06ddd7bcbd64734b7cc3806fe54c", "0d80000d260c11c38237eaf3513eaf59a9134990ed195e06ddd7bcbd64734b7cc3806fe54c"},
+        {"450f0040ffff0000b532261f0a22be010a390d0210b6da7dfc87315280000d270c11c42237eaf351fddc6cce2fc8a5a9404ebd5a64728999f3e510628af6c595", "1480000d270c11c42237eaf351fddc6cce2fc8a5a9404ebd5a64728999f3e510628af6c595"},
+        {"450f004000000000b532261f0a22be010a390d0210b6da7dfc87315380000d280c11c4c237eaf35139971d3384e4d735b29898749b98bcafcfd509154495d918", "b93d80000d280c11c4c237eaf35139971d3384e4d735b29898749b98bcafcfd509154495d918"},
+    }};
+
+    auto wire_packet = [&](const char* compressed, std::uint32_t cid)
+    {
+        auto wire = hex_bytes(compressed);
+        if(cid != 0U)
+            wire.insert(wire.begin(), static_cast<std::uint8_t>(0xe0U | cid));
+        return wire;
+    };
+    auto decoder_after = [&](std::uint32_t cid, std::size_t decoded_count)
+    {
+        CompPtr compressor(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+        DecompPtr decoder(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+        REQUIRE(compressor);
+        REQUIRE(decoder);
+        for(std::size_t step = 0U; step < decoded_count; ++step)
+        {
+            CAPTURE(step);
+            const auto expected = hex_bytes(packets[step].expected);
+            const auto compressed = cid == 0U
+                ? wire_packet(packets[step].compressed, cid)
+                : compress_packet(compressor.get(), cid, expected);
+            require_guarded_decode(decoder.get(), compressed, expected);
+        }
+        return decoder;
+    };
+
+    const auto final_expected = hex_bytes(packets.back().expected);
+    for(const std::uint32_t cid : {0U, 1U, 15U})
+    {
+        CAPTURE(cid);
+        const auto final_compressed = wire_packet(packets.back().compressed, cid);
+
+        {
+            auto decoder = decoder_after(cid, packets.size());
+            require_failed_transaction(decoder.get(), final_compressed, 510U, true, cid);
+        }
+
+        {
+            auto decoder = decoder_after(cid, packets.size() - 1U);
+            auto corrupt_crc = final_compressed;
+            corrupt_crc[cid == 0U ? 0U : 1U] ^= 0x04U;
+            require_failed_transaction(decoder.get(), corrupt_crc, 510U, true, cid);
+            require_guarded_decode(decoder.get(), final_compressed, final_expected);
+        }
+
+        {
+            auto decoder = decoder_after(cid, packets.size() - 1U);
+            auto truncated = final_compressed;
+            truncated.pop_back();
+            truncated.resize(cid == 0U ? 1U : 2U);
+            require_failed_transaction(decoder.get(), truncated, 510U, true, cid);
+            require_guarded_decode(decoder.get(), final_compressed, final_expected);
+        }
+
+        {
+            auto decoder = decoder_after(cid, packets.size() - 1U);
+            require_failed_transaction(decoder.get(), final_compressed,
+                                       final_expected.size() - 1U, true, cid);
+            require_guarded_decode(decoder.get(), final_compressed, final_expected);
+        }
+
+        DecompPtr no_context(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+        REQUIRE(no_context);
+        require_failed_transaction(no_context.get(), final_compressed, 510U, true, cid);
     }
 }
 
