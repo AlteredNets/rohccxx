@@ -1100,3 +1100,35 @@ TEST_CASE("corrupted RTP PT-0 fails without changing output or context")
     require_failed_transaction(decomp.get(), corrupt);
     require_guarded_decode(decomp.get(), valid, expected);
 }
+
+TEST_CASE("IP PT-0 synchronizes IP-ID behavior transitions", "[issue28]")
+{
+    for(const std::uint32_t cid : {0U, 2U, 15U})
+    {
+        // Zero/random/sequential transitions occur in real TCP and ICMP flows.
+        for(const auto ids : {std::vector<std::uint16_t>{0, 100, 101, 102, 103},
+                              std::vector<std::uint16_t>{100, 101, 102, 103, 104, 120, 121, 122, 123},
+                              std::vector<std::uint16_t>{100, 101, 105, 106, 107, 108}})
+        {
+            CompPtr comp(rohc_comp_new2(15, ROHCCXX_DIRECTION_UPLINK));
+            DecompPtr decomp(rohc_decomp_new2(15, ROHCCXX_DIRECTION_UPLINK));
+            REQUIRE(comp);
+            REQUIRE(decomp);
+            REQUIRE(rohc_comp_set_cid(comp.get(), cid) == 0);
+            for(std::size_t ordinal = 0; ordinal < ids.size(); ++ordinal)
+            {
+                INFO("cid=" << cid << " ordinal=" << ordinal << " id=" << ids[ordinal]);
+                auto ip = make_packet(Pt0Profile::Ip, ordinal, 0, ids[ordinal]);
+                // A DF change forces a full refresh after the context is warm.
+                if(ordinal >= 5) put16(ip.data() + 6, 0);
+                put16(ip.data() + 10, 0);
+                put16(ip.data() + 10, ipv4_checksum(ip.data()));
+                std::array<std::uint8_t, 512> wire{};
+                std::size_t length = wire.size();
+                REQUIRE(rohc_compress4(comp.get(), ip.data(), ip.size(), wire.data(), &length) == 0);
+                require_guarded_decode(decomp.get(),
+                    std::vector<std::uint8_t>(wire.begin(), wire.begin() + length), ip);
+            }
+        }
+    }
+}
