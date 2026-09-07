@@ -989,6 +989,8 @@ TEST_CASE("IPv4 ID modulo wrap remains synchronized across formal PT-0 profiles"
             const auto rohc = compress_packet(comp.get(), 0U, packet);
             require_guarded_decode(decomp.get(), rohc, packet);
         }
+    }
+}
 TEST_CASE("public decoder accepts rohc-lib ESP PT-1 seq-ID across IPv4 ID wrap",
           "[issue36]")
 {
