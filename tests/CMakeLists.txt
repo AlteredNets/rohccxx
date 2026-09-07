@@ -12,6 +12,7 @@ add_executable(unit_tests
     unit/test_pt0_dispatch.cpp
     unit/test_issue40_protocol_alignment.cpp
     unit/test_issue39_rtp_udp_checksum.cpp
+    unit/test_issue43_ip_fo_ambiguity.cpp
     unit/test_feedback_correlation.cpp
     unit/test_rfc5225_grammar.cpp
     unit/test_encoding_methods.cpp
