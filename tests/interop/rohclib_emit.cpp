@@ -51,6 +51,7 @@ int main()
     uint16_t seq = 2000;
     uint32_t ts  = 180000;
     const uint32_t ssrc = 0x55667788;
+    const struct rohc_ts arrival_time = { 0, 0 };
 
     for (int i = 0; i < 40; ++i)
     {
@@ -69,7 +70,7 @@ int main()
         }
 
         struct rohc_buf ip_input =
-            rohc_buf_init_full(ip, sizeof(ip), sizeof(ip));
+            rohc_buf_init_full(ip, sizeof(ip), arrival_time);
 
         struct rohc_buf rohc_output =
             rohc_buf_init_empty(rohc, sizeof(rohc));

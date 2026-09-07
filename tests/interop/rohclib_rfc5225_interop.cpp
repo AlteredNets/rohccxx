@@ -75,6 +75,7 @@ rohc_decomp* make_decompressor(const rfc5225_interop::ProfileSpec& profile)
 
 int emit()
 {
+    const struct rohc_ts arrival_time = { 0, 0 };
     rfc5225_interop::emit_header();
     for(const auto& profile : rfc5225_interop::profiles)
     {
@@ -85,7 +86,7 @@ int emit()
             std::uint8_t ip[rfc5225_interop::packet_size] = {};
             std::uint8_t rohc[rfc5225_interop::max_rohc_size] = {};
             rfc5225_interop::make_packet(profile.profile, step, ip);
-            rohc_buf ip_input = rohc_buf_init_full(ip, sizeof(ip), sizeof(ip));
+            rohc_buf ip_input = rohc_buf_init_full(ip, sizeof(ip), arrival_time);
             rohc_buf rohc_output = rohc_buf_init_empty(rohc, sizeof(rohc));
             if(rohc_compress4(compressor, ip_input, &rohc_output) != ROHC_STATUS_OK)
             {
@@ -101,6 +102,7 @@ int emit()
 
 int emit_co()
 {
+    const struct rohc_ts arrival_time = { 0, 0 };
     rfc5225_interop::emit_co_header();
     for(const auto& profile : rfc5225_interop::profiles)
     {
@@ -111,7 +113,7 @@ int emit_co()
             std::uint8_t ip[rfc5225_interop::packet_size] = {};
             std::uint8_t rohc[rfc5225_interop::max_rohc_size] = {};
             rfc5225_interop::make_co_packet(profile.profile, step, ip);
-            rohc_buf ip_input = rohc_buf_init_full(ip, sizeof(ip), sizeof(ip));
+            rohc_buf ip_input = rohc_buf_init_full(ip, sizeof(ip), arrival_time);
             rohc_buf rohc_output = rohc_buf_init_empty(rohc, sizeof(rohc));
             if(rohc_compress4(compressor, ip_input, &rohc_output) != ROHC_STATUS_OK) return 3;
             rfc5225_interop::emit_case(profile, step, ip, rohc_output.data, rohc_output.len);
@@ -136,7 +138,8 @@ int decode()
 
     const bool ok = rfc5225_interop::consume_corpus([&](const rfc5225_interop::CorpusCase& corpus_case) {
         const std::size_t profile_index = static_cast<std::size_t>(corpus_case.profile->profile);
-        std::uint8_t output[rfc5225_interop::packet_size + 64] = {};
+        // The pinned rohc-lib checksum routine reads IPv4 headers in native words.
+        alignas(std::uint32_t) std::uint8_t output[rfc5225_interop::packet_size + 64] = {};
         std::size_t output_length = sizeof(output);
         if(rohc_decompress_compat(decompressors[profile_index],
                                   corpus_case.rohc.data(),
@@ -181,15 +184,27 @@ int decode_co()
             return true;
         if(!is_ir) ++co_packets[index];
 
-        std::uint8_t output[rfc5225_interop::packet_size + 64] = {};
+        // The pinned rohc-lib checksum routine reads IPv4 headers in native words.
+        alignas(std::uint32_t) std::uint8_t output[rfc5225_interop::packet_size + 64] = {};
         std::size_t output_length = sizeof(output);
-        if(rohc_decompress_compat(decompressors[index], item.rohc.data(), item.rohc_length,
-                                  output, &output_length) != ROHC_STATUS_OK ||
+        const auto status = rohc_decompress_compat(decompressors[index], item.rohc.data(),
+                                                   item.rohc_length, output, &output_length);
+        if(status != ROHC_STATUS_OK ||
            output_length != item.ip.size() ||
            std::memcmp(output, item.ip.data(), item.ip.size()) != 0)
         {
-            std::fprintf(stderr, "rohc-lib CO decode mismatch profile=%s step=%d\n",
-                         item.profile->name, item.step);
+            std::size_t first_difference = 0;
+            const auto compared = std::min(output_length, item.ip.size());
+            while(first_difference < compared && output[first_difference] == item.ip[first_difference])
+                ++first_difference;
+            std::fprintf(stderr,
+                         "rohc-lib CO decode mismatch profile=%s step=%d status=%d "
+                         "output_len=%zu expected_len=%zu first_difference=%zu alignment=%zu\n",
+                         item.profile->name, item.step, static_cast<int>(status), output_length,
+                         item.ip.size(), first_difference,
+                         reinterpret_cast<std::uintptr_t>(output) & 3U);
+            interop_debug::dump_bytes("rohc-lib CO output", output, output_length);
+            interop_debug::dump_bytes("rohc-lib CO expected", item.ip.data(), item.ip.size());
             return false;
         }
         if(item.step == 2 && !is_ir && item.rohc[0] != 0xfaU && item.rohc[0] != 0xfbU)
