@@ -2763,6 +2763,14 @@ rohc_compress4(struct rohc_comp* comp,
                         return -1;
                 }
             }
+            else if(ctx->udp_check != context_before_compress.udp_check)
+            {
+                // The private RTP FO form carries sequence and timestamp state,
+                // but it cannot carry a changed UDP checksum. Refresh the
+                // decompressor context before emitting this packet.
+                if(!emit_ir_dyn_rtp(rohc_packet, rohc_packet_len, *ctx))
+                    return -1;
+            }
             else if(!emit_rtp_fo(rohc_packet, rohc_packet_len, *ctx) ||
                     !prepend_private_rtp_small_cid(rohc_packet, rohc_packet_len,
                                                    out_capacity, cid))
