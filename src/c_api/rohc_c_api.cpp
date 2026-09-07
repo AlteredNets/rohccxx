@@ -507,6 +507,9 @@ static bool ip_private_fo_reconstructable(const rohccxx::Context& previous,
            current.ipv4_ttl == previous.ipv4_ttl &&
            current.ipv4_flags == previous.ipv4_flags &&
            current.ipv4_protocol == previous.ipv4_protocol &&
+           // Entering sequential behavior requires a refresh before PT-0.
+           // Private FO carries the full ID but cannot establish that behavior.
+           (current.ipv4_id_behavior != 0U || previous.ipv4_id_behavior == 0U) &&
            current.ipv4_saddr == previous.ipv4_saddr &&
            current.ipv4_daddr == previous.ipv4_daddr &&
            current.ipv4_options_len == previous.ipv4_options_len &&
