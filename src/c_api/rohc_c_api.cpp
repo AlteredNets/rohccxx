@@ -377,22 +377,20 @@ static void update_ipv4_id_behavior(rohccxx::Context& ctx,
 {
     if(ctx.ip_version != 4)
         return;
-    if(ctx.ipv4_id == 0)
-    {
-        ctx.ipv4_id_behavior = 3U;
-    }
-    else if(had_ipv4_context)
+    if(had_ipv4_context)
     {
         const auto delta = static_cast<std::uint16_t>(ctx.ipv4_id - previous_ipv4_id);
         const auto swapped_id = static_cast<std::uint16_t>((ctx.ipv4_id >> 8U) | (ctx.ipv4_id << 8U));
         const auto swapped_previous = static_cast<std::uint16_t>((previous_ipv4_id >> 8U) |
                                                                  (previous_ipv4_id << 8U));
         const auto swapped_delta = static_cast<std::uint16_t>(swapped_id - swapped_previous);
-        ctx.ipv4_id_behavior = delta == 1U ? 0U : (swapped_delta == 1U ? 1U : 2U);
+        ctx.ipv4_id_behavior = delta == 1U ? 0U :
+                               swapped_delta == 1U ? 1U :
+                               ctx.ipv4_id == 0 ? 3U : 2U;
     }
     else
     {
-        ctx.ipv4_id_behavior = 2U;
+        ctx.ipv4_id_behavior = ctx.ipv4_id == 0 ? 3U : 2U;
     }
     ctx.ipv4_id_sequential = ctx.ipv4_id_behavior <= 1U;
 }

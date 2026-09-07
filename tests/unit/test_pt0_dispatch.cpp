@@ -855,6 +855,31 @@ TEST_CASE("ESP PT-0 requires safely reconstructable fields and progression")
     }
 }
 
+TEST_CASE("IPv4 ID modulo wrap remains synchronized across formal PT-0 profiles",
+          "[issue35]")
+{
+    for(const auto profile : {Pt0Profile::Esp, Pt0Profile::Udp, Pt0Profile::Ip})
+    {
+        CAPTURE(static_cast<unsigned>(profile));
+        CompPtr comp(rohc_comp_new2(0U, ROHCCXX_DIRECTION_UPLINK));
+        DecompPtr decomp(rohc_decomp_new2(0U, ROHCCXX_DIRECTION_UPLINK));
+        REQUIRE(comp);
+        REQUIRE(decomp);
+
+        for(std::uint32_t ordinal = 0U; ordinal < 20U; ++ordinal)
+        {
+            const auto id = static_cast<std::uint16_t>(0xffeeU + ordinal);
+            auto packet = make_packet(profile, ordinal, 0U, 0U);
+            put16(packet.data() + 4U, id);
+            put16(packet.data() + 10U, 0U);
+            put16(packet.data() + 10U, ipv4_checksum(packet.data()));
+            CAPTURE(ordinal, id);
+            const auto rohc = compress_packet(comp.get(), 0U, packet);
+            require_guarded_decode(decomp.get(), rohc, packet);
+        }
+    }
+}
+
 TEST_CASE("malformed ESP PT-0 fails transactionally and remains retryable")
 {
     CompPtr comp(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
