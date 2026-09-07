@@ -891,6 +891,23 @@ static bool build_fixed_udp_ipv4_header(std::array<std::uint8_t, 28>& out,
     return true;
 }
 
+static bool decode_forward_formal_pt0_msn(const rohccxx::Context& context,
+                                          std::uint16_t msn_lsb,
+                                          std::uint16_t& next_msn)
+{
+    if(context.reorder_ratio > 3U || msn_lsb > 0x0fU)
+        return false;
+    constexpr std::array<std::uint32_t, 4> p_by_reorder_ratio{{1U, 3U, 7U, 11U}};
+    const auto p = p_by_reorder_ratio[context.reorder_ratio];
+    std::uint32_t decoded = 0U;
+    if(!rohccxx::encoding::decode_lsb_with_p(msn_lsb, 4U, context.msn, p, 16U,
+                                             decoded))
+        return false;
+    next_msn = static_cast<std::uint16_t>(decoded);
+    const auto forward_delta = static_cast<std::uint16_t>(next_msn - context.msn);
+    return forward_delta > 0U && forward_delta <= 15U - p;
+}
+
 static bool private_udp_fo_is_formal_pt0_ambiguous(
     const rohccxx::Context& previous, const std::uint8_t* private_packet,
     size_t private_packet_len, const std::uint8_t* payload, size_t payload_len)
@@ -905,17 +922,8 @@ static bool private_udp_fo_is_formal_pt0_ambiguous(
            rohccxx::rfc5225::FormalCoVariant::Pt0Crc3, formal))
         return false;
     rohccxx::Context formal_context = previous;
-    std::uint16_t next_msn = formal_context.msn;
-    for(std::uint16_t delta = 1U; delta <= 15U; ++delta)
-    {
-        const auto candidate = static_cast<std::uint16_t>(formal_context.msn + delta);
-        if((candidate & 0x0fU) == formal.msn)
-        {
-            next_msn = candidate;
-            break;
-        }
-    }
-    if(next_msn == formal_context.msn)
+    std::uint16_t next_msn = 0U;
+    if(!decode_forward_formal_pt0_msn(formal_context, formal.msn, next_msn))
         return false;
     const auto delta = static_cast<std::uint16_t>(next_msn - formal_context.msn);
     formal_context.msn = next_msn;
@@ -3651,17 +3659,9 @@ rohc_decompress4(struct rohc_decomp* decomp,
         size_t formal_payload_len = 0U;
         if(formal_valid)
         {
-            std::uint16_t next_msn = formal_context.msn;
-            for(std::uint16_t delta = 1U; delta <= 15U; ++delta)
-            {
-                const auto candidate = static_cast<std::uint16_t>(formal_context.msn + delta);
-                if((candidate & 0x0fU) == formal.msn)
-                {
-                    next_msn = candidate;
-                    break;
-                }
-            }
-            formal_valid = next_msn != formal_context.msn;
+            std::uint16_t next_msn = 0U;
+            formal_valid = decode_forward_formal_pt0_msn(formal_context, formal.msn,
+                                                          next_msn);
             if(formal_valid)
             {
                 const auto delta = static_cast<std::uint16_t>(next_msn - formal_context.msn);
@@ -3794,17 +3794,9 @@ rohc_decompress4(struct rohc_decomp* decomp,
         size_t formal_payload_len = 0U;
         if(formal_valid)
         {
-            std::uint16_t next_msn = formal_context.msn;
-            for(std::uint16_t delta = 1U; delta <= 15U; ++delta)
-            {
-                const auto candidate = static_cast<std::uint16_t>(formal_context.msn + delta);
-                if((candidate & 0x0fU) == formal.msn)
-                {
-                    next_msn = candidate;
-                    break;
-                }
-            }
-            formal_valid = next_msn != formal_context.msn;
+            std::uint16_t next_msn = 0U;
+            formal_valid = decode_forward_formal_pt0_msn(formal_context, formal.msn,
+                                                          next_msn);
             if(formal_valid)
             {
                 const auto delta = static_cast<std::uint16_t>(next_msn - formal_context.msn);
@@ -3872,17 +3864,9 @@ rohc_decompress4(struct rohc_decomp* decomp,
         size_t formal_payload_len = 0U;
         if(formal_valid)
         {
-            std::uint16_t next_msn = formal_context.msn;
-            for(std::uint16_t delta = 1U; delta <= 15U; ++delta)
-            {
-                const auto candidate = static_cast<std::uint16_t>(formal_context.msn + delta);
-                if((candidate & 0x0fU) == formal.msn)
-                {
-                    next_msn = candidate;
-                    break;
-                }
-            }
-            formal_valid = next_msn != formal_context.msn;
+            std::uint16_t next_msn = 0U;
+            formal_valid = decode_forward_formal_pt0_msn(formal_context, formal.msn,
+                                                          next_msn);
             if(formal_valid)
             {
                 const auto delta = static_cast<std::uint16_t>(next_msn - formal_context.msn);
@@ -3954,17 +3938,9 @@ rohc_decompress4(struct rohc_decomp* decomp,
         size_t formal_payload_len = 0U;
         if(formal_valid)
         {
-            std::uint16_t next_msn = formal_context.msn;
-            for(std::uint16_t delta = 1U; delta <= 15U; ++delta)
-            {
-                const auto candidate = static_cast<std::uint16_t>(formal_context.msn + delta);
-                if((candidate & 0x0fU) == formal.msn)
-                {
-                    next_msn = candidate;
-                    break;
-                }
-            }
-            formal_valid = next_msn != formal_context.msn;
+            std::uint16_t next_msn = 0U;
+            formal_valid = decode_forward_formal_pt0_msn(formal_context, formal.msn,
+                                                          next_msn);
             if(formal_valid)
             {
                 const auto delta = static_cast<std::uint16_t>(next_msn - formal_context.msn);
@@ -4115,18 +4091,8 @@ rohc_decompress4(struct rohc_decomp* decomp,
                                              formal))
                 return meaning;
 
-            std::uint16_t next_msn = meaning.context.msn;
-            for(std::uint16_t delta = 1; delta <= 15U; ++delta)
-            {
-                const std::uint16_t candidate =
-                    static_cast<std::uint16_t>(meaning.context.msn + delta);
-                if((candidate & 0x0FU) == formal.msn)
-                {
-                    next_msn = candidate;
-                    break;
-                }
-            }
-            if(next_msn == meaning.context.msn)
+            std::uint16_t next_msn = 0U;
+            if(!decode_forward_formal_pt0_msn(meaning.context, formal.msn, next_msn))
                 return meaning;
 
             const std::uint16_t msn_delta =
@@ -4390,17 +4356,8 @@ rohc_decompress4(struct rohc_decomp* decomp,
                 reconstruction_packet = formal_co_output.get();
                 stage_formal_co_output = true;
             }
-            std::uint16_t next_msn = ctx->msn;
-            for(std::uint16_t delta = 1; delta <= 15U; ++delta)
-            {
-                const std::uint16_t candidate = static_cast<std::uint16_t>(ctx->msn + delta);
-                if((candidate & 0x0FU) == formal.msn)
-                {
-                    next_msn = candidate;
-                    break;
-                }
-            }
-            ok = next_msn != ctx->msn;
+            std::uint16_t next_msn = 0U;
+            ok = decode_forward_formal_pt0_msn(*ctx, formal.msn, next_msn);
             DBG("formal PT0 profile=%u cid=%u ref_msn=%u decoded_msn=%u lsb=%u crc=%u",
                 static_cast<unsigned>(ctx->profile), static_cast<unsigned>(cid),
                 static_cast<unsigned>(ctx->msn), static_cast<unsigned>(next_msn),
