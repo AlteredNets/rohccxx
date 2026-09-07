@@ -19,10 +19,11 @@ rohc_decompress_compat(struct rohc_decomp *decomp,
                        uint8_t *uncomp_packet,
                        size_t *uncomp_len)
 {
+    const struct rohc_ts arrival_time = { 0, 0 };
     struct rohc_buf rohc_input =
         rohc_buf_init_full((uint8_t*)rohc_packet,
                            rohc_len,
-                           rohc_len);
+                           arrival_time);
 
     struct rohc_buf rohc_output =
         rohc_buf_init_empty(uncomp_packet,

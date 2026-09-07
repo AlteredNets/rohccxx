@@ -14,7 +14,9 @@
 int main()
 {
     uint8_t rohc[512];
-    uint8_t out[1500];
+    // The pinned rohc-lib checksum routine reads IPv4 headers in native words.
+    // Keep its reconstruction buffer word-aligned on every C++ compiler.
+    alignas(std::uint32_t) uint8_t out[1500];
 
     size_t rohc_len = fread(rohc, 1, sizeof(rohc), stdin);
     if (rohc_len == 0)
