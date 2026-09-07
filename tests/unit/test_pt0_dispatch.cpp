@@ -676,6 +676,95 @@ TEST_CASE("PT-0 collision contexts tolerate loss and reject stale reordering")
     }
 }
 
+TEST_CASE("PT-0 stale reordering rejects CRC-3 collision witnesses transactionally")
+{
+    struct Witness
+    {
+        Pt0Profile profile;
+        std::uint8_t tos;
+    };
+    constexpr std::array<Witness, 3> witnesses{{
+        {Pt0Profile::Udp, 148U},
+        {Pt0Profile::Esp, 243U},
+        {Pt0Profile::Ip, 176U},
+    }};
+    for(const auto& witness : witnesses)
+    {
+        DYNAMIC_SECTION("profile " << static_cast<unsigned>(witness.profile))
+        {
+            CompPtr comp(rohc_comp_new2(0, ROHCCXX_DIRECTION_UPLINK));
+            DecompPtr decomp(rohc_decomp_new2(0, ROHCCXX_DIRECTION_UPLINK));
+            REQUIRE(comp);
+            REQUIRE(decomp);
+            std::vector<std::uint8_t> delayed;
+            for(std::size_t ordinal = 0; ordinal < 15U; ++ordinal)
+            {
+                const auto ip = make_packet(witness.profile,
+                                            static_cast<std::uint32_t>(ordinal),
+                                            witness.tos);
+                std::array<std::uint8_t, 512> bytes{};
+                std::size_t length = bytes.size();
+                REQUIRE(rohc_compress4(comp.get(), ip.data(), ip.size(),
+                                       bytes.data(), &length) == 0);
+                std::vector<std::uint8_t> rohc(bytes.begin(), bytes.begin() +
+                    static_cast<std::ptrdiff_t>(length));
+                if(ordinal == 12U)
+                {
+                    delayed = rohc;
+                    continue;
+                }
+                require_guarded_decode(decomp.get(), rohc, ip);
+                if(ordinal == 13U) require_failed_transaction(decomp.get(), delayed);
+            }
+        }
+    }
+}
+
+TEST_CASE("PT-0 no-reordering interval accepts delta 14 and rejects delta 15")
+{
+    for(const auto profile : {Pt0Profile::Udp, Pt0Profile::Esp, Pt0Profile::Ip})
+    {
+        DYNAMIC_SECTION("maximum forward delta for profile " <<
+                        static_cast<unsigned>(profile))
+        {
+            CompPtr comp(rohc_comp_new2(0, ROHCCXX_DIRECTION_UPLINK));
+            DecompPtr decomp(rohc_decomp_new2(0, ROHCCXX_DIRECTION_UPLINK));
+            REQUIRE(comp);
+            REQUIRE(decomp);
+            for(std::uint32_t ordinal = 0U; ordinal <= 15U; ++ordinal)
+            {
+                const auto ip = make_packet(profile, ordinal);
+                const auto rohc = compress_packet(comp.get(), 0U, ip);
+                if(ordinal < 2U || ordinal == 15U)
+                    require_guarded_decode(decomp.get(), rohc, ip);
+                if(ordinal == 15U)
+                    REQUIRE(rohc.size() - 160U == 1U);
+            }
+        }
+
+        DYNAMIC_SECTION("ambiguous delta for profile " <<
+                        static_cast<unsigned>(profile))
+        {
+            CompPtr comp(rohc_comp_new2(0, ROHCCXX_DIRECTION_UPLINK));
+            DecompPtr decomp(rohc_decomp_new2(0, ROHCCXX_DIRECTION_UPLINK));
+            REQUIRE(comp);
+            REQUIRE(decomp);
+            for(std::uint32_t ordinal = 0U; ordinal <= 16U; ++ordinal)
+            {
+                const auto ip = make_packet(profile, ordinal);
+                const auto rohc = compress_packet(comp.get(), 0U, ip);
+                if(ordinal < 2U)
+                    require_guarded_decode(decomp.get(), rohc, ip);
+                if(ordinal == 16U)
+                {
+                    REQUIRE(rohc.size() - 160U == 1U);
+                    require_failed_transaction(decomp.get(), rohc);
+                }
+            }
+        }
+    }
+}
+
 TEST_CASE("UDP formal PT-0 uses RFC 5225 small-CID framing")
 {
     for(const std::uint32_t cid : {0U, 1U, 15U})
