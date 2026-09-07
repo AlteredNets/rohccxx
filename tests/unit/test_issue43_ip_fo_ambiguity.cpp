@@ -91,6 +91,20 @@ const char* captured_ambiguous_fo =
     "e97909c60d03029be7000000004500003ce0024000403244f50acb00010acb0002a17e0001000000024553502d666f72776172642d3030303265656565656565656565656565656565";
 const char* captured_feedback = "f4e9400663";
 
+const std::array<const char*, 9> captured_nonsequential_ip_id_flow{{
+    "4500002a72bb00004001f27f0acb00020acb000100000c9ca901000049434d502d666f72776172642d30",
+    "4500002a72bc00004001f27e0acb00020acb000100000c9aa901000149434d502d666f72776172642d31",
+    "4500002a72bd00004001f27d0acb00020acb000100000c98a901000249434d502d666f72776172642d32",
+    "4500002a72be00004001f27c0acb00020acb000100000c96a901000349434d502d666f72776172642d33",
+    "4500002a72bf00004001f27b0acb00020acb000100000c94a901000449434d502d666f72776172642d34",
+    "45c0005872c000004001f18c0acb00020acb000103029be9000000004500003ce0014000403244f60acb00010acb0002a17e0001000000014553502d666f72776172642d3030303165656565656565656565656565656565",
+    "45c0005872c100004001f18b0acb00020acb000103029be7000000004500003ce0024000403244f50acb00010acb0002a17e0001000000024553502d666f72776172642d3030303265656565656565656565656565656565",
+    "45c0005872c300004001f1890acb00020acb000103029be5000000004500003ce0034000403244f40acb00010acb0002a17e0001000000034553502d666f72776172642d3030303365656565656565656565656565656565",
+    "45c0005872c600004001f1860acb00020acb000103029be3000000004500003ce0044000403244f30acb00010acb0002a17e0001000000044553502d666f72776172642d3030303465656565656565656565656565656565",
+}};
+const char* captured_nonsequential_ip_id_final_fo =
+    "e9790772c603029be3000000004500003ce0044000403244f30acb00010acb0002a17e0001000000044553502d666f72776172642d3030303465656565656565656565656565656565";
+
 } // namespace
 
 TEST_CASE("issue 43 compressor refreshes instead of emitting ambiguous private IP FO")
@@ -141,4 +155,46 @@ TEST_CASE("issue 43 exact captured dual-valid IP FO remains transactionally reje
     const auto expected_feedback = from_hex(captured_feedback);
     REQUIRE(feedback.raw_len == expected_feedback.size());
     REQUIRE(std::memcmp(feedback.raw, expected_feedback.data(), feedback.raw_len) == 0);
+}
+
+TEST_CASE("issue 43 compressor avoids formal collision for nonsequential IPv4 IDs")
+{
+    for(const std::uint32_t cid : {9U, 0U, 1U, 15U})
+    {
+        CompPtr comp(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+        DecompPtr decomp(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+        REQUIRE(comp);
+        REQUIRE(decomp);
+        REQUIRE(rohc_comp_set_mode(comp.get(), ROHCCXX_MODE_O) == 0);
+        REQUIRE(rohc_decomp_set_mode(decomp.get(), ROHCCXX_MODE_O) == 0);
+
+        for(std::size_t index = 0; index < captured_nonsequential_ip_id_flow.size(); ++index)
+        {
+            INFO("CID=" << cid << " INDEX=" << index);
+            const auto packet = from_hex(captured_nonsequential_ip_id_flow[index]);
+            const auto compressed = compress(comp.get(), cid, packet);
+            require_exact_decode(decomp.get(), compressed, packet);
+            if(cid == 9U && index + 1U == captured_nonsequential_ip_id_flow.size())
+                REQUIRE(compressed == from_hex(captured_nonsequential_ip_id_final_fo));
+        }
+    }
+}
+
+TEST_CASE("issue 43 nonsequential IPv4 ID contexts remain isolated")
+{
+    CompPtr comp(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    DecompPtr decomp(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(comp);
+    REQUIRE(decomp);
+
+    for(std::size_t index = 0; index < captured_nonsequential_ip_id_flow.size(); ++index)
+    {
+        for(const std::uint32_t cid : {1U, 15U})
+        {
+            INFO("CID=" << cid << " INDEX=" << index);
+            const auto packet = from_hex(captured_nonsequential_ip_id_flow[index]);
+            const auto compressed = compress(comp.get(), cid, packet);
+            require_exact_decode(decomp.get(), compressed, packet);
+        }
+    }
 }

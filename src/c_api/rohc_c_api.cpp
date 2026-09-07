@@ -1058,8 +1058,9 @@ static bool private_ip_fo_is_formal_pt0_ambiguous(
         return false;
     const auto delta = static_cast<std::uint16_t>(next_msn - formal_context.msn);
     formal_context.msn = next_msn;
-    formal_context.ipv4_id =
-        static_cast<std::uint16_t>(formal_context.ipv4_id + delta);
+    if(formal_context.ipv4_id_behavior == 0U)
+        formal_context.ipv4_id =
+            static_cast<std::uint16_t>(formal_context.ipv4_id + delta);
     const size_t formal_payload_len = private_packet_len - 1U + payload_len;
     std::array<std::uint8_t, 20> header{};
     return build_fixed_ip_ipv4_header(header, formal_context, formal_payload_len) &&
@@ -4504,7 +4505,15 @@ rohc_decompress4(struct rohc_decomp* decomp,
     }
     else if(parsed.type == RohcPacketType::FO_IP)
     {
+        const std::uint16_t previous_msn = ctx->msn;
+        const std::uint16_t previous_ipv4_id = ctx->ipv4_id;
+        const bool had_ipv4_context = ctx->ip_version == 4;
         ok = decode_ip_fo(packet, packet_len, *ctx, &header_len);
+        if(ok)
+        {
+            ctx->msn = static_cast<std::uint16_t>(previous_msn + 1U);
+            update_ipv4_id_behavior(*ctx, had_ipv4_context, previous_ipv4_id);
+        }
         if (ok && ctx->profile != Profile::IP)
             ok = false;
     }
