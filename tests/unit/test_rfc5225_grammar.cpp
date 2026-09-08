@@ -1326,7 +1326,9 @@ TEST_CASE("RFC 5225 UDP packet grammar is pinned for current IR IR-DYN and FO")
     REQUIRE(rohccxx::emit_udp_fo(out, &len, ctx));
     REQUIRE(len == 6);
     REQUIRE(out[0] == 0x7A);
-    require_crc8_at(out, len, 1);
+    const std::uint8_t udp_fo_crc = out[1];
+    out[1] = 0U;
+    REQUIRE(rohccxx::detail::private_udp_fo_crc8(out, len, ctx) == udp_fo_crc);
     REQUIRE(read_u16(out + 2) == ctx.ipv4_id);
     REQUIRE(read_u16(out + 4) == ctx.udp_check);
 }

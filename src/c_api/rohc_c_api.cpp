@@ -524,7 +524,8 @@ static bool ip_pt0_reconstructable(const rohccxx::Context& previous,
 
 static bool pt0_private_fo_ambiguous(std::uint8_t pt0,
                                      const std::uint8_t* payload,
-                                     size_t payload_len)
+                                     size_t payload_len,
+                                     const rohccxx::Context* udp_context = nullptr)
 {
     const auto type = rohccxx::detect_packet_type(pt0);
     size_t private_header_len = 0U;
@@ -540,7 +541,7 @@ static bool pt0_private_fo_ambiguous(std::uint8_t pt0,
     std::array<std::uint8_t, 6> candidate{};
     candidate[0] = pt0;
     std::memcpy(candidate.data() + 1U, payload, private_header_len - 1U);
-    rohccxx::Context tentative{};
+    rohccxx::Context tentative = udp_context ? *udp_context : rohccxx::Context{};
     size_t consumed = 0U;
     if(type == rohccxx::RohcPacketType::FO_UDP)
         return rohccxx::decode_udp_fo(candidate.data(), private_header_len,
@@ -2841,7 +2842,8 @@ rohc_compress4(struct rohc_comp* comp,
                 const size_t payload_offset = ip_view.header_len + sizeof(*udp);
                 const std::uint8_t pt0 = formal[cid == 0U ? 0U : 1U];
                 if(!emitted || pt0_private_fo_ambiguous(
-                       pt0, ip_packet + payload_offset, ip_packet_len - payload_offset))
+                       pt0, ip_packet + payload_offset, ip_packet_len - payload_offset,
+                       &previous))
                 {
                     if(!emit_unambiguous_private_fo())
                         return -1;

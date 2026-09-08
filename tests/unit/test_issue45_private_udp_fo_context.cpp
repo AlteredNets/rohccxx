@@ -10,6 +10,7 @@
 #include "rohccxx/core/emit_ir.hpp"
 #include "rohccxx/core/emit_udp_fo.hpp"
 #include "rohccxx/core/emit_udplite_fo.hpp"
+#include "issue45_stale_cid_fixture.hpp"
 
 #include <algorithm>
 #include <array>
@@ -57,7 +58,8 @@ enum class PrivateProfile
 
 std::vector<std::uint8_t> make_private_fo(PrivateProfile profile,
                                           std::uint32_t cid,
-                                          std::uint16_t udp_checksum = 0x2902U)
+                                          std::uint16_t udp_checksum = 0x2902U,
+                                          bool established_udp_tuple = false)
 {
     rohccxx::Context context{};
     context.profile = profile == PrivateProfile::Udp ? rohccxx::Profile::UDP :
@@ -66,6 +68,15 @@ std::vector<std::uint8_t> make_private_fo(PrivateProfile profile,
                       rohccxx::Profile::UDP_Lite;
     context.rohc_state = rohccxx::RohcState::DynamicEstablished;
     context.cid = cid;
+    if(established_udp_tuple)
+    {
+        context.ipv4_ttl = 64U;
+        context.ipv4_protocol = 17U;
+        context.ipv4_saddr = 0xc0000201U;
+        context.ipv4_daddr = 0xc6336402U;
+        context.udp_sport = 0x1234U;
+        context.udp_dport = 0x5678U;
+    }
     context.ipv4_id = 0x4e95U;
     context.udp_length_or_coverage = 24U;
     context.udp_check = udp_checksum;
@@ -196,6 +207,48 @@ void establish_udp_context(rohc_decomp* decomp,
     REQUIRE(output_len == 28U);
 }
 
+std::vector<std::uint8_t> emit_replacement_private_fo()
+{
+    const auto& packet = issue45_fixture::replacement_flow_expected;
+    rohccxx::Context context{};
+    context.profile = rohccxx::Profile::UDP;
+    context.rohc_state = rohccxx::RohcState::DynamicEstablished;
+    context.cid = 12U;
+    context.ip_version = 4U;
+    context.ipv4_tos = packet[1];
+    context.ipv4_ttl = packet[8];
+    context.ipv4_protocol = packet[9];
+    context.ipv4_saddr = (static_cast<std::uint32_t>(packet[12]) << 24U) |
+                         (static_cast<std::uint32_t>(packet[13]) << 16U) |
+                         (static_cast<std::uint32_t>(packet[14]) << 8U) |
+                         packet[15];
+    context.ipv4_daddr = (static_cast<std::uint32_t>(packet[16]) << 24U) |
+                         (static_cast<std::uint32_t>(packet[17]) << 16U) |
+                         (static_cast<std::uint32_t>(packet[18]) << 8U) |
+                         packet[19];
+    context.ipv4_id = static_cast<std::uint16_t>(
+        (static_cast<std::uint16_t>(packet[4]) << 8U) | packet[5]);
+    context.ipv4_flags = static_cast<std::uint8_t>(packet[6] >> 5U);
+    context.udp_sport = static_cast<std::uint16_t>(
+        (static_cast<std::uint16_t>(packet[20]) << 8U) | packet[21]);
+    context.udp_dport = static_cast<std::uint16_t>(
+        (static_cast<std::uint16_t>(packet[22]) << 8U) | packet[23]);
+    context.udp_length_or_coverage = static_cast<std::uint16_t>(
+        (static_cast<std::uint16_t>(packet[24]) << 8U) | packet[25]);
+    context.udp_check = static_cast<std::uint16_t>(
+        (static_cast<std::uint16_t>(packet[26]) << 8U) | packet[27]);
+    context.udp_checksum_used = context.udp_check != 0U;
+
+    std::array<std::uint8_t, 32> header{};
+    std::size_t header_len = header.size();
+    REQUIRE(rohccxx::emit_udp_fo(header.data(), &header_len, context));
+    std::vector<std::uint8_t> output;
+    output.push_back(0xecU);
+    output.insert(output.end(), header.begin(), header.begin() + header_len);
+    output.insert(output.end(), packet.begin() + 28, packet.end());
+    return output;
+}
+
 } // namespace
 
 TEST_CASE("Private UDP FO without an established CID context fails transactionally")
@@ -310,13 +363,92 @@ TEST_CASE("Profile-mismatched private FO rejection preserves an established cont
                 REQUIRE(output == original_output);
 
                 const auto valid = make_private_fo(PrivateProfile::Udp, cid,
-                                                   checksum);
+                                                   checksum, true);
                 output_len = output.size();
                 REQUIRE(rohc_decompress4(decomp.get(), valid.data(), valid.size(),
                                          output.data(), &output_len) == 0);
                 const auto expected = expected_udp_packet(0x4e95U, checksum);
                 REQUIRE(output_len == expected.size());
                 REQUIRE(std::equal(expected.begin(), expected.end(), output.begin()));
+            }
+        }
+    }
+}
+
+TEST_CASE("Private UDP FO for a reused CID rejects stale same-profile context")
+{
+    DecompPtr decomp(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(decomp != nullptr);
+
+    std::array<std::uint8_t, 512> output{};
+    std::size_t output_len = output.size();
+    REQUIRE(rohc_decompress4(decomp.get(),
+                             issue45_fixture::prior_flow_ir.data(),
+                             issue45_fixture::prior_flow_ir.size(),
+                             output.data(), &output_len) == 0);
+
+    output.fill(0xa5U);
+    const auto guarded_output = output;
+    output_len = output.size();
+    REQUIRE(rohc_decompress4(decomp.get(),
+                             issue45_fixture::replacement_flow_fo.data(),
+                             issue45_fixture::replacement_flow_fo.size(),
+                             output.data(), &output_len) != 0);
+    REQUIRE(output_len == 0U);
+    REQUIRE(output == guarded_output);
+    REQUIRE(rohc_decomp_has_feedback(decomp.get()) == 1);
+
+    // Rejection must be transactional and the later replacement IR must
+    // establish the new generation of CID 12 normally.
+    output_len = output.size();
+    REQUIRE(rohc_decompress4(decomp.get(),
+                             issue45_fixture::replacement_flow_ir.data(),
+                             issue45_fixture::replacement_flow_ir.size(),
+                             output.data(), &output_len) == 0);
+
+    const auto current_private_fo = emit_replacement_private_fo();
+    output_len = output.size();
+    REQUIRE(rohc_decompress4(decomp.get(), current_private_fo.data(),
+                             current_private_fo.size(),
+                             output.data(), &output_len) == 0);
+    REQUIRE(output_len == issue45_fixture::replacement_flow_expected.size());
+    REQUIRE(std::equal(issue45_fixture::replacement_flow_expected.begin(),
+                       issue45_fixture::replacement_flow_expected.end(),
+                       output.begin()));
+}
+
+TEST_CASE("Private UDP FO binds same-profile static context across CIDs and directions")
+{
+    constexpr std::array<std::uint32_t, 3> cids{{0U, 1U, 15U}};
+    constexpr std::array<rohccxx_direction_t, 2> directions{{
+        ROHCCXX_DIRECTION_UPLINK,
+        ROHCCXX_DIRECTION_DOWNLINK,
+    }};
+    constexpr std::array<std::uint16_t, 2> checksums{{0U, 0x2902U}};
+
+    for(const auto direction : directions)
+    {
+        for(const auto cid : cids)
+        {
+            for(const auto checksum : checksums)
+            {
+                CAPTURE(direction, cid, checksum);
+                DecompPtr decomp(rohc_decomp_new2(15U, direction));
+                REQUIRE(decomp != nullptr);
+                establish_udp_context(decomp.get(), cid, checksum);
+
+                // make_private_fo deliberately carries the same profile and
+                // dynamic values under a different omitted static tuple.
+                const auto stale = make_private_fo(PrivateProfile::Udp, cid,
+                                                   checksum);
+                std::array<std::uint8_t, 256> output{};
+                output.fill(0xa5U);
+                const auto guarded_output = output;
+                std::size_t output_len = output.size();
+                REQUIRE(rohc_decompress4(decomp.get(), stale.data(), stale.size(),
+                                         output.data(), &output_len) != 0);
+                REQUIRE(output_len == 0U);
+                REQUIRE(output == guarded_output);
             }
         }
     }
