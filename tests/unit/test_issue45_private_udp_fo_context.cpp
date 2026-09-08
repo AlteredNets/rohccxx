@@ -48,6 +48,26 @@ constexpr std::array<std::uint8_t, 135> captured_private_udp_fo{{
     0x71, 0x71, 0x71,
 }};
 
+// Exact Add-CID 13 private UDP FO payload captured by the ARM64 full-stack
+// reorder soak.  Under the stale CID-13 UDP context below, 0x7a also
+// authenticates as formal PT-0 and succeeds with fabricated headers.
+// ROHC SHA-384:
+// 380a38fef0a69bd07beb67fe81b9c667ca6a1bd2b855990bba5650000b07eae0af9ef590ad0ce45f2706dad695e2bb66
+constexpr std::array<std::uint8_t, 135> captured_stale_private_as_formal{{
+    0xed, 0x7a, 0xbb, 0xff, 0xd5, 0x06, 0x42, 0x41, 0x4c, 0x54, 0x45, 0x52,
+    0x45, 0x44, 0x4e, 0x45, 0x54, 0x53, 0x2d, 0x49, 0x4d, 0x50, 0x41, 0x49,
+    0x52, 0x3a, 0x72, 0x65, 0x6f, 0x72, 0x64, 0x65, 0x72, 0x2d, 0x6e, 0x30,
+    0x33, 0x3a, 0x72, 0x65, 0x76, 0x65, 0x72, 0x73, 0x65, 0x3a, 0x30, 0x30,
+    0x30, 0x30, 0x30, 0x35, 0x3a, 0x31, 0x37, 0x38, 0x38, 0x38, 0x39, 0x31,
+    0x33, 0x30, 0x31, 0x33, 0x32, 0x38, 0x39, 0x38, 0x30, 0x31, 0x34, 0x32,
+    0x3a, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71,
+    0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71,
+    0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71,
+    0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71,
+    0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71,
+    0x71, 0x71, 0x71,
+}};
+
 enum class PrivateProfile
 {
     Udp,
@@ -566,6 +586,67 @@ TEST_CASE("Private UDP FO for a reused CID rejects stale same-profile context")
     REQUIRE(std::equal(issue45_fixture::replacement_flow_expected.begin(),
                        issue45_fixture::replacement_flow_expected.end(),
                        output.begin()));
+}
+
+TEST_CASE("Captured private UDP FO cannot authenticate as formal PT-0 under stale CID context")
+{
+    DecompPtr decomp(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(decomp != nullptr);
+
+    // This is the exact stale reconstruction context isolated from the soak.
+    // The captured private packet belongs to another UDP tuple.  Interpreting
+    // byte 0x7a as formal PT-0 advances MSN 1 -> 15 and IPv4 ID 0xfeea ->
+    // 0xfef8, consumes 0xbbff as the UDP checksum, and exposes the private
+    // IPv4-ID/checksum bytes as payload.  That 159-byte fabricated packet had
+    // SHA-384 4043f87187c0ef2683aad5feaf96b616632e9ff87e518ffb8245b50197ffa7ec5d00a2f52771d8f0b8901f2f083b6c88.
+    rohccxx::Context stale{};
+    stale.profile = rohccxx::Profile::UDP;
+    stale.mode = rohccxx::Mode::Optimistic;
+    stale.rohc_state = rohccxx::RohcState::DynamicEstablished;
+    stale.cid = 13U;
+    stale.msn = 1U;
+    stale.reorder_ratio = 0U;
+    stale.ip_version = 4U;
+    stale.ipv4_tos = 0x20U;
+    stale.ipv4_ttl = 64U;
+    stale.ipv4_id = 0xfeeaU;
+    stale.ipv4_flags = 2U;
+    stale.ipv4_id_behavior = 0U;
+    stale.ipv4_id_sequential = true;
+    stale.ipv4_protocol = 17U;
+    stale.ipv4_saddr = 0x0acb0002U;
+    stale.ipv4_daddr = 0x0acb0001U;
+    stale.udp_sport = 44016U;
+    stale.udp_dport = 43100U;
+    stale.udp_length_or_coverage = 8U;
+    stale.udp_check = 0x0642U;
+    stale.udp_checksum_used = true;
+
+    std::array<std::uint8_t, 256> ir{};
+    std::size_t ir_len = ir.size();
+    REQUIRE(rohccxx::emit_ir_udp(ir.data(), &ir_len, stale));
+    std::array<std::uint8_t, 512> output{};
+    std::size_t output_len = output.size();
+    REQUIRE(rohc_decompress4(decomp.get(), ir.data(), ir_len,
+                             output.data(), &output_len) == 0);
+
+    output.fill(0xa5U);
+    const auto guarded_output = output;
+    output_len = output.size();
+    REQUIRE(rohc_decompress4(decomp.get(), captured_stale_private_as_formal.data(),
+                             captured_stale_private_as_formal.size(),
+                             output.data(), &output_len) != 0);
+    REQUIRE(output_len == 0U);
+    REQUIRE(output == guarded_output);
+    REQUIRE(rohc_decomp_has_feedback(decomp.get()) == 1);
+
+    // Rejection remains transactional when the same wire image is retried.
+    output_len = output.size();
+    REQUIRE(rohc_decompress4(decomp.get(), captured_stale_private_as_formal.data(),
+                             captured_stale_private_as_formal.size(),
+                             output.data(), &output_len) != 0);
+    REQUIRE(output_len == 0U);
+    REQUIRE(output == guarded_output);
 }
 
 TEST_CASE("Private UDP FO binds same-profile static context across CIDs and directions")
