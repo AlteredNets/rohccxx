@@ -1028,6 +1028,59 @@ static bool build_fixed_ip_ipv4_header(std::array<std::uint8_t, 20>& out,
     return true;
 }
 
+static bool private_ip_fo_is_formal_pt0_ambiguous(
+    const rohccxx::Context& previous, const std::uint8_t* private_packet,
+    size_t private_packet_len, size_t payload_len)
+{
+    if(!private_packet || private_packet_len == 0U ||
+       previous.profile != rohccxx::Profile::IP ||
+       previous.rohc_state != rohccxx::RohcState::DynamicEstablished)
+        return false;
+    rohccxx::rfc5225::FormalCoPacket formal{};
+    if(!rohccxx::rfc5225::read_formal_co_base(
+           private_packet, 1U, rohccxx::Profile::IP,
+           rohccxx::rfc5225::FormalCoVariant::Pt0Crc3, formal))
+        return false;
+    rohccxx::Context formal_context = previous;
+    std::uint16_t next_msn = formal_context.msn;
+    for(std::uint16_t delta = 1U; delta <= 15U; ++delta)
+    {
+        const auto candidate = static_cast<std::uint16_t>(formal_context.msn + delta);
+        if((candidate & 0x0fU) == formal.msn)
+        {
+            next_msn = candidate;
+            break;
+        }
+    }
+    if(next_msn == formal_context.msn ||
+       payload_len > std::numeric_limits<size_t>::max() -
+                     (private_packet_len - 1U))
+        return false;
+    const auto delta = static_cast<std::uint16_t>(next_msn - formal_context.msn);
+    formal_context.msn = next_msn;
+    if(formal_context.ipv4_id_behavior == 0U)
+        formal_context.ipv4_id =
+            static_cast<std::uint16_t>(formal_context.ipv4_id + delta);
+    const size_t formal_payload_len = private_packet_len - 1U + payload_len;
+    std::array<std::uint8_t, 20> header{};
+    return build_fixed_ip_ipv4_header(header, formal_context, formal_payload_len) &&
+           rohccxx::utils::crc3(header.data(), header.size()) == formal.header_crc;
+}
+
+static bool legacy_private_ip_fo_crc_valid(const std::uint8_t* packet,
+                                           size_t packet_len)
+{
+    constexpr size_t header_len = 4U;
+    if(!packet || packet_len < header_len || packet[0] != 0x79U)
+        return false;
+
+    std::array<std::uint8_t, header_len> header{};
+    std::memcpy(header.data(), packet, header.size());
+    const std::uint8_t received_crc = header[1];
+    header[1] = 0U;
+    return rohccxx::utils::crc8(header.data(), header.size()) == received_crc;
+}
+
 static bool build_ipv6_ip_packet(uint8_t* out,
                                  size_t* out_len,
                                  const rohccxx::Context& ctx,
@@ -2876,6 +2929,24 @@ rohc_compress4(struct rohc_comp* comp,
         update_ipv4_id_behavior(*ctx, had_ipv4_context, previous_ipv4_id);
         ctx->msn = static_cast<std::uint16_t>(ctx->tx_count + 1U);
         const size_t out_capacity = *rohc_packet_len;
+        const size_t payload_len = ip_packet_len - ip_view.header_len;
+        auto emit_unambiguous_private_fo = [&]() -> bool
+        {
+            *rohc_packet_len = out_capacity;
+            if(!emit_ip_fo(rohc_packet, rohc_packet_len, *ctx))
+                return false;
+            if(!ctx->large_cid && private_ip_fo_is_formal_pt0_ambiguous(
+                   previous, rohc_packet, *rohc_packet_len, payload_len))
+            {
+                *rohc_packet_len = out_capacity;
+                if(!emit_ir_ip(rohc_packet, rohc_packet_len, *ctx))
+                    return false;
+                ctx->rohc_state = RohcState::StaticEstablished;
+                return true;
+            }
+            return ctx->large_cid || prepend_small_cid(
+                rohc_packet, rohc_packet_len, out_capacity, cid);
+        };
         if(should_emit_ir(*ctx))
         {
             ctx->rohc_state = RohcState::StaticEstablished;
@@ -2906,8 +2977,7 @@ rohc_compress4(struct rohc_comp* comp,
                 if(!emitted || pt0_private_fo_ambiguous(
                        pt0, ip_packet + payload_offset, ip_packet_len - payload_offset))
                 {
-                    if(!emit_ip_fo(rohc_packet, rohc_packet_len, *ctx) ||
-                       !prepend_small_cid(rohc_packet, rohc_packet_len, out_capacity, cid))
+                    if(!emit_unambiguous_private_fo())
                         return -1;
                 }
                 else
@@ -2922,9 +2992,7 @@ rohc_compress4(struct rohc_comp* comp,
             {
                 if(ctx->ip_version != 4 || ip_private_fo_reconstructable(previous, *ctx))
                 {
-                    if(!emit_ip_fo(rohc_packet, rohc_packet_len, *ctx) ||
-                       (!ctx->large_cid && !prepend_small_cid(
-                           rohc_packet, rohc_packet_len, out_capacity, cid)))
+                    if(!emit_unambiguous_private_fo())
                         return -1;
                 }
                 else if(!emit_ir_ip(rohc_packet, rohc_packet_len, *ctx))
@@ -3904,8 +3972,14 @@ rohc_decompress4(struct rohc_decomp* decomp,
         const bool private_valid =
             decode_ip_fo(packet, packet_len, private_context, &private_header_len) &&
             private_context.profile == Profile::IP;
+        // Context-bound private CRCs supersede the legacy wire form, but an
+        // authenticated legacy private header can still authenticate as a
+        // different formal PT-0 packet. Retain the legacy check only as an
+        // ambiguity signal so that wire image remains a transactional reject.
+        const bool legacy_private_valid =
+            legacy_private_ip_fo_crc_valid(packet, packet_len);
 
-        if(formal_valid && private_valid)
+        if(formal_valid && (private_valid || legacy_private_valid))
             return finish_decoding(fail_with_feedback(cid));
         if(formal_valid)
         {
@@ -4451,7 +4525,15 @@ rohc_decompress4(struct rohc_decomp* decomp,
     }
     else if(parsed.type == RohcPacketType::FO_IP)
     {
+        const std::uint16_t previous_msn = ctx->msn;
+        const std::uint16_t previous_ipv4_id = ctx->ipv4_id;
+        const bool had_ipv4_context = ctx->ip_version == 4;
         ok = decode_ip_fo(packet, packet_len, *ctx, &header_len);
+        if(ok)
+        {
+            ctx->msn = static_cast<std::uint16_t>(previous_msn + 1U);
+            update_ipv4_id_behavior(*ctx, had_ipv4_context, previous_ipv4_id);
+        }
         if (ok && ctx->profile != Profile::IP)
             ok = false;
     }
