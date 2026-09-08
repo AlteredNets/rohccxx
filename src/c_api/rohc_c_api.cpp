@@ -3724,6 +3724,17 @@ rohc_decompress4(struct rohc_decomp* decomp,
             break;
         }
 
+        // When the private CRC rejects this marker-shaped wire image, the
+        // nonzero UDP checksum is the remaining end-to-end evidence for a
+        // formal PT-0 interpretation.  Do not commit a CRC-3 collision that
+        // reconstructs a packet whose carried UDP checksum is invalid.
+        if(formal_valid && !private_valid && formal_context.udp_checksum_used &&
+           !udp_checksum_valid(formal_header, nullptr, 0U,
+                               formal_payload, formal_payload_len))
+        {
+            formal_valid = false;
+        }
+
         if(formal_valid && private_valid && formal_context.udp_checksum_used)
         {
             std::array<std::uint8_t, 28> private_header{};
