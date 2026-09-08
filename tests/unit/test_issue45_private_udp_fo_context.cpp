@@ -249,6 +249,157 @@ std::vector<std::uint8_t> emit_replacement_private_fo()
     return output;
 }
 
+rohccxx::Context private_static_context(PrivateProfile profile,
+                                        std::uint32_t cid,
+                                        bool replacement)
+{
+    rohccxx::Context context{};
+    context.profile = profile == PrivateProfile::Ip ? rohccxx::Profile::IP :
+                      profile == PrivateProfile::Esp ? rohccxx::Profile::ESP :
+                      rohccxx::Profile::UDP_Lite;
+    context.mode = rohccxx::Mode::Optimistic;
+    context.rohc_state = rohccxx::RohcState::DynamicEstablished;
+    context.cid = cid;
+    context.ip_version = 4U;
+    context.ipv4_tos = replacement ? 0x30U : 0x10U;
+    context.ipv4_ttl = replacement ? 61U : 63U;
+    context.ipv4_id = replacement ? 0x2200U : 0x1200U;
+    context.ipv4_flags = 2U;
+    context.ipv4_id_behavior = 2U;
+    context.ipv4_saddr = replacement ? 0xc0000201U : 0x0a000001U;
+    context.ipv4_daddr = replacement ? 0xc6336402U : 0x0a000002U;
+    context.msn = 0x2234U;
+
+    if(profile == PrivateProfile::Ip)
+    {
+        context.ipv4_protocol = 253U;
+    }
+    else if(profile == PrivateProfile::UdpLite)
+    {
+        context.ipv4_protocol = 136U;
+        context.udp_sport = replacement ? 0x2222U : 0x1111U;
+        context.udp_dport = replacement ? 0x4444U : 0x3333U;
+        context.udp_length_or_coverage = 24U;
+        context.udp_check = 0x2902U;
+        context.udp_checksum_used = true;
+    }
+    else
+    {
+        context.ipv4_protocol = 50U;
+        context.esp_spi = replacement ? 0xa17e2002U : 0xa17e1001U;
+        context.esp_sequence = replacement ? 0x10203050U : 0x10203040U;
+        context.msn = static_cast<std::uint16_t>(context.esp_sequence);
+    }
+    return context;
+}
+
+std::vector<std::uint8_t> emit_private_ir(PrivateProfile profile,
+                                          const rohccxx::Context& context)
+{
+    std::array<std::uint8_t, 256> output{};
+    std::size_t output_len = output.size();
+    const bool emitted = profile == PrivateProfile::Ip ?
+        rohccxx::emit_ir_ip(output.data(), &output_len, context) :
+        profile == PrivateProfile::Esp ?
+        rohccxx::emit_ir_esp(output.data(), &output_len, context) :
+        rohccxx::emit_ir_udp_lite(output.data(), &output_len, context);
+    REQUIRE(emitted);
+    return {output.begin(), output.begin() + static_cast<std::ptrdiff_t>(output_len)};
+}
+
+std::vector<std::uint8_t> emit_private_static_fo(
+    PrivateProfile profile, const rohccxx::Context& context)
+{
+    std::array<std::uint8_t, 32> header{};
+    std::size_t header_len = header.size();
+    const bool emitted = profile == PrivateProfile::Ip ?
+        rohccxx::emit_ip_fo(header.data(), &header_len, context) :
+        profile == PrivateProfile::Esp ?
+        rohccxx::emit_esp_fo(header.data(), &header_len, context) :
+        rohccxx::emit_udp_lite_fo(header.data(), &header_len, context);
+    REQUIRE(emitted);
+
+    std::vector<std::uint8_t> output;
+    if(context.cid != 0U)
+        output.push_back(static_cast<std::uint8_t>(0xe0U | context.cid));
+    output.insert(output.end(), header.begin(),
+                  header.begin() + static_cast<std::ptrdiff_t>(header_len));
+    constexpr std::array<std::uint8_t, 16> payload{{
+        0x41, 0x4c, 0x54, 0x45, 0x52, 0x45, 0x44, 0x4e,
+        0x45, 0x54, 0x53, 0x2d, 0x46, 0x4f, 0x2d, 0x21,
+    }};
+    output.insert(output.end(), payload.begin(), payload.end());
+    return output;
+}
+
+std::vector<std::uint8_t> expected_private_static_packet(
+    PrivateProfile profile, const rohccxx::Context& context)
+{
+    constexpr std::array<std::uint8_t, 16> payload{{
+        0x41, 0x4c, 0x54, 0x45, 0x52, 0x45, 0x44, 0x4e,
+        0x45, 0x54, 0x53, 0x2d, 0x46, 0x4f, 0x2d, 0x21,
+    }};
+    const std::size_t upper_header_len = profile == PrivateProfile::Ip ? 0U : 8U;
+    std::vector<std::uint8_t> packet(20U + upper_header_len + payload.size(), 0U);
+    packet[0] = 0x45U;
+    packet[1] = context.ipv4_tos;
+    packet[2] = static_cast<std::uint8_t>(packet.size() >> 8U);
+    packet[3] = static_cast<std::uint8_t>(packet.size());
+    packet[4] = static_cast<std::uint8_t>(context.ipv4_id >> 8U);
+    packet[5] = static_cast<std::uint8_t>(context.ipv4_id);
+    packet[6] = static_cast<std::uint8_t>(context.ipv4_flags << 5U);
+    packet[8] = context.ipv4_ttl;
+    packet[9] = context.ipv4_protocol;
+    packet[12] = static_cast<std::uint8_t>(context.ipv4_saddr >> 24U);
+    packet[13] = static_cast<std::uint8_t>(context.ipv4_saddr >> 16U);
+    packet[14] = static_cast<std::uint8_t>(context.ipv4_saddr >> 8U);
+    packet[15] = static_cast<std::uint8_t>(context.ipv4_saddr);
+    packet[16] = static_cast<std::uint8_t>(context.ipv4_daddr >> 24U);
+    packet[17] = static_cast<std::uint8_t>(context.ipv4_daddr >> 16U);
+    packet[18] = static_cast<std::uint8_t>(context.ipv4_daddr >> 8U);
+    packet[19] = static_cast<std::uint8_t>(context.ipv4_daddr);
+
+    if(profile == PrivateProfile::UdpLite)
+    {
+        packet[20] = static_cast<std::uint8_t>(context.udp_sport >> 8U);
+        packet[21] = static_cast<std::uint8_t>(context.udp_sport);
+        packet[22] = static_cast<std::uint8_t>(context.udp_dport >> 8U);
+        packet[23] = static_cast<std::uint8_t>(context.udp_dport);
+        packet[24] = static_cast<std::uint8_t>(context.udp_length_or_coverage >> 8U);
+        packet[25] = static_cast<std::uint8_t>(context.udp_length_or_coverage);
+        packet[26] = static_cast<std::uint8_t>(context.udp_check >> 8U);
+        packet[27] = static_cast<std::uint8_t>(context.udp_check);
+    }
+    else if(profile == PrivateProfile::Esp)
+    {
+        packet[20] = static_cast<std::uint8_t>(context.esp_spi >> 24U);
+        packet[21] = static_cast<std::uint8_t>(context.esp_spi >> 16U);
+        packet[22] = static_cast<std::uint8_t>(context.esp_spi >> 8U);
+        packet[23] = static_cast<std::uint8_t>(context.esp_spi);
+        packet[24] = static_cast<std::uint8_t>(context.esp_sequence >> 24U);
+        packet[25] = static_cast<std::uint8_t>(context.esp_sequence >> 16U);
+        packet[26] = static_cast<std::uint8_t>(context.esp_sequence >> 8U);
+        packet[27] = static_cast<std::uint8_t>(context.esp_sequence);
+    }
+
+    const auto header_checksum = ipv4_checksum(packet.data());
+    packet[10] = static_cast<std::uint8_t>(header_checksum >> 8U);
+    packet[11] = static_cast<std::uint8_t>(header_checksum);
+    std::copy(payload.begin(), payload.end(), packet.begin() + 20U + upper_header_len);
+    return packet;
+}
+
+void establish_private_static_context(rohc_decomp* decomp,
+                                      PrivateProfile profile,
+                                      const rohccxx::Context& context)
+{
+    const auto ir = emit_private_ir(profile, context);
+    std::array<std::uint8_t, 256> output{};
+    std::size_t output_len = output.size();
+    REQUIRE(rohc_decompress4(decomp, ir.data(), ir.size(),
+                             output.data(), &output_len) == 0);
+}
+
 } // namespace
 
 TEST_CASE("Private UDP FO without an established CID context fails transactionally")
@@ -449,6 +600,59 @@ TEST_CASE("Private UDP FO binds same-profile static context across CIDs and dire
                                          output.data(), &output_len) != 0);
                 REQUIRE(output_len == 0U);
                 REQUIRE(output == guarded_output);
+            }
+        }
+    }
+}
+
+TEST_CASE("Private IP UDP-Lite and ESP FO bind same-profile reconstruction context")
+{
+    constexpr std::array<PrivateProfile, 3> profiles{{
+        PrivateProfile::Ip,
+        PrivateProfile::UdpLite,
+        PrivateProfile::Esp,
+    }};
+    constexpr std::array<std::uint32_t, 3> cids{{0U, 1U, 15U}};
+    constexpr std::array<rohccxx_direction_t, 2> directions{{
+        ROHCCXX_DIRECTION_UPLINK,
+        ROHCCXX_DIRECTION_DOWNLINK,
+    }};
+
+    for(const auto profile : profiles)
+    {
+        for(const auto cid : cids)
+        {
+            for(const auto direction : directions)
+            {
+                CAPTURE(static_cast<int>(profile), cid, direction);
+                const auto stale_context = private_static_context(profile, cid, false);
+                auto current_context = private_static_context(profile, cid, true);
+                current_context.ipv4_id = 0x4e95U;
+
+                DecompPtr stale(rohc_decomp_new2(15U, direction));
+                DecompPtr current(rohc_decomp_new2(15U, direction));
+                REQUIRE(stale != nullptr);
+                REQUIRE(current != nullptr);
+                establish_private_static_context(stale.get(), profile, stale_context);
+                establish_private_static_context(current.get(), profile, current_context);
+
+                const auto private_fo = emit_private_static_fo(profile, current_context);
+                std::array<std::uint8_t, 256> stale_output{};
+                stale_output.fill(0xa5U);
+                const auto guarded_output = stale_output;
+                std::size_t stale_len = stale_output.size();
+                CHECK(rohc_decompress4(stale.get(), private_fo.data(), private_fo.size(),
+                                       stale_output.data(), &stale_len) != 0);
+                CHECK(stale_len == 0U);
+                CHECK(stale_output == guarded_output);
+
+                std::array<std::uint8_t, 256> current_output{};
+                std::size_t current_len = current_output.size();
+                REQUIRE(rohc_decompress4(current.get(), private_fo.data(), private_fo.size(),
+                                         current_output.data(), &current_len) == 0);
+                const auto expected = expected_private_static_packet(profile, current_context);
+                REQUIRE(current_len == expected.size());
+                REQUIRE(std::equal(expected.begin(), expected.end(), current_output.begin()));
             }
         }
     }
