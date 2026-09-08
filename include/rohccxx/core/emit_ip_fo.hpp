@@ -9,6 +9,7 @@
 
 #include "rohccxx/core/context.hpp"
 #include "rohccxx/core/cid.hpp"
+#include "rohccxx/core/private_udp_fo_crc.hpp"
 #include "rohccxx/utils/crc.hpp"
 
 namespace rohccxx
@@ -35,7 +36,7 @@ inline bool emit_ip_fo(uint8_t* out,
     uint8_t* crc_pos = p++;
     *p++ = static_cast<uint8_t>(ctx.ipv4_id >> 8);
     *p++ = static_cast<uint8_t>(ctx.ipv4_id & 0xFF);
-    *crc_pos = utils::crc8(out, header_len);
+    *crc_pos = detail::private_ip_fo_crc8(out, header_len, ctx);
     *out_len = header_len;
     return true;
 }
