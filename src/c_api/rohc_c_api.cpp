@@ -1092,6 +1092,20 @@ static bool private_ip_fo_is_formal_pt0_ambiguous(
            rohccxx::utils::crc3(header.data(), header.size()) == formal.header_crc;
 }
 
+static bool legacy_private_ip_fo_crc_valid(const std::uint8_t* packet,
+                                           size_t packet_len)
+{
+    constexpr size_t header_len = 4U;
+    if(!packet || packet_len < header_len || packet[0] != 0x79U)
+        return false;
+
+    std::array<std::uint8_t, header_len> header{};
+    std::memcpy(header.data(), packet, header.size());
+    const std::uint8_t received_crc = header[1];
+    header[1] = 0U;
+    return rohccxx::utils::crc8(header.data(), header.size()) == received_crc;
+}
+
 static bool build_ipv6_ip_packet(uint8_t* out,
                                  size_t* out_len,
                                  const rohccxx::Context& ctx,
@@ -4104,8 +4118,14 @@ rohc_decompress4(struct rohc_decomp* decomp,
         const bool private_valid =
             decode_ip_fo(packet, packet_len, private_context, &private_header_len) &&
             private_context.profile == Profile::IP;
+        // Context-bound private CRCs supersede the legacy wire form, but an
+        // authenticated legacy private header can still authenticate as a
+        // different formal PT-0 packet. Retain the legacy check only as an
+        // ambiguity signal so that wire image remains a transactional reject.
+        const bool legacy_private_valid =
+            legacy_private_ip_fo_crc_valid(packet, packet_len);
 
-        if(formal_valid && private_valid)
+        if(formal_valid && (private_valid || legacy_private_valid))
             return finish_decoding(fail_with_feedback(cid));
         if(formal_valid)
         {
