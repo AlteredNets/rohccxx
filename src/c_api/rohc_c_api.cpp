@@ -526,32 +526,48 @@ static bool ip_pt0_reconstructable(const rohccxx::Context& previous,
 static bool pt0_private_fo_ambiguous(std::uint8_t pt0,
                                      const std::uint8_t* payload,
                                      size_t payload_len,
-                                     const rohccxx::Context* udp_context = nullptr)
+                                     const rohccxx::Context* context = nullptr,
+                                     bool include_one_bit_neighbors = false)
 {
-    const auto type = rohccxx::detect_packet_type(pt0);
-    size_t private_header_len = 0U;
-    if(type == rohccxx::RohcPacketType::FO_UDP)
-        private_header_len = 6U;
-    else if(type == rohccxx::RohcPacketType::FO_ESP ||
-            type == rohccxx::RohcPacketType::FO_IP)
-        private_header_len = 4U;
-    else
+    auto decodes_as_private = [&](std::uint8_t first_octet) -> bool
+    {
+        const auto type = rohccxx::detect_packet_type(first_octet);
+        size_t private_header_len = 0U;
+        if(type == rohccxx::RohcPacketType::FO_UDP)
+            private_header_len = 6U;
+        else if(type == rohccxx::RohcPacketType::FO_ESP ||
+                type == rohccxx::RohcPacketType::FO_IP)
+            private_header_len = 4U;
+        else
+            return false;
+        if(!payload || payload_len < private_header_len - 1U)
+            return false;
+        std::array<std::uint8_t, 6> candidate{};
+        candidate[0] = first_octet;
+        std::memcpy(candidate.data() + 1U, payload, private_header_len - 1U);
+        rohccxx::Context tentative = context ? *context : rohccxx::Context{};
+        size_t consumed = 0U;
+        if(type == rohccxx::RohcPacketType::FO_UDP)
+            return rohccxx::decode_udp_fo(candidate.data(), private_header_len,
+                                          tentative, &consumed);
+        if(type == rohccxx::RohcPacketType::FO_ESP)
+            return rohccxx::decode_esp_fo(candidate.data(), private_header_len,
+                                          tentative, &consumed);
+        return rohccxx::decode_ip_fo(candidate.data(), private_header_len,
+                                     tentative, &consumed);
+    };
+
+    if(decodes_as_private(pt0))
+        return true;
+    if(!include_one_bit_neighbors)
         return false;
-    if(!payload || payload_len < private_header_len - 1U)
-        return false;
-    std::array<std::uint8_t, 6> candidate{};
-    candidate[0] = pt0;
-    std::memcpy(candidate.data() + 1U, payload, private_header_len - 1U);
-    rohccxx::Context tentative = udp_context ? *udp_context : rohccxx::Context{};
-    size_t consumed = 0U;
-    if(type == rohccxx::RohcPacketType::FO_UDP)
-        return rohccxx::decode_udp_fo(candidate.data(), private_header_len,
-                                      tentative, &consumed);
-    if(type == rohccxx::RohcPacketType::FO_ESP)
-        return rohccxx::decode_esp_fo(candidate.data(), private_header_len,
-                                      tentative, &consumed);
-    return rohccxx::decode_ip_fo(candidate.data(), private_header_len,
-                                 tentative, &consumed);
+    // A formal ESP PT-0 whose one-bit neighbor authenticates as private FO
+    // cannot be made corruption-detecting on this wire image. Force the
+    // caller's existing IR fallback instead of emitting that codeword.
+    for(std::uint8_t bit = 1U; bit < 0x80U; bit <<= 1U)
+        if(decodes_as_private(static_cast<std::uint8_t>(pt0 ^ bit)))
+            return true;
+    return false;
 }
 
 static bool emit_rtp_pt0_small_cid(std::uint8_t* out,
@@ -2940,8 +2956,7 @@ rohc_compress4(struct rohc_comp* comp,
                 const size_t payload_offset = ip_view.header_len + sizeof(*udp);
                 const std::uint8_t pt0 = formal[cid == 0U ? 0U : 1U];
                 if(!emitted || pt0_private_fo_ambiguous(
-                       pt0, ip_packet + payload_offset, ip_packet_len - payload_offset,
-                       &previous))
+                       pt0, ip_packet + payload_offset, ip_packet_len - payload_offset))
                 {
                     if(!emit_unambiguous_private_fo())
                         return -1;
@@ -3102,7 +3117,8 @@ rohc_compress4(struct rohc_comp* comp,
                 const size_t payload_offset = ip_view.header_len + 8U;
                 const std::uint8_t pt0 = formal[cid == 0U ? 0U : 1U];
                 if(!emitted || pt0_private_fo_ambiguous(
-                       pt0, ip_packet + payload_offset, ip_packet_len - payload_offset))
+                       pt0, ip_packet + payload_offset, ip_packet_len - payload_offset,
+                       &previous, true))
                 {
                     if(!emit_ir_esp(rohc_packet, rohc_packet_len, *ctx))
                         return -1;
@@ -4015,34 +4031,43 @@ rohc_decompress4(struct rohc_decomp* decomp,
                                             cid, parsed.has_add_cid);
     if(fixed_esp_pt0_candidate)
     {
-        Context formal_context = context_before_decode;
-        rfc5225::FormalCoPacket formal{};
-        bool formal_valid = rfc5225::read_formal_co_base(
-            packet, 1U, Profile::ESP, rfc5225::FormalCoVariant::Pt0Crc3, formal);
+        auto decode_formal = [&](std::uint8_t first_octet,
+                                 Context& candidate_context,
+                                 std::array<std::uint8_t, 28>& candidate_header,
+                                 const uint8_t*& candidate_payload,
+                                 size_t& candidate_payload_len) -> bool
+        {
+            candidate_context = context_before_decode;
+            rfc5225::FormalCoPacket candidate{};
+            if(!rfc5225::read_formal_co_base(
+                   &first_octet, 1U, Profile::ESP,
+                   rfc5225::FormalCoVariant::Pt0Crc3, candidate))
+                return false;
+            std::uint16_t next_msn = 0U;
+            if(!decode_forward_formal_pt0_msn(candidate_context, candidate.msn,
+                                               next_msn))
+                return false;
+            const auto delta = static_cast<std::uint16_t>(next_msn - candidate_context.msn);
+            candidate_context.msn = next_msn;
+            candidate_context.ipv4_id =
+                static_cast<std::uint16_t>(candidate_context.ipv4_id + delta);
+            candidate_context.esp_sequence += delta;
+            return detail::payload_after_header(packet, packet_len, 1U,
+                                                candidate_payload,
+                                                candidate_payload_len) &&
+                build_fixed_esp_ipv4_header(candidate_header, candidate_context,
+                                            candidate_payload_len) &&
+                utils::crc3(candidate_header.data(), candidate_header.size()) ==
+                    candidate.header_crc;
+        };
+
+        Context formal_context{};
         std::array<std::uint8_t, 28> formal_header{};
         const uint8_t* formal_payload = nullptr;
         size_t formal_payload_len = 0U;
-        if(formal_valid)
-        {
-            std::uint16_t next_msn = 0U;
-            formal_valid = decode_forward_formal_pt0_msn(formal_context, formal.msn,
-                                                          next_msn);
-            if(formal_valid)
-            {
-                const auto delta = static_cast<std::uint16_t>(next_msn - formal_context.msn);
-                formal_context.msn = next_msn;
-                formal_context.ipv4_id =
-                    static_cast<std::uint16_t>(formal_context.ipv4_id + delta);
-                formal_context.esp_sequence += delta;
-                formal_valid = detail::payload_after_header(packet, packet_len, 1U,
-                                                             formal_payload,
-                                                             formal_payload_len) &&
-                    build_fixed_esp_ipv4_header(formal_header, formal_context,
-                                                formal_payload_len) &&
-                    utils::crc3(formal_header.data(), formal_header.size()) ==
-                        formal.header_crc;
-            }
-        }
+        const bool formal_valid = decode_formal(packet[0], formal_context,
+                                                formal_header, formal_payload,
+                                                formal_payload_len);
 
         Context private_context = context_before_decode;
         size_t private_header_len = 0U;
@@ -4052,6 +4077,23 @@ rohc_decompress4(struct rohc_decomp* decomp,
 
         if(formal_valid && private_valid)
             return finish_decoding(fail_with_feedback(cid));
+        if(private_valid)
+        {
+            // The received private wire image has no provenance. If changing
+            // one first-octet bit yields an authenticated formal PT-0 under
+            // the same context, reject both meanings transactionally.
+            for(std::uint8_t bit = 1U; bit < 0x80U; bit <<= 1U)
+            {
+                Context adjacent_context{};
+                std::array<std::uint8_t, 28> adjacent_header{};
+                const uint8_t* adjacent_payload = nullptr;
+                size_t adjacent_payload_len = 0U;
+                if(decode_formal(static_cast<std::uint8_t>(packet[0] ^ bit),
+                                 adjacent_context, adjacent_header,
+                                 adjacent_payload, adjacent_payload_len))
+                    return finish_decoding(fail_with_feedback(cid));
+            }
+        }
         if(formal_valid)
         {
             if(formal_payload_len > std::numeric_limits<size_t>::max() - formal_header.size() ||

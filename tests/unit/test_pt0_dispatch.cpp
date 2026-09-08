@@ -456,22 +456,57 @@ TEST_CASE("Issue 47 one-bit ESP PT-0 corruption rejects transactionally")
         "45360040da080000d4321b900a1ba0010a9f3c02e4a0dc2f3ef23f8d8000c304a1f1d3ecd1a3a1f3a09854fdc6d341b8d8d98e989545e5eb6f36de9132818dc6",
         "45360040da090000d4321b8f0a1ba0010a9f3c02e4a0dc2f3ef23f8e8000c305a1f1d48cd1a3a1f365d092957c034b38819fbb343a4e6d6638db170d094f4d03",
     }};
-    const auto valid = hex_bytes(
+    const auto valid_base = hex_bytes(
         "798000c306a1f1d52cd1a3a1f3890743e751a87ea982e5a551ec73927c16d9748a5b4cf216");
     const auto expected = hex_bytes(
         "45360040da0a0000d4321b8e0a1ba0010a9f3c02e4a0dc2f3ef23f8f8000c306a1f1d52cd1a3a1f3890743e751a87ea982e5a551ec73927c16d9748a5b4cf216");
-    auto corrupted = valid;
-    corrupted[0] ^= 0x01U;
-    REQUIRE(corrupted[0] == 0x78U);
+    auto corrupted_base = valid_base;
+    corrupted_base[0] ^= 0x01U;
+    REQUIRE(corrupted_base[0] == 0x78U);
 
-    DecompPtr decomp(rohc_decomp_new2(15, ROHCCXX_DIRECTION_UPLINK));
-    REQUIRE(decomp);
-    for(std::size_t index = 0U; index < context_packets.size(); ++index)
-        require_guarded_decode(decomp.get(), hex_bytes(context_packets[index]),
-                               hex_bytes(context_expected[index]));
+    for(const auto direction : {ROHCCXX_DIRECTION_UPLINK, ROHCCXX_DIRECTION_DOWNLINK})
+    {
+        for(const std::uint32_t cid : {0U, 1U, 15U})
+        {
+            CAPTURE(direction, cid);
+            auto frame = [cid](std::vector<std::uint8_t> packet)
+            {
+                if(cid != 0U)
+                    packet.insert(packet.begin(), static_cast<std::uint8_t>(0xe0U | cid));
+                return packet;
+            };
+            DecompPtr decomp(rohc_decomp_new2(15, direction));
+            REQUIRE(decomp);
+            if(cid == 0U)
+            {
+                for(std::size_t index = 0U; index < context_packets.size(); ++index)
+                    require_guarded_decode(decomp.get(), hex_bytes(context_packets[index]),
+                                           hex_bytes(context_expected[index]));
+            }
+            else
+            {
+                CompPtr context_comp(rohc_comp_new2(15, direction));
+                REQUIRE(context_comp);
+                REQUIRE(rohc_comp_set_mode(context_comp.get(), ROHCCXX_MODE_O) == 0);
+                REQUIRE(rohc_comp_set_cid(context_comp.get(), cid) == 0);
+                for(const auto* expected_hex : context_expected)
+                {
+                    const auto context_ip = hex_bytes(expected_hex);
+                    std::array<std::uint8_t, 512> context_wire{};
+                    std::size_t context_wire_len = context_wire.size();
+                    REQUIRE(rohc_compress4(context_comp.get(), context_ip.data(),
+                                           context_ip.size(), context_wire.data(),
+                                           &context_wire_len) == 0);
+                    require_guarded_decode(decomp.get(),
+                        std::vector<std::uint8_t>(context_wire.begin(), context_wire.begin() +
+                            static_cast<std::ptrdiff_t>(context_wire_len)), context_ip);
+                }
+            }
 
-    require_failed_transaction(decomp.get(), corrupted);
-    require_guarded_decode(decomp.get(), valid, expected);
+            require_failed_transaction(decomp.get(), frame(corrupted_base), 510U, true, cid);
+            require_guarded_decode(decomp.get(), frame(valid_base), expected);
+        }
+    }
 }
 
 TEST_CASE("valid private FO packets fall back after failed PT-0 authentication")
@@ -524,7 +559,12 @@ TEST_CASE("valid private FO packets fall back after failed PT-0 authentication")
         REQUIRE(emitted);
         REQUIRE(wire[0] == (profile == Pt0Profile::Udp ? 0x7aU :
                             profile == Pt0Profile::Esp ? 0x78U : 0x79U));
-        const std::array<std::uint8_t, 4> payload{{0x10U, 0x20U, 0x30U, 0x40U}};
+        // Three ESP payload octets produce a private wire image with no
+        // one-bit-valid formal PT-0 neighbor. Four octets are deliberately
+        // covered by the Issue 47 transactional-rejection regression above.
+        const std::vector<std::uint8_t> payload = profile == Pt0Profile::Esp
+            ? std::vector<std::uint8_t>{0x10U, 0x20U, 0x30U}
+            : std::vector<std::uint8_t>{0x10U, 0x20U, 0x30U, 0x40U};
         std::memcpy(wire.data() + wire_len, payload.data(), payload.size());
         wire_len += payload.size();
 
@@ -691,7 +731,12 @@ TEST_CASE("legacy private FO truncation rejects every header boundary")
                     static_cast<std::ptrdiff_t>(length)));
         }
 
-        const std::array<std::uint8_t, 4> payload{{0x10U, 0x20U, 0x30U, 0x40U}};
+        // With this TOS=2 context, two ESP payload octets are an
+        // unambiguous private FO image; longer ambiguous images are expected
+        // to reject under the Issue 47 rule.
+        const std::vector<std::uint8_t> payload = profile == Pt0Profile::Esp
+            ? std::vector<std::uint8_t>{0x10U, 0x20U}
+            : std::vector<std::uint8_t>{0x10U, 0x20U, 0x30U, 0x40U};
         std::memcpy(wire.data() + header_len, payload.data(), payload.size());
         const std::size_t wire_len = header_len + payload.size();
         auto expected = make_packet(profile, 1U, 2U, context.ipv4_id);
