@@ -438,6 +438,42 @@ TEST_CASE("public C API reproduces the scientific comparator collision ordinals"
     }
 }
 
+TEST_CASE("Issue 47 one-bit ESP PT-0 corruption rejects transactionally")
+{
+    // rohc-lib 70589cc, randomized interop seed 29, ESP/IP steps 0-4.
+    // Steps 0-3 establish the exact decoder context in which changing the
+    // step-4 formal PT-0 CRC bit from 0x79 to the private ESP marker 0x78
+    // previously returned success with a non-exact 61-byte packet.
+    const std::array<const char*, 4> context_packets{{
+        "fd038240320a1ba0010a9f3c02e4a0dc2f0036d4da063ef23f8b008000c302a1f1d2acd1a3a1f3978fd7e7a4d7f39aac3adb1b15847a94dc50e2f997ac5e93",
+        "fd037740320a1ba0010a9f3c02e4a0dc2f0036d4da073ef23f8c008000c303a1f1d34cd1a3a1f3f4a7b1d44251a858b2a0aa05efdd11b9fc1a9b9b6d994c89",
+        "fd03e640320a1ba0010a9f3c02e4a0dc2f0036d4da083ef23f8d008000c304a1f1d3ecd1a3a1f3a09854fdc6d341b8d8d98e989545e5eb6f36de9132818dc6",
+        "fd036640320a1ba0010a9f3c02e4a0dc2f0036d4da093ef23f8e008000c305a1f1d48cd1a3a1f365d092957c034b38819fbb343a4e6d6638db170d094f4d03",
+    }};
+    const std::array<const char*, 4> context_expected{{
+        "45360040da060000d4321b920a1ba0010a9f3c02e4a0dc2f3ef23f8b8000c302a1f1d2acd1a3a1f3978fd7e7a4d7f39aac3adb1b15847a94dc50e2f997ac5e93",
+        "45360040da070000d4321b910a1ba0010a9f3c02e4a0dc2f3ef23f8c8000c303a1f1d34cd1a3a1f3f4a7b1d44251a858b2a0aa05efdd11b9fc1a9b9b6d994c89",
+        "45360040da080000d4321b900a1ba0010a9f3c02e4a0dc2f3ef23f8d8000c304a1f1d3ecd1a3a1f3a09854fdc6d341b8d8d98e989545e5eb6f36de9132818dc6",
+        "45360040da090000d4321b8f0a1ba0010a9f3c02e4a0dc2f3ef23f8e8000c305a1f1d48cd1a3a1f365d092957c034b38819fbb343a4e6d6638db170d094f4d03",
+    }};
+    const auto valid = hex_bytes(
+        "798000c306a1f1d52cd1a3a1f3890743e751a87ea982e5a551ec73927c16d9748a5b4cf216");
+    const auto expected = hex_bytes(
+        "45360040da0a0000d4321b8e0a1ba0010a9f3c02e4a0dc2f3ef23f8f8000c306a1f1d52cd1a3a1f3890743e751a87ea982e5a551ec73927c16d9748a5b4cf216");
+    auto corrupted = valid;
+    corrupted[0] ^= 0x01U;
+    REQUIRE(corrupted[0] == 0x78U);
+
+    DecompPtr decomp(rohc_decomp_new2(15, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(decomp);
+    for(std::size_t index = 0U; index < context_packets.size(); ++index)
+        require_guarded_decode(decomp.get(), hex_bytes(context_packets[index]),
+                               hex_bytes(context_expected[index]));
+
+    require_failed_transaction(decomp.get(), corrupted);
+    require_guarded_decode(decomp.get(), valid, expected);
+}
+
 TEST_CASE("valid private FO packets fall back after failed PT-0 authentication")
 {
     for(const auto profile : {Pt0Profile::Udp, Pt0Profile::Esp, Pt0Profile::Ip})
