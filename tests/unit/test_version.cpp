@@ -39,7 +39,7 @@ TEST_CASE("rohccxx exposes the configured library version", "[version][api]")
         }
         else
         {
-            REQUIRE(std::isalnum(ch) != 0 || *p == '.' || *p == '-');
+            REQUIRE((std::isalnum(ch) != 0 || *p == '.' || *p == '-'));
             ++prerelease_count;
         }
     }
