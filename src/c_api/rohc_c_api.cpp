@@ -4634,6 +4634,7 @@ rohc_decompress4(struct rohc_decomp* decomp,
             *ctx, decomp->impl.large_cid_space, cid, parsed.has_add_cid);
         rfc5225::FormalCoPacket formal{};
         if(supported_context &&
+           (ctx->profile != Profile::RTP || ctx->rtp.ts_stride != 0U) &&
            rfc5225::read_formal_co_base(packet, 1U, ctx->profile,
                                         rfc5225::FormalCoVariant::Pt0Crc3, formal))
         {
