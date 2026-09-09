@@ -743,15 +743,23 @@ TEST_CASE("ROHC uncompressed profile preserves Add-CID context isolation")
 
 TEST_CASE("Add-CID uncompressed IPv6 supersedes a prior UDP context")
 {
-    // Minimized from the two-record CID-11 live-lab reproducer. The first
-    // record establishes a UDP context; the second is a standards-compatible
-    // Add-CID/uncompressed IPv6 fallback for the same CID.
-    const std::uint8_t udp_fo[] = {
-        0xeb, 0x7a, 0xbc, 0x60, 0xae, 0xfb, 0x05, 0x52, 0x37, 0x49,
-        0x44, 0x00, 0x02, 0x01, 0x04, 0x00, 0x0a, 0x00, 0x12, 0x50,
-        0x62, 0x47, 0xe2, 0x87, 0xe3, 0x2b, 0x4a, 0x24, 0xfb, 0x0a,
-        0xd6, 0x79, 0xe3, 0x5b, 0x3d, 0xce, 0xad, 0x11, 0x4d,
-    };
+    // Minimized from the two-record CID-11 live-lab reproducer. Establish the
+    // prior UDP context with a complete IR before the standards-compatible
+    // Add-CID/uncompressed IPv6 fallback supersedes that CID.
+    rohccxx::Context udp_context{};
+    udp_context.cid = 11U;
+    udp_context.profile = rohccxx::Profile::UDP;
+    udp_context.mode = rohccxx::Mode::Optimistic;
+    udp_context.ipv4_ttl = 64U;
+    udp_context.ipv4_protocol = 17U;
+    udp_context.ipv4_saddr = 0xc0000201U;
+    udp_context.ipv4_daddr = 0xc6336402U;
+    udp_context.udp_sport = 0x1234U;
+    udp_context.udp_dport = 0x5678U;
+    udp_context.udp_length_or_coverage = 8U;
+    std::array<std::uint8_t, 128> udp_ir{};
+    std::size_t udp_ir_len = udp_ir.size();
+    REQUIRE(rohccxx::emit_ir_udp(udp_ir.data(), &udp_ir_len, udp_context));
     const std::uint8_t uncompressed_ipv6[] = {
         0xeb, 0x00, 0x60, 0x0c, 0xab, 0x83, 0x00, 0x28, 0x11, 0x40,
         0xfd, 0x77, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -768,7 +776,7 @@ TEST_CASE("Add-CID uncompressed IPv6 supersedes a prior UDP context")
     REQUIRE(decomp != nullptr);
     std::array<std::uint8_t, 128> output{};
     std::size_t output_len = output.size();
-    REQUIRE(rohc_decompress4(decomp, udp_fo, sizeof(udp_fo),
+    REQUIRE(rohc_decompress4(decomp, udp_ir.data(), udp_ir_len,
                              output.data(), &output_len) == 0);
 
     output.fill(0xa5);
@@ -1333,6 +1341,29 @@ TEST_CASE("ROHC RFC 4362 NHP reconstructs RTP packets through assisting-layer AP
 
     std::uint8_t nhp[1] = {0xAA};
     std::size_t nhp_len = sizeof(nhp);
+    constexpr std::size_t reconstruction_fields[] = {
+        1U, 5U, 6U, 8U, 15U, 19U, 21U, 23U, 27U, 29U, 31U, 35U, 39U
+    };
+    for(const auto offset : reconstruction_fields)
+    {
+        CAPTURE(offset);
+        auto changed = std::array<std::uint8_t, sizeof(ip3)>{};
+        std::memcpy(changed.data(), ip3, sizeof(ip3));
+        changed[offset] ^= 0x01U;
+        if(offset < 20U)
+        {
+            changed[10] = 0;
+            changed[11] = 0;
+            const auto changed_checksum = ipv4_checksum(changed.data(), 20);
+            changed[10] = static_cast<std::uint8_t>(changed_checksum >> 8U);
+            changed[11] = static_cast<std::uint8_t>(changed_checksum);
+        }
+        nhp_len = sizeof(nhp);
+        REQUIRE(rohc_comp_rfc4362_emit_nhp(comp, changed.data(), changed.size(),
+                                           nhp, &nhp_len) != 0);
+    }
+
+    nhp_len = sizeof(nhp);
     REQUIRE(rohc_comp_rfc4362_emit_nhp(comp, ip3, sizeof(ip3), nhp, &nhp_len) == 0);
     REQUIRE(nhp_len == 0);
 
@@ -1344,6 +1375,7 @@ TEST_CASE("ROHC RFC 4362 NHP reconstructs RTP packets through assisting-layer AP
     REQUIRE(out[32] == ip3[32]);
     REQUIRE(out[35] == ip3[35]);
     REQUIRE(std::memcmp(out + 40, ip3 + 40, sizeof(ip3) - 40) == 0);
+    REQUIRE(std::memcmp(out, ip3, sizeof(ip3)) == 0);
 
     rohc_decomp_free(decomp);
     rohc_comp_free(comp);

@@ -20,8 +20,10 @@ RFC 4362, IPv6, other CID modes, or any other untested variant.
 The `interop_rfc5225_co_*` tests add twenty-packet, small-CID-0 IPv4 flows with
 complete IR context establishment followed by externally generated formal CO.
 UDP/IP, ESP/IP, and IP-only exercise PT-0 in both directions with byte-exact IP
-reconstruction. The accepted interpretation interval is a forward MSN delta of
-1 through 15. The reverse path tests one deliberately lost packet, rejection of
+reconstruction. With the tested reordering ratio of zero, the RFC 5225
+interpretation interval accepts forward MSN deltas of 1 through 14 and rejects
+the one older value without relying on CRC-3 to distinguish it from a future
+delta of 15. The reverse path tests one deliberately lost packet, rejection of
 an older out-of-order packet and a duplicate, sequence-number wrap (ESP),
 CRC corruption, truncation, no-context rejection, and successful decoding after
 each failed transaction. It does not prove general reordering recovery or

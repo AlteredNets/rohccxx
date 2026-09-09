@@ -38,10 +38,10 @@ function(configure_and_verify name source_dir expected_version)
         message(FATAL_ERROR "${name} did not configure as ${expected_version}:\n${output}\n${error}")
     endif()
 
-    string(REPLACE "." ";" version_parts "${expected_version}")
-    list(GET version_parts 0 version_major)
-    list(GET version_parts 1 version_minor)
-    list(GET version_parts 2 version_patch)
+    string(REGEX MATCH "^([0-9]+)\\.([0-9]+)\\.([0-9]+)" version_core "${expected_version}")
+    set(version_major "${CMAKE_MATCH_1}")
+    set(version_minor "${CMAKE_MATCH_2}")
+    set(version_patch "${CMAKE_MATCH_3}")
     assert_file_contains("${build_dir}/generated/include/rohccxx/version.h"
         "#define ROHCCXX_VERSION_STRING \"${expected_version}\"")
     assert_file_contains("${build_dir}/generated/include/rohccxx/version.h"
@@ -51,7 +51,11 @@ function(configure_and_verify name source_dir expected_version)
     assert_file_contains("${build_dir}/generated/include/rohccxx/version.h"
         "#define ROHCCXX_VERSION_PATCH ${version_patch}")
     assert_file_contains("${build_dir}/rohccxxConfigVersion.cmake"
-        "set(PACKAGE_VERSION \"${expected_version}\")")
+        "set(PACKAGE_VERSION \"${version_core}\")")
+    assert_file_contains("${build_dir}/rohccxxConfig.cmake"
+        "set(rohccxx_VERSION_FULL \"${expected_version}\")")
+    assert_file_contains("${build_dir}/rohccxx.pc"
+        "Version: ${expected_version}")
     assert_file_contains("${build_dir}/CPackConfig.cmake"
         "set(CPACK_PACKAGE_VERSION \"${expected_version}\")")
     assert_file_contains("${build_dir}/CPackConfig.cmake"
@@ -83,7 +87,7 @@ file(REMOVE_RECURSE "${ROHCCXX_TEST_ROOT}")
 file(MAKE_DIRECTORY "${ROHCCXX_TEST_ROOT}")
 
 # The current checkout must resolve through its checked-in release metadata.
-configure_and_verify(checkout "${ROHCCXX_SOURCE_DIR}" "0.7.0")
+configure_and_verify(checkout "${ROHCCXX_SOURCE_DIR}" "0.8.0-rc.1")
 
 # Build the subset present in a source package without copying repository metadata.
 set(source_copy "${ROHCCXX_TEST_ROOT}/source-copy")
@@ -102,11 +106,11 @@ file(COPY
 if(EXISTS "${source_copy}/.git")
     message(FATAL_ERROR "Source-package fixture unexpectedly contains .git")
 endif()
-configure_and_verify(source_package "${source_copy}" "0.7.0")
+configure_and_verify(source_package "${source_copy}" "0.8.0-rc.1")
 
 # An explicit value must retain highest precedence over checked-in metadata.
-configure_and_verify(explicit_override "${source_copy}" "9.8.7"
-    -DROHCCXX_VERSION=9.8.7
+configure_and_verify(explicit_override "${source_copy}" "9.8.7-rc.2"
+    -DROHCCXX_VERSION=9.8.7-rc.2
 )
 
 set(invalid_source "${ROHCCXX_TEST_ROOT}/invalid-source")

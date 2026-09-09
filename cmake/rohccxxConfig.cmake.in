@@ -3,4 +3,8 @@
 
 @PACKAGE_INIT@
 
+set(rohccxx_VERSION "@PROJECT_VERSION@")
+set(rohccxx_VERSION_FULL "@ROHCCXX_VERSION@")
+set(rohccxx_VERSION_PRERELEASE "@ROHCCXX_VERSION_PRERELEASE@")
+
 include("${CMAKE_CURRENT_LIST_DIR}/rohccxxTargets.cmake")

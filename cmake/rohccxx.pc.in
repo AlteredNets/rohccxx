@@ -1,0 +1,12 @@
+prefix=${pcfiledir}/../..
+exec_prefix=${prefix}
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: rohccxx
+Description: Modern C++ ROHC compression library with a C API
+URL: https://github.com/AlteredNets/rohccxx
+Version: @ROHCCXX_VERSION@
+Libs: -L${libdir} -lrohccxx
+Libs.private: -lstdc++ -pthread
+Cflags: -I${includedir}

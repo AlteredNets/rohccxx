@@ -21,6 +21,7 @@
 #include "rohccxx/core/emit_udp_fo.hpp"
 #include "rohccxx/core/emit_udplite_fo.hpp"
 #include "rohccxx/core/packet_type.hpp"
+#include "rohccxx/core/private_udp_fo_crc.hpp"
 #include "rohccxx/core/rfc5225_chains.hpp"
 #include "rohccxx/core/rfc5225_grammar.hpp"
 #include "rohccxx/utils/crc.hpp"
@@ -1326,7 +1327,9 @@ TEST_CASE("RFC 5225 UDP packet grammar is pinned for current IR IR-DYN and FO")
     REQUIRE(rohccxx::emit_udp_fo(out, &len, ctx));
     REQUIRE(len == 6);
     REQUIRE(out[0] == 0x7A);
-    require_crc8_at(out, len, 1);
+    const std::uint8_t udp_fo_crc = out[1];
+    out[1] = 0U;
+    REQUIRE(rohccxx::detail::private_udp_fo_crc8(out, len, ctx) == udp_fo_crc);
     REQUIRE(read_u16(out + 2) == ctx.ipv4_id);
     REQUIRE(read_u16(out + 4) == ctx.udp_check);
 }
@@ -1356,7 +1359,10 @@ TEST_CASE("RFC 5225 IP-only packet grammar is pinned for current IR IR-DYN and F
     REQUIRE(rohccxx::emit_ip_fo(out, &len, ctx));
     REQUIRE(len == 4);
     REQUIRE(out[0] == 0x79);
-    require_crc8_at(out, len, 1);
+    const std::uint8_t ip_fo_crc = out[1];
+    out[1] = 0U;
+    REQUIRE(rohccxx::detail::private_ip_fo_crc8(out, len, ctx) == ip_fo_crc);
+    out[1] = ip_fo_crc;
     REQUIRE(read_u16(out + 2) == ctx.ipv4_id);
 }
 
@@ -1389,7 +1395,10 @@ TEST_CASE("RFC 5225 ESP packet grammar is pinned for current IR IR-DYN and FO")
     REQUIRE(rohccxx::emit_esp_fo(out, &len, ctx));
     REQUIRE(len == 4);
     REQUIRE(out[0] == 0x78);
-    require_crc8_at(out, len, 1);
+    const std::uint8_t esp_fo_crc = out[1];
+    out[1] = 0U;
+    REQUIRE(rohccxx::detail::private_esp_fo_crc8(out, len, ctx) == esp_fo_crc);
+    out[1] = esp_fo_crc;
     REQUIRE(read_u16(out + 2) == ctx.ipv4_id);
 }
 
@@ -1467,7 +1476,10 @@ TEST_CASE("RFC 5225 UDP-Lite packet grammar is pinned for current IR IR-DYN and 
     REQUIRE(rohccxx::emit_udp_lite_fo(out, &len, ctx));
     REQUIRE(len == 8);
     REQUIRE(out[0] == 0x77);
-    require_crc8_at(out, len, 1);
+    const std::uint8_t udp_lite_fo_crc = out[1];
+    out[1] = 0U;
+    REQUIRE(rohccxx::detail::private_udp_lite_fo_crc8(out, len, ctx) == udp_lite_fo_crc);
+    out[1] = udp_lite_fo_crc;
     REQUIRE(read_u16(out + 2) == ctx.ipv4_id);
     REQUIRE(read_u16(out + 4) == ctx.udp_length_or_coverage);
     REQUIRE(read_u16(out + 6) == ctx.udp_check);

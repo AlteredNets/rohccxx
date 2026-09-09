@@ -10,6 +10,7 @@
 #include "rohccxx/core/context.hpp"
 #include "rohccxx/core/cid.hpp"
 #include "rohccxx/core/decode_ir.hpp"
+#include "rohccxx/core/private_udp_fo_crc.hpp"
 #include "rohccxx/utils/crc.hpp"
 
 namespace rohccxx
@@ -38,7 +39,7 @@ inline bool decode_esp_fo(const uint8_t* in,
     std::memcpy(crc_buf, in, header_len);
     const uint8_t received_crc = crc_buf[pos];
     crc_buf[pos++] = 0x00;
-    if(utils::crc8(crc_buf, header_len) != received_crc)
+    if(detail::private_esp_fo_crc8(crc_buf, header_len, ctx) != received_crc)
         return false;
 
     ctx.ipv4_id = detail::read_u16(in + pos);

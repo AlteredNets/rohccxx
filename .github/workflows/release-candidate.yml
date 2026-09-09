@@ -22,11 +22,12 @@ concurrency:
 
 jobs:
   build-release-candidate:
-    name: Build and validate v0.7.0
+    name: Build and validate v0.8.0-rc.1
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      EXPECTED_VERSION: "0.7.0"
+      EXPECTED_VERSION: "0.8.0-rc.1"
+      EXPECTED_ABI_VERSION: "0.8.0"
       EXPECTED_ROHC_LIB_COMMIT: "70589cc2b8650f82453815c84ba41b0ab80a52a0"
       CC: gcc
       CXX: g++
@@ -199,7 +200,7 @@ jobs:
             "${build_dir}/generated/include/rohccxx/version.h"
           grep -Fq "#define ROHCCXX_VERSION_MAJOR 0" \
             "${build_dir}/generated/include/rohccxx/version.h"
-          grep -Fq "#define ROHCCXX_VERSION_MINOR 7" \
+          grep -Fq "#define ROHCCXX_VERSION_MINOR 8" \
             "${build_dir}/generated/include/rohccxx/version.h"
           grep -Fq "#define ROHCCXX_VERSION_PATCH 0" \
             "${build_dir}/generated/include/rohccxx/version.h"
@@ -215,7 +216,7 @@ jobs:
           test_log="${{ steps.artifact-paths.outputs.rc_root }}/ctest.log"
 
           cmake --build "${build_dir}" --parallel
-          test "$(ctest --test-dir "${build_dir}" -N | sed -n 's/^Total Tests: //p')" -eq 247
+          test "$(ctest --test-dir "${build_dir}" -N | sed -n 's/^Total Tests: //p')" -eq 276
           ctest --test-dir "${build_dir}" --output-on-failure 2>&1 | tee "${test_log}"
 
           registered="$(grep -Eo '[0-9]+ tests failed out of [0-9]+' "${test_log}" | tail -1 | awk '{print $6}')"
@@ -223,8 +224,8 @@ jobs:
           passed="$(grep -Ec 'Test +#[0-9]+:.* +Passed +' "${test_log}")"
           skipped="$(grep -Ec '\*\*\*Skipped' "${test_log}")"
 
-          test "${registered}" -eq 247
-          test "${passed}" -eq 244
+          test "${registered}" -eq 276
+          test "${passed}" -eq 273
           test "${failed}" -eq 0
           test "${skipped}" -eq 3
 
@@ -295,9 +296,9 @@ jobs:
           dpkg-deb --extract "${deb}" "${deb_root}"
 
           test -f "${prefix}/lib/librohccxx.a"
-          test -f "${prefix}/lib/librohccxx.so.${EXPECTED_VERSION}"
+          test -f "${prefix}/lib/librohccxx.so.${EXPECTED_ABI_VERSION}"
           test -L "${prefix}/lib/librohccxx.so.0"
-          test "$(readlink "${prefix}/lib/librohccxx.so.0")" = "librohccxx.so.${EXPECTED_VERSION}"
+          test "$(readlink "${prefix}/lib/librohccxx.so.0")" = "librohccxx.so.${EXPECTED_ABI_VERSION}"
           test -L "${prefix}/lib/librohccxx.so"
           test "$(readlink "${prefix}/lib/librohccxx.so")" = "librohccxx.so.0"
           test -f "${prefix}/include/rohccxx.h"
@@ -306,6 +307,8 @@ jobs:
           test -f "${prefix}/lib/cmake/rohccxx/rohccxxConfigVersion.cmake"
           test -f "${prefix}/lib/cmake/rohccxx/rohccxxTargets.cmake"
           test -f "${prefix}/lib/cmake/rohccxx/rohccxxTargets-release.cmake"
+          test -f "${prefix}/lib/pkgconfig/rohccxx.pc"
+          test "$(PKG_CONFIG_PATH="${prefix}/lib/pkgconfig" pkg-config --modversion rohccxx)" = "${EXPECTED_VERSION}"
 
           mapfile -t installed_headers < <(
             find "${prefix}/include" -type f -printf '%P\n' | sort
@@ -319,18 +322,18 @@ jobs:
             exit 1
           fi
 
-          readelf -d "${prefix}/lib/librohccxx.so.${EXPECTED_VERSION}" \
+          readelf -d "${prefix}/lib/librohccxx.so.${EXPECTED_ABI_VERSION}" \
             | tee "${rc_root}/readelf-dynamic.txt"
-          readelf -d "${prefix}/lib/librohccxx.so.${EXPECTED_VERSION}" \
+          readelf -d "${prefix}/lib/librohccxx.so.${EXPECTED_ABI_VERSION}" \
             | grep -Eq '\(SONAME\).*\[librohccxx\.so\.0\]'
-          ldd "${prefix}/lib/librohccxx.so.${EXPECTED_VERSION}" \
+          ldd "${prefix}/lib/librohccxx.so.${EXPECTED_ABI_VERSION}" \
             | tee "${rc_root}/shared-library-dependencies.txt"
           if grep -q 'not found' "${rc_root}/shared-library-dependencies.txt"; then
             exit 1
           fi
 
           test -f "${deb_root}/usr/lib/librohccxx.a"
-          test -f "${deb_root}/usr/lib/librohccxx.so.${EXPECTED_VERSION}"
+          test -f "${deb_root}/usr/lib/librohccxx.so.${EXPECTED_ABI_VERSION}"
           test -L "${deb_root}/usr/lib/librohccxx.so.0"
           test -L "${deb_root}/usr/lib/librohccxx.so"
           test -f "${deb_root}/usr/include/rohccxx.h"
@@ -338,6 +341,7 @@ jobs:
           test -f "${deb_root}/usr/lib/cmake/rohccxx/rohccxxConfig.cmake"
           test -f "${deb_root}/usr/lib/cmake/rohccxx/rohccxxConfigVersion.cmake"
           test -f "${deb_root}/usr/lib/cmake/rohccxx/rohccxxTargets.cmake"
+          test -f "${deb_root}/usr/lib/pkgconfig/rohccxx.pc"
 
           printf 'prefix=%s\n' "${prefix}" >> "${GITHUB_OUTPUT}"
           printf 'deb_root=%s\n' "${deb_root}" >> "${GITHUB_OUTPUT}"
@@ -359,9 +363,9 @@ jobs:
 
           int main(void)
           {
-              if(strcmp(rohccxx_version_string(), "0.7.0") != 0 ||
+              if(strcmp(rohccxx_version_string(), "0.8.0-rc.1") != 0 ||
                  rohccxx_version_major() != 0 ||
-                 rohccxx_version_minor() != 7 ||
+                 rohccxx_version_minor() != 8 ||
                  rohccxx_version_patch() != 0)
               {
                   return 1;
@@ -380,6 +384,14 @@ jobs:
             -o "${consumer_dir}/consumer-shared"
           "${consumer_dir}/consumer-shared"
 
+          PKG_CONFIG_PATH="${prefix}/lib/pkgconfig" \
+            gcc -std=c11 -Wall -Wextra -Werror \
+              "${consumer_dir}/consumer.c" \
+              $(PKG_CONFIG_PATH="${prefix}/lib/pkgconfig" pkg-config --cflags --libs rohccxx) \
+              -Wl,-rpath,"${prefix}/lib" \
+              -o "${consumer_dir}/consumer-pkgconfig"
+          "${consumer_dir}/consumer-pkgconfig"
+
           gcc -std=c11 -Wall -Wextra -Werror \
             -I"${prefix}/include" \
             -c "${consumer_dir}/consumer.c" \
@@ -396,7 +408,10 @@ jobs:
           cat > "${cmake_source}/CMakeLists.txt" <<'EOF'
           cmake_minimum_required(VERSION 3.16)
           project(rohccxx_consumer LANGUAGES C CXX)
-          find_package(rohccxx 0.7.0 CONFIG REQUIRED)
+          find_package(rohccxx 0.8.0 CONFIG REQUIRED)
+          if(NOT rohccxx_VERSION_FULL STREQUAL "0.8.0-rc.1")
+            message(FATAL_ERROR "Unexpected full rohccxx version: ${rohccxx_VERSION_FULL}")
+          endif()
           add_executable(consumer_shared consumer.c)
           target_link_libraries(consumer_shared PRIVATE rohccxx::rohccxx)
           set_property(TARGET consumer_shared PROPERTY LINKER_LANGUAGE CXX)
@@ -509,11 +524,11 @@ jobs:
       - name: Upload release candidate bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: rohccxx-0.7.0-release-candidate-${{ github.sha }}
+          name: rohccxx-0.8.0-rc.1-release-candidate-${{ github.sha }}
           path: |
-            ${{ steps.artifact-paths.outputs.artifact_dir }}/rohccxx-0.7.0-source-with-submodules.tar.gz
-            ${{ steps.artifact-paths.outputs.artifact_dir }}/librohccxx-0.7.0.deb
-            ${{ steps.artifact-paths.outputs.artifact_dir }}/rohccxx-0.7.0-buildinfo.txt
+            ${{ steps.artifact-paths.outputs.artifact_dir }}/rohccxx-0.8.0-rc.1-source-with-submodules.tar.gz
+            ${{ steps.artifact-paths.outputs.artifact_dir }}/librohccxx-0.8.0-rc.1.deb
+            ${{ steps.artifact-paths.outputs.artifact_dir }}/rohccxx-0.8.0-rc.1-buildinfo.txt
             ${{ steps.artifact-paths.outputs.artifact_dir }}/SHA256SUMS
           if-no-files-found: error
           retention-days: 14
