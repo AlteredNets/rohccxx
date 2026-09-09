@@ -5,6 +5,7 @@ cmake_minimum_required(VERSION 3.16)
 
 set(ROHCCXX_VERSION "" CACHE STRING "Override the rohccxx release version; otherwise use an exact git tag or VERSION file")
 set(_rohccxx_version_source "explicit ROHCCXX_VERSION override")
+set(_rohccxx_semver_pattern "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$")
 
 if(ROHCCXX_VERSION STREQUAL "")
     set(_rohccxx_version_source "")
@@ -21,7 +22,7 @@ if(ROHCCXX_VERSION STREQUAL "")
 
         if(_rohccxx_git_tag_result EQUAL 0)
             string(REGEX REPLACE "^v" "" _rohccxx_git_version "${_rohccxx_git_tag}")
-            if(_rohccxx_git_version MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+            if(_rohccxx_git_version MATCHES "${_rohccxx_semver_pattern}")
                 set(ROHCCXX_VERSION "${_rohccxx_git_version}")
                 set(_rohccxx_version_source "exact git tag '${_rohccxx_git_tag}'")
             else()
@@ -41,21 +42,32 @@ if(ROHCCXX_VERSION STREQUAL "")
 
     if(ROHCCXX_VERSION STREQUAL "")
         message(FATAL_ERROR
-            "Unable to determine rohccxx version: provide -DROHCCXX_VERSION=X.Y.Z, "
+            "Unable to determine rohccxx version: provide -DROHCCXX_VERSION=X.Y.Z[-prerelease], "
             "an exact semantic version git tag at HEAD, or a valid top-level VERSION file"
         )
     endif()
 endif()
 
-if(NOT ROHCCXX_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+if(NOT ROHCCXX_VERSION MATCHES "${_rohccxx_semver_pattern}")
     message(FATAL_ERROR
         "Invalid rohccxx version '${ROHCCXX_VERSION}' from ${_rohccxx_version_source}; "
-        "expected numeric semantic version X.Y.Z"
+        "expected semantic version X.Y.Z with an optional prerelease suffix"
     )
 endif()
 
-project(rohccxx VERSION ${ROHCCXX_VERSION} LANGUAGES C CXX)
-message(STATUS "rohccxx version: ${PROJECT_VERSION}")
+string(REGEX MATCH "^([0-9]+)\\.([0-9]+)\\.([0-9]+)" _rohccxx_core_match "${ROHCCXX_VERSION}")
+set(ROHCCXX_VERSION_MAJOR "${CMAKE_MATCH_1}")
+set(ROHCCXX_VERSION_MINOR "${CMAKE_MATCH_2}")
+set(ROHCCXX_VERSION_PATCH "${CMAKE_MATCH_3}")
+set(ROHCCXX_ABI_VERSION
+    "${ROHCCXX_VERSION_MAJOR}.${ROHCCXX_VERSION_MINOR}.${ROHCCXX_VERSION_PATCH}")
+set(ROHCCXX_VERSION_PRERELEASE "")
+if(ROHCCXX_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+-(.+)$")
+    set(ROHCCXX_VERSION_PRERELEASE "${CMAKE_MATCH_1}")
+endif()
+
+project(rohccxx VERSION ${ROHCCXX_ABI_VERSION} LANGUAGES C CXX)
+message(STATUS "rohccxx version: ${ROHCCXX_VERSION}")
 
 include(GNUInstallDirs)
 
@@ -144,6 +156,12 @@ configure_package_config_file(
     INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/rohccxx
 )
 
+configure_file(
+    ${PROJECT_SOURCE_DIR}/cmake/rohccxx.pc.in
+    ${PROJECT_BINARY_DIR}/rohccxx.pc
+    @ONLY
+)
+
 write_basic_package_version_file(
     ${PROJECT_BINARY_DIR}/rohccxxConfigVersion.cmake
     VERSION ${PROJECT_VERSION}
@@ -156,6 +174,11 @@ install(FILES
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/rohccxx
 )
 
+install(FILES
+    ${PROJECT_BINARY_DIR}/rohccxx.pc
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig
+)
+
 # ---- Add support for creating installable packages ----
 include(InstallRequiredSystemLibraries)
 
@@ -163,9 +186,9 @@ set(CPACK_PACKAGE_NAME "librohccxx")
 set(CPACK_PACKAGE_VENDOR "AlteredNets Cyber Solutions, Inc.")
 set(CPACK_PACKAGE_CONTACT "sales@alterednets.com")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Modern C++ ROHC compression library")
-set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
+set(CPACK_PACKAGE_VERSION ${ROHCCXX_VERSION})
 set(CPACK_PACKAGE_LICENSE "AlteredNets Non-Commercial / Commercial")
-set(CPACK_PACKAGE_FILE_NAME "librohccxx-${PROJECT_VERSION}")
+set(CPACK_PACKAGE_FILE_NAME "librohccxx-${ROHCCXX_VERSION}")
 set(CPACK_PACKAGING_INSTALL_PREFIX "/usr" CACHE STRING "Install prefix used inside generated binary packages")
 
 # ---- Debian ----
