@@ -4220,8 +4220,9 @@ rohc_decompress4(struct rohc_decomp* decomp,
     {
         Context formal_context = *ctx;
         rfc5225::FormalCoPacket formal{};
-        bool formal_valid = rfc5225::read_formal_co_base(
-            packet, 1U, Profile::RTP, rfc5225::FormalCoVariant::Pt0Crc3, formal);
+        bool formal_valid = context_before_decode.rtp.ts_stride != 0U &&
+            rfc5225::read_formal_co_base(
+                packet, 1U, Profile::RTP, rfc5225::FormalCoVariant::Pt0Crc3, formal);
         std::array<std::uint8_t, 40> formal_header{};
         const uint8_t* formal_payload = nullptr;
         size_t formal_payload_len = 0U;
