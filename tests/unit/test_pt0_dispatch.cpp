@@ -216,6 +216,106 @@ std::uint16_t issue32_packet_msn(const std::vector<std::uint8_t>& packet,
     return static_cast<std::uint16_t>(generation_round + 1U);
 }
 
+void require_issue32_fuzz_witness_safe(
+    const std::vector<std::uint8_t>& witness, std::uint32_t trigger_round)
+{
+    REQUIRE(!witness.empty());
+    const auto witness_bit = [&](std::size_t offset)
+    {
+        offset %= witness.size() * 8U;
+        return (witness[offset / 8U] & (1U << (offset % 8U))) != 0U;
+    };
+    std::uint64_t salt = 0x4953535545343955ULL;
+    for(const auto byte : witness)
+        salt = (salt ^ byte) * 0x100000001b3ULL;
+    const std::uint32_t cid = witness[0] & 0x0fU;
+    const std::uint32_t starting_profile =
+        witness.size() > 1U ? witness[1] & 0x03U : 0U;
+    CompPtr comp(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    DecompPtr decomp(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(comp);
+    REQUIRE(decomp);
+    REQUIRE(rohc_decomp_set_mode(decomp.get(), ROHCCXX_MODE_O) == 0);
+    rohccxx_feedback_v1_t delayed{};
+    bool delayed_valid = false;
+    bool trigger_was_safe = false;
+    bool recovered_after_trigger = false;
+
+    for(std::uint32_t round = 0U; round < 128U; ++round)
+    {
+        if(witness_bit(round * 31U + 127U))
+        {
+            decomp.reset(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+            REQUIRE(decomp);
+            REQUIRE(rohc_decomp_set_mode(decomp.get(), ROHCCXX_MODE_O) == 0);
+        }
+        const std::uint32_t epoch = round / 32U;
+        const std::uint32_t profile = (starting_profile + epoch) & 3U;
+        const std::uint32_t ordinal = round * 16U + cid;
+        if(delayed_valid && witness_bit(round * 13U + 71U))
+        {
+            const auto status = rohc_comp_deliver_feedback_v1(comp.get(), &delayed);
+            REQUIRE((status == ROHCCXX_FEEDBACK_ACCEPTED ||
+                     status == ROHCCXX_FEEDBACK_STALE));
+            delayed_valid = false;
+        }
+
+        const auto packet = make_issue32_fuzz_packet(ordinal, cid, profile,
+                                                     epoch, round, salt);
+        REQUIRE(rohc_comp_set_cid(comp.get(), cid) == 0);
+        std::array<std::uint8_t, 2048> compressed{};
+        std::size_t compressed_len = compressed.size();
+        REQUIRE(rohc_compress4(comp.get(), packet.data(), packet.size(),
+                               compressed.data(), &compressed_len) == 0);
+        if(witness_bit(round * 17U + 19U))
+            continue;
+
+        std::array<std::uint8_t, 256> output{};
+        output.fill(0xa5U);
+        const auto guard = output;
+        std::size_t output_len = output.size();
+        const int rc = rohc_decompress4(decomp.get(), compressed.data(), compressed_len,
+                                        output.data(), &output_len);
+        if(rc == 0)
+        {
+            REQUIRE(output_len == packet.size());
+            REQUIRE(std::equal(packet.begin(), packet.end(), output.begin()));
+            if(round == trigger_round)
+                trigger_was_safe = true;
+            if(round > trigger_round)
+                recovered_after_trigger = true;
+            const std::vector<std::uint8_t> frame(
+                compressed.begin(), compressed.begin() +
+                static_cast<std::ptrdiff_t>(compressed_len));
+            if(is_ir_packet(frame, cid))
+            {
+                const auto feedback = make_ack(
+                    cid, issue32_packet_msn(packet, profile, round % 32U));
+                if(witness_bit(round * 29U + 113U))
+                {
+                    const auto status = rohc_comp_deliver_feedback_v1(comp.get(), &feedback);
+                    REQUIRE((status == ROHCCXX_FEEDBACK_ACCEPTED ||
+                             status == ROHCCXX_FEEDBACK_STALE));
+                }
+                else
+                {
+                    delayed = feedback;
+                    delayed_valid = true;
+                }
+            }
+        }
+        else
+        {
+            REQUIRE(output_len == 0U);
+            REQUIRE(output == guard);
+            if(round == trigger_round)
+                trigger_was_safe = true;
+        }
+    }
+    REQUIRE(trigger_was_safe);
+    REQUIRE(recovered_after_trigger);
+}
+
 std::vector<std::uint8_t> make_packet(Pt0Profile profile,
                                       std::uint32_t ordinal,
                                       std::uint8_t tos = 0,
@@ -1075,98 +1175,14 @@ TEST_CASE("Delayed refresh ACK cannot authorize PT-0 beyond its forward window")
 TEST_CASE("Issue 32 one-byte fuzz witness cannot silently retain an old RTP IPv4 ID",
           "[issue-32]")
 {
-    constexpr std::uint8_t witness = 0x81U;
-    auto witness_bit = [](std::size_t offset)
-    {
-        return (witness & (1U << (offset % 8U))) != 0U;
-    };
-    const std::uint64_t salt =
-        (0x4953535545343955ULL ^ witness) * 0x100000001b3ULL;
-    constexpr std::uint32_t cid = 1U;
-    constexpr std::uint32_t starting_profile = 0U;
-    CompPtr comp(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
-    DecompPtr decomp(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
-    REQUIRE(comp);
-    REQUIRE(decomp);
-    REQUIRE(rohc_decomp_set_mode(decomp.get(), ROHCCXX_MODE_O) == 0);
-    rohccxx_feedback_v1_t delayed{};
-    bool delayed_valid = false;
-    bool trigger_was_safe = false;
-    bool recovered_after_trigger = false;
+    require_issue32_fuzz_witness_safe({0x81U}, 22U);
+}
 
-    for(std::uint32_t round = 0U; round < 128U; ++round)
-    {
-        if(witness_bit(round * 31U + 127U))
-        {
-            decomp.reset(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
-            REQUIRE(decomp);
-            REQUIRE(rohc_decomp_set_mode(decomp.get(), ROHCCXX_MODE_O) == 0);
-        }
-        const std::uint32_t epoch = round / 32U;
-        const std::uint32_t profile = (starting_profile + epoch) & 3U;
-        const std::uint32_t ordinal = round * 16U + cid;
-        if(delayed_valid && witness_bit(round * 13U + 71U))
-        {
-            const auto status = rohc_comp_deliver_feedback_v1(comp.get(), &delayed);
-            REQUIRE((status == ROHCCXX_FEEDBACK_ACCEPTED ||
-                     status == ROHCCXX_FEEDBACK_STALE));
-            delayed_valid = false;
-        }
-
-        const auto packet = make_issue32_fuzz_packet(ordinal, cid, profile,
-                                                     epoch, round, salt);
-        REQUIRE(rohc_comp_set_cid(comp.get(), cid) == 0);
-        std::array<std::uint8_t, 2048> compressed{};
-        std::size_t compressed_len = compressed.size();
-        REQUIRE(rohc_compress4(comp.get(), packet.data(), packet.size(),
-                               compressed.data(), &compressed_len) == 0);
-        if(witness_bit(round * 17U + 19U))
-            continue;
-
-        std::array<std::uint8_t, 256> output{};
-        output.fill(0xa5U);
-        const auto guard = output;
-        std::size_t output_len = output.size();
-        const int rc = rohc_decompress4(decomp.get(), compressed.data(), compressed_len,
-                                        output.data(), &output_len);
-        if(rc == 0)
-        {
-            REQUIRE(output_len == packet.size());
-            REQUIRE(std::equal(packet.begin(), packet.end(), output.begin()));
-            if(round == 22U)
-                trigger_was_safe = true;
-            if(round > 22U)
-                recovered_after_trigger = true;
-            const std::vector<std::uint8_t> frame(
-                compressed.begin(), compressed.begin() +
-                static_cast<std::ptrdiff_t>(compressed_len));
-            if(is_ir_packet(frame, cid))
-            {
-                const auto feedback = make_ack(
-                    cid, issue32_packet_msn(packet, profile, round % 32U));
-                if(witness_bit(round * 29U + 113U))
-                {
-                    const auto status = rohc_comp_deliver_feedback_v1(comp.get(), &feedback);
-                    REQUIRE((status == ROHCCXX_FEEDBACK_ACCEPTED ||
-                             status == ROHCCXX_FEEDBACK_STALE));
-                }
-                else
-                {
-                    delayed = feedback;
-                    delayed_valid = true;
-                }
-            }
-        }
-        else
-        {
-            REQUIRE(output_len == 0U);
-            REQUIRE(output == guard);
-            if(round == 22U)
-                trigger_was_safe = true;
-        }
-    }
-    REQUIRE(trigger_was_safe);
-    REQUIRE(recovered_after_trigger);
+TEST_CASE("Issue 32 private ESP marker fuzz witness cannot consume formal PT-0 payload",
+          "[issue-32]")
+{
+    require_issue32_fuzz_witness_safe(
+        {0x01U, 0x02U, 0x00U, 0x08U, 0x39U, 0x89U}, 7U);
 }
 
 TEST_CASE("UDP formal PT-0 uses RFC 5225 small-CID framing")

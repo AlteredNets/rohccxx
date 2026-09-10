@@ -4119,14 +4119,21 @@ rohc_decompress4(struct rohc_decomp* decomp,
     // The unauthenticated fixed-header ESP PT-0 path authenticates a temporary
     // context and a 28-byte reconstruction before touching live state or caller
     // output. ROHCoIPsec retains its existing full-packet authenticated staging.
-    const bool fixed_esp_pt0_candidate =
-        !stage_authenticated_output && packet_len > 0U &&
-        (packet[0] & 0x80U) == 0U &&
-        context_before_decode.profile == Profile::ESP &&
-        context_before_decode.ipv4_options_len == 0U &&
+    const bool live_esp_pt0_context =
         rfc5225::live_pt0_context_supported(context_before_decode,
                                             decomp->impl.large_cid_space,
                                             cid, parsed.has_add_cid);
+    const bool esp_pt0_alias_context =
+        context_before_decode.rohc_state == RohcState::DynamicEstablished &&
+        context_before_decode.profile == Profile::ESP &&
+        context_before_decode.ip_version == 4 &&
+        !decomp->impl.large_cid_space && !context_before_decode.large_cid &&
+        cid <= 0x0fU && parsed.has_add_cid == (cid != 0U);
+    const bool fixed_esp_pt0_candidate =
+        !stage_authenticated_output && packet_len > 0U &&
+        (packet[0] & 0x80U) == 0U &&
+        context_before_decode.ipv4_options_len == 0U &&
+        esp_pt0_alias_context;
     if(fixed_esp_pt0_candidate)
     {
         auto decode_formal = [&](std::uint8_t first_octet,
@@ -4173,7 +4180,12 @@ rohc_decompress4(struct rohc_decomp* decomp,
             decode_esp_fo(packet, packet_len, private_context, &private_header_len) &&
             private_context.profile == Profile::ESP;
 
-        if(formal_valid && private_valid)
+        // A context whose IPv4-ID behavior does not authorize live PT-0 may
+        // still authenticate a later formal unit after the behavior-changing
+        // refresh was lost. The same wire image can also authenticate as a
+        // private ESP unit against the retained context. Never commit either
+        // interpretation when that latent formal meaning is valid.
+        if(formal_valid && (!live_esp_pt0_context || private_valid))
             return finish_decoding(fail_with_feedback(cid));
         if(private_valid)
         {
