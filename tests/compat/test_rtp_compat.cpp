@@ -2116,8 +2116,12 @@ void require_profile_parity_fixture(const ProfileParityFixture& fixture)
         if(i == 2 && fixture.profile == ParityProfile::Rtp)
         {
             expected.clear();
+            const auto msn_lsb = static_cast<std::uint8_t>(1002U & 0x1fU);
             expected.push_back(static_cast<std::uint8_t>(
-                ((1002U & 0x0fU) << 3U) | rohccxx::utils::crc3(packet, 40U)));
+                0x80U | ((msn_lsb >> 1U) & 0x0fU)));
+            expected.push_back(static_cast<std::uint8_t>(
+                ((msn_lsb & 0x01U) << 7U) |
+                (rohccxx::utils::crc7(packet, 40U) & 0x7fU)));
             expected.insert(expected.end(), packet + 40U, packet + sizeof(packet));
         }
         else if(i == 2 && fixture.profile == ParityProfile::RtpUdpLite)

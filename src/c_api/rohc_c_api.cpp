@@ -577,16 +577,13 @@ static bool emit_rtp_pt0_small_cid(std::uint8_t* out,
 {
     if(!out || !out_len || !ipv4_udp_rtp_header || cid > 0x0fU)
         return false;
-    const size_t required = cid == 0U ? 1U : 2U;
-    if(*out_len < required)
-        return false;
-    size_t pos = 0U;
-    if(cid != 0U)
-        out[pos++] = static_cast<std::uint8_t>(0xe0U | cid);
-    out[pos++] = static_cast<std::uint8_t>(((msn & 0x0fU) << 3U) |
-                                           rohccxx::utils::crc3(ipv4_udp_rtp_header, 40U));
-    *out_len = pos;
-    return true;
+    const rohccxx::rfc5225::FormalCoFields fields{msn};
+    const rohccxx::rfc5225::FormalCoCrcInput crc_input{
+        ipv4_udp_rtp_header, 40U};
+    return rohccxx::rfc5225::emit_formal_co(
+        out, out_len, rohccxx::Profile::RTP,
+        rohccxx::rfc5225::FormalCoVariant::Pt0Crc7, cid, false,
+        fields, crc_input);
 }
 
 static bool checked_packet_size(size_t base, size_t payload, size_t& total)
@@ -3887,6 +3884,72 @@ rohc_decompress4(struct rohc_decomp* decomp,
     size_t decode_packet_len = decoder_packet_len(parsed);
     bool prefer_private_rtp_fo = false;
 
+    // RTP PT-0-CRC7 carries five MSN bits and authenticates the reconstructed
+    // header with CRC-7. Use the wider form for current emission so a delayed
+    // packet outside the four-bit interval cannot alias under CRC-3.
+    const bool fixed_rtp_pt0_crc7_candidate =
+        parsed.type == RohcPacketType::FormalCO && packet_len >= 2U &&
+        (packet[0] & 0xf0U) == 0x80U &&
+        context_before_decode.profile == Profile::RTP &&
+        context_before_decode.ipv4_options_len == 0U &&
+        (context_before_decode.rtp.vpxcc & 0x3fU) == 0U &&
+        context_before_decode.rtp.csrc_list_len == 0U &&
+        context_before_decode.rtp.extension_len == 0U &&
+        context_before_decode.rtp.padding_len == 0U &&
+        rfc5225::live_pt0_context_supported(context_before_decode,
+                                            decomp->impl.large_cid_space,
+                                            cid, parsed.has_add_cid);
+    if(fixed_rtp_pt0_crc7_candidate)
+    {
+        Context formal_context = context_before_decode;
+        rfc5225::FormalCoPacket formal{};
+        bool formal_valid = context_before_decode.rtp.ts_stride != 0U &&
+            rfc5225::read_formal_co_base(
+                packet, 2U, Profile::RTP,
+                rfc5225::FormalCoVariant::Pt0Crc7, formal);
+        std::uint16_t next_msn = 0U;
+        formal_valid = formal_valid && decode_forward_formal_msn(
+            formal_context, formal.msn, 5U, next_msn);
+        if(formal_valid)
+        {
+            const auto delta = static_cast<std::uint16_t>(
+                next_msn - formal_context.msn);
+            formal_context.msn = next_msn;
+            if(formal_context.ipv4_id_behavior == 0U)
+                formal_context.ipv4_id = static_cast<std::uint16_t>(
+                    formal_context.ipv4_id + delta);
+            formal_context.rtp.last_seq = next_msn;
+            formal_context.rtp.last_ts += formal_context.rtp.ts_stride * delta;
+        }
+
+        const uint8_t* formal_payload = nullptr;
+        size_t formal_payload_len = 0U;
+        formal_valid = formal_valid && detail::payload_after_header(
+            packet, packet_len, 2U, formal_payload, formal_payload_len);
+        std::array<std::uint8_t, 40> formal_header{};
+        formal_valid = formal_valid && build_fixed_rtp_ipv4_header(
+            formal_header, formal_context, formal_payload_len) &&
+            utils::crc7(formal_header.data(), formal_header.size()) ==
+                formal.header_crc;
+        if(!formal_valid ||
+           formal_payload_len > std::numeric_limits<size_t>::max() -
+                                    formal_header.size() ||
+           reconstruction_len < formal_header.size() + formal_payload_len)
+        {
+            return finish_decoding(fail_with_feedback(cid));
+        }
+
+        const size_t final_len = formal_header.size() + formal_payload_len;
+        *ctx = formal_context;
+        decomp->impl.mode = formal_context.mode;
+        std::memcpy(reconstruction_packet, formal_header.data(), formal_header.size());
+        if(formal_payload_len > 0U)
+            std::memcpy(reconstruction_packet + formal_header.size(), formal_payload,
+                        formal_payload_len);
+        reconstruction_len = final_len;
+        return finish_decoding(verify_rohcoipsec_icv(0));
+    }
+
     // Non-RTP PT-1 seq-ID has a unique 101 discriminator. Decode its existing
     // formal grammar against an established small-CID IPv4 context, then
     // authenticate the complete reconstructed header before committing state
@@ -4364,19 +4427,29 @@ rohc_decompress4(struct rohc_decomp* decomp,
             if(formal_valid)
             {
                 const auto delta = static_cast<std::uint16_t>(next_msn - formal_context.msn);
-                formal_context.msn = next_msn;
-                if(formal_context.ipv4_id_behavior == 0U)
-                    formal_context.ipv4_id =
-                        static_cast<std::uint16_t>(formal_context.ipv4_id + delta);
-                formal_context.rtp.last_seq = next_msn;
-                formal_context.rtp.last_ts += formal_context.rtp.ts_stride * delta;
-                formal_valid = detail::payload_after_header(packet, packet_len, 1U,
-                                                             formal_payload,
-                                                             formal_payload_len) &&
-                    build_fixed_rtp_ipv4_header(formal_header, formal_context,
-                                                formal_payload_len) &&
-                    utils::crc3(formal_header.data(), formal_header.size()) ==
-                        formal.header_crc;
+                // The legacy one-octet RTP PT-0 form has only four MSN bits
+                // and CRC-3.  It cannot safely distinguish a forward gap from
+                // an old unit delayed by one 16-value sequence cycle.  Keep
+                // sequential interoperability, but require explicit context
+                // refresh to recover any gap instead of accepting an aliased
+                // reconstruction.
+                formal_valid = delta == 1U;
+                if(formal_valid)
+                {
+                    formal_context.msn = next_msn;
+                    if(formal_context.ipv4_id_behavior == 0U)
+                        formal_context.ipv4_id =
+                            static_cast<std::uint16_t>(formal_context.ipv4_id + delta);
+                    formal_context.rtp.last_seq = next_msn;
+                    formal_context.rtp.last_ts += formal_context.rtp.ts_stride * delta;
+                    formal_valid = detail::payload_after_header(packet, packet_len, 1U,
+                                                                 formal_payload,
+                                                                 formal_payload_len) &&
+                        build_fixed_rtp_ipv4_header(formal_header, formal_context,
+                                                    formal_payload_len) &&
+                        utils::crc3(formal_header.data(), formal_header.size()) ==
+                            formal.header_crc;
+                }
             }
         }
 

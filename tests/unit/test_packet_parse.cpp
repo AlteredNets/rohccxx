@@ -195,8 +195,8 @@ void require_collision_regression_round_trips(bool zero_payload)
 
         if(!zero_payload && (i == 41095U || i == 49016U))
         {
-            REQUIRE(compressed_len == 1201);
-            REQUIRE((compressed[0] & 0x80U) == 0U);
+            REQUIRE(compressed_len == 1202);
+            REQUIRE((compressed[0] & 0xf0U) == 0x80U);
         }
 
         std::size_t output_len = output.size();
@@ -656,7 +656,7 @@ TEST_CASE("RTP FO round-trips sequential IPv4 IDs and DF flags")
         rohccxx::ParsedRohcPacket parsed{};
         REQUIRE(rohccxx::parse_rohc_packet(rohc, rohc_len, parsed));
         if(i >= 2)
-            REQUIRE(parsed.type == rohccxx::RohcPacketType::FO_RTP);
+            REQUIRE(parsed.type == rohccxx::RohcPacketType::FormalCO);
 
         std::uint8_t out[128] = {};
         std::size_t out_len = sizeof(out);
@@ -1320,7 +1320,7 @@ TEST_CASE("ROHC packet parser rejects malformed packet starts")
     uint8_t add_cid_only[] = {0xE1};
     REQUIRE_FALSE(rohccxx::parse_rohc_packet(add_cid_only, sizeof(add_cid_only), parsed));
 
-    uint8_t unknown[] = {0x80};
+    uint8_t unknown[] = {0xC0};
     REQUIRE_FALSE(rohccxx::parse_rohc_packet(unknown, sizeof(unknown), parsed));
 
     uint8_t truncated_ir[] = {0xFD};
@@ -2941,7 +2941,7 @@ TEST_CASE("ROHC packet parser rejects malformed Add-CID FO starts")
     const std::uint8_t add_cid_only[] = {0xE3};
     REQUIRE_FALSE(rohccxx::parse_rohc_packet(add_cid_only, sizeof(add_cid_only), parsed));
 
-    const std::uint8_t add_cid_unknown[] = {0xE3, 0x80};
+    const std::uint8_t add_cid_unknown[] = {0xE3, 0xC0};
     REQUIRE_FALSE(rohccxx::parse_rohc_packet(add_cid_unknown, sizeof(add_cid_unknown), parsed));
 }
 
