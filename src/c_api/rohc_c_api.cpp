@@ -10,7 +10,6 @@
 #include "rohccxx/core/context_table.hpp"
 #include "rohccxx/core/profile.hpp"
 #include "rohccxx/core/classify.hpp"
-#include "rohccxx/core/context_init.hpp"
 #include "rohccxx/core/emit_uncompressed.hpp"
 #include "rohccxx/core/emit_rtp_fo.hpp"
 #include "rohccxx/core/emit_udp_fo.hpp"
@@ -2877,18 +2876,7 @@ rohc_compress4(struct rohc_comp* comp,
         const size_t out_capacity = *rohc_packet_len;
         if(should_emit_ir(*ctx))
         {
-            init_rtp_context(comp->impl.contexts, cid, rtp);
-            ctx->profile = Profile::RTP;
-            ctx->mode = comp->impl.mode;
             ctx->rohc_state = RohcState::StaticEstablished;
-            if(!capture_common())
-                return -1;
-            ctx->udp_sport = wire::to_host(udp->src_port);
-            ctx->udp_dport = wire::to_host(udp->dst_port);
-            ctx->udp_length_or_coverage = wire::to_host(udp->length);
-            ctx->udp_check = wire::to_host(udp->checksum);
-            ctx->rtp.vpxcc = wire::to_host(rtp->vpxcc);
-            ctx->rtp.mpt = wire::to_host(rtp->mpt);
             if(!emit_ir_rtp(rohc_packet, rohc_packet_len, *ctx))
                 return -1;
         }
