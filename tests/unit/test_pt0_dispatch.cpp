@@ -80,17 +80,12 @@ bool is_ir_packet(const std::vector<std::uint8_t>& packet, std::uint32_t cid)
     return packet.size() > offset && (packet[offset] & 0xfeU) == 0xfcU;
 }
 
-void acknowledge_refresh(rohc_comp* comp, Pt0Profile profile, std::uint32_t cid,
-                         std::uint32_t ordinal,
-                         const std::vector<std::uint8_t>& packet)
+rohccxx_feedback_v1_t make_ack(std::uint32_t cid, std::uint16_t msn)
 {
-    if(ordinal < 2U || !is_ir_packet(packet, cid))
-        return;
     rohccxx::Feedback feedback{};
     feedback.cid = cid;
     feedback.type = rohccxx::FeedbackType::ACK;
-    feedback.acknowledgment_number = static_cast<std::uint16_t>(
-        profile == Pt0Profile::Esp ? ordinal : ordinal + 1U);
+    feedback.acknowledgment_number = msn;
     feedback.acknowledgment_bits = 14U;
     feedback.acknowledgment_valid = true;
     std::array<std::uint8_t, ROHCCXX_FEEDBACK_RAW_MAX> raw{};
@@ -99,6 +94,17 @@ void acknowledge_refresh(rohc_comp* comp, Pt0Profile profile, std::uint32_t cid,
     rohccxx_feedback_v1_t parsed{};
     REQUIRE(rohc_feedback_parse_v1(ROHCCXX_DIRECTION_UPLINK, raw.data(), raw_len,
                                    &parsed) == ROHCCXX_FEEDBACK_ACCEPTED);
+    return parsed;
+}
+
+void acknowledge_refresh(rohc_comp* comp, Pt0Profile profile, std::uint32_t cid,
+                         std::uint32_t ordinal,
+                         const std::vector<std::uint8_t>& packet)
+{
+    if(ordinal < 2U || !is_ir_packet(packet, cid))
+        return;
+    const auto parsed = make_ack(cid, static_cast<std::uint16_t>(
+        profile == Pt0Profile::Esp ? ordinal : ordinal + 1U));
     REQUIRE(rohc_comp_deliver_feedback_v1(comp, &parsed) ==
             ROHCCXX_FEEDBACK_ACCEPTED);
 }
@@ -962,6 +968,34 @@ TEST_CASE("PT-0 forward gaps cannot alias a later compressor packet to stale sta
             }
         }
     }
+}
+
+TEST_CASE("Delayed refresh ACK cannot authorize PT-0 beyond its forward window")
+{
+    CompPtr comp(rohc_comp_new2(0U, ROHCCXX_DIRECTION_UPLINK));
+    DecompPtr decomp(rohc_decomp_new2(0U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(comp);
+    REQUIRE(decomp);
+    rohccxx_feedback_v1_t delayed{};
+    for(std::uint32_t ordinal = 0U; ordinal <= 32U; ++ordinal)
+    {
+        const auto original = make_packet(Pt0Profile::Udp, ordinal, 158U);
+        const auto rohc = compress_packet(comp.get(), 0U, original);
+        if(ordinal <= 1U || ordinal == 16U)
+            require_guarded_decode(decomp.get(), rohc, original);
+        if(ordinal == 16U)
+        {
+            REQUIRE(is_ir_packet(rohc, 0U));
+            delayed = make_ack(0U, static_cast<std::uint16_t>(ordinal + 1U));
+        }
+    }
+
+    REQUIRE(rohc_comp_deliver_feedback_v1(comp.get(), &delayed) ==
+            ROHCCXX_FEEDBACK_STALE);
+    const auto current = make_packet(Pt0Profile::Udp, 33U, 158U);
+    const auto current_rohc = compress_packet(comp.get(), 0U, current);
+    REQUIRE(is_ir_packet(current_rohc, 0U));
+    require_guarded_decode(decomp.get(), current_rohc, current);
 }
 
 TEST_CASE("UDP formal PT-0 uses RFC 5225 small-CID framing")

@@ -141,6 +141,29 @@ std::vector<std::uint8_t> make_collision_regression_packet(std::uint32_t ordinal
     return packet;
 }
 
+void acknowledge_collision_refresh(rohc_comp* comp,
+                                   const std::vector<std::uint8_t>& compressed,
+                                   std::size_t compressed_len,
+                                   std::uint16_t sequence)
+{
+    if(compressed_len == 0U || (compressed[0] & 0xfeU) != 0xfcU)
+        return;
+
+    rohccxx::Feedback feedback{};
+    feedback.type = rohccxx::FeedbackType::ACK;
+    feedback.acknowledgment_number = sequence;
+    feedback.acknowledgment_bits = 14U;
+    feedback.acknowledgment_valid = true;
+    std::array<std::uint8_t, ROHCCXX_FEEDBACK_RAW_MAX> raw{};
+    std::size_t raw_len = raw.size();
+    REQUIRE(rohccxx::write_feedback2_v1(raw.data(), &raw_len, feedback));
+    rohccxx_feedback_v1_t parsed{};
+    REQUIRE(rohc_feedback_parse_v1(ROHCCXX_DIRECTION_UPLINK, raw.data(), raw_len,
+                                   &parsed) == ROHCCXX_FEEDBACK_ACCEPTED);
+    REQUIRE(rohc_comp_deliver_feedback_v1(comp, &parsed) ==
+            ROHCCXX_FEEDBACK_ACCEPTED);
+}
+
 void require_collision_regression_round_trips(bool zero_payload)
 {
     constexpr std::size_t packet_count = 49017;
@@ -187,6 +210,12 @@ void require_collision_regression_round_trips(bool zero_payload)
            std::memcmp(output.data(), input.data(), input.size()) != 0)
         {
             ++incorrect_round_trips;
+        }
+        if(i >= 2U && api_status == 0 && output_len == input.size() &&
+           std::memcmp(output.data(), input.data(), input.size()) == 0)
+        {
+            acknowledge_collision_refresh(comp, compressed, compressed_len,
+                static_cast<std::uint16_t>(0x1000U + i));
         }
 
         if(!zero_payload && (i == 41095U || i == 49016U))

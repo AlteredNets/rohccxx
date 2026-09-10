@@ -1548,6 +1548,12 @@ static std::uint8_t formal_pt0_forward_limit(const rohccxx::Context& ctx)
     return static_cast<std::uint8_t>(15U - p_by_reorder_ratio[ctx.reorder_ratio]);
 }
 
+static bool profile_uses_formal_pt0(rohccxx::Profile profile)
+{
+    return profile == rohccxx::Profile::RTP || profile == rohccxx::Profile::UDP ||
+           profile == rohccxx::Profile::ESP || profile == rohccxx::Profile::IP;
+}
+
 static void require_confirmation_before_pt0_alias(rohccxx::Context& ctx)
 {
     const auto limit = formal_pt0_forward_limit(ctx);
@@ -2247,11 +2253,17 @@ rohc_comp_deliver_feedback_v1(struct rohc_comp* comp,
     if(!context)
         return ROHCCXX_FEEDBACK_UNCORRELATED;
     uint64_t acknowledged_revision = 0;
+    uint16_t acknowledged_msn = 0;
     if(!rohccxx::transmitted_msn_revision(*context, parsed.acknowledgment_number,
                                          parsed.acknowledgment_bits,
-                                         acknowledged_revision))
+                                         acknowledged_revision, &acknowledged_msn))
         return ROHCCXX_FEEDBACK_STALE;
     if(acknowledged_revision != context->context_revision)
+        return ROHCCXX_FEEDBACK_STALE;
+    const auto context_distance = static_cast<std::uint16_t>(
+        context->msn - acknowledged_msn);
+    if(profile_uses_formal_pt0(context->profile) &&
+       context_distance > formal_pt0_forward_limit(*context))
         return ROHCCXX_FEEDBACK_STALE;
 
     rohccxx::Feedback core{};
@@ -2260,6 +2272,8 @@ rohc_comp_deliver_feedback_v1(struct rohc_comp* comp,
         return feedback_status_to_c(core_status);
     core.acknowledged_context_revision = acknowledged_revision;
     core.context_revision_valid = true;
+    core.acknowledged_context_distance = context_distance;
+    core.context_distance_valid = true;
     rohccxx::apply_feedback_to_context(*context, core);
     return ROHCCXX_FEEDBACK_ACCEPTED;
 }
@@ -2690,7 +2704,7 @@ rohc_compress4(struct rohc_comp* comp,
         replacement.context_revision = context_before_compress.context_revision + 1U;
         *ctx = replacement;
     }
-    if(profile == Profile::UDP || profile == Profile::ESP || profile == Profile::IP)
+    if(profile_uses_formal_pt0(profile))
     {
         require_confirmation_before_pt0_alias(*ctx);
     }
@@ -2924,6 +2938,10 @@ rohc_compress4(struct rohc_comp* comp,
                     *rohc_packet_len = out_capacity;
                     if(!emit_ir_dyn_rtp(rohc_packet, rohc_packet_len, *ctx))
                         return -1;
+                }
+                else
+                {
+                    ++ctx->formal_pt0_since_confirmation;
                 }
             }
             else if(ctx->udp_check != context_before_compress.udp_check)
