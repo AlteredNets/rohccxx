@@ -4,6 +4,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <rohccxx.h>
 
+#include "rohccxx/core/feedback.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -35,6 +37,56 @@ void write32(std::uint8_t* out, std::uint32_t value)
     out[1] = static_cast<std::uint8_t>(value >> 16U);
     out[2] = static_cast<std::uint8_t>(value >> 8U);
     out[3] = static_cast<std::uint8_t>(value);
+}
+
+std::uint16_t read16(const std::uint8_t* in)
+{
+    return static_cast<std::uint16_t>(
+        (static_cast<std::uint16_t>(in[0]) << 8U) | in[1]);
+}
+
+std::uint32_t read32(const std::uint8_t* in)
+{
+    return (static_cast<std::uint32_t>(in[0]) << 24U) |
+           (static_cast<std::uint32_t>(in[1]) << 16U) |
+           (static_cast<std::uint32_t>(in[2]) << 8U) |
+           static_cast<std::uint32_t>(in[3]);
+}
+
+rohccxx_feedback_status_t deliver_ack_msn(rohc_comp* comp, std::uint32_t cid,
+                                         std::uint16_t msn)
+{
+    rohccxx::Feedback core{};
+    core.cid = cid;
+    core.type = rohccxx::FeedbackType::ACK;
+    core.acknowledgment_number = msn;
+    core.acknowledgment_bits = 14U;
+    core.acknowledgment_valid = true;
+    std::array<std::uint8_t, ROHCCXX_FEEDBACK_RAW_MAX> raw{};
+    std::size_t raw_len = raw.size();
+    REQUIRE(rohccxx::write_feedback2_v1(raw.data(), &raw_len, core));
+    rohccxx_feedback_v1_t parsed{};
+    REQUIRE(rohc_feedback_parse_v1(ROHCCXX_DIRECTION_UPLINK,
+                                   raw.data(), raw_len, &parsed) ==
+            ROHCCXX_FEEDBACK_ACCEPTED);
+    return rohc_comp_deliver_feedback_v1(comp, &parsed);
+}
+
+void acknowledge_msn(rohc_comp* comp, std::uint32_t cid, std::uint16_t msn)
+{
+    REQUIRE(deliver_ack_msn(comp, cid, msn) == ROHCCXX_FEEDBACK_ACCEPTED);
+}
+
+template<std::size_t Size>
+std::uint16_t packet_msn(const std::array<std::uint8_t, Size>& packet,
+                         std::uint32_t profile,
+                         std::uint32_t generic_msn)
+{
+    if(profile == 0U)
+        return read16(packet.data() + 30U);
+    if(profile == 2U)
+        return static_cast<std::uint16_t>(read32(packet.data() + 24U));
+    return static_cast<std::uint16_t>(generic_msn);
 }
 
 std::uint16_t checksum(const std::uint8_t* data, std::size_t size)
@@ -340,19 +392,18 @@ TEST_CASE("Issue 51 exact control sequence stays exact and refresh rejection is 
 
     // A correlated acknowledgment releases only this replacement generation;
     // ordinary compact encoding resumes after its dynamic refresh.
-    rohc_comp_handle_feedback(comp.get(), 12U, 2U);
-    for(std::uint32_t round : {7U, 8U})
+    acknowledge_msn(comp.get(), 12U, 2U);
+    const auto behavior_refresh = make_packet(7U * 16U + 12U, 12U, 0U, 1U,
+                                              7U, issue51_salt());
+    require_exact(generated.get(), compress(comp.get(), 12U, behavior_refresh),
+                  behavior_refresh);
+    acknowledge_msn(comp.get(), 12U, read16(behavior_refresh.data() + 30U));
+    for(std::uint32_t round : {8U, 9U})
     {
         const auto packet = make_packet(round * 16U + 12U, 12U, 0U, 1U,
                                         round, issue51_salt());
         const auto compressed = compress(comp.get(), 12U, packet);
         require_exact(generated.get(), compressed, packet);
-        if(round == 8U)
-        {
-            REQUIRE(compressed.size() == 58U);
-            REQUIRE(compressed[0] == 0xecU);
-            REQUIRE((compressed[1] & 0x80U) == 0U);
-        }
     }
 }
 
@@ -396,6 +447,7 @@ TEST_CASE("Issue 51 profile replacement matrix keeps compact units behind acknow
 
                 const std::uint32_t lost = 1U +
                     ((cid + old_profile + replacement_profile) & 1U);
+                std::uint16_t delivered_msn = 0U;
                 for(std::uint32_t step = 0U; step <= lost; ++step)
                 {
                     const auto round = 3U + step;
@@ -411,9 +463,11 @@ TEST_CASE("Issue 51 profile replacement matrix keeps compact units behind acknow
                     REQUIRE(wire.size() > type_offset + 1U);
                     REQUIRE(wire[type_offset] == 0xfdU);
                     require_exact(decomp.get(), wire, packet);
+                    delivered_msn = packet_msn(packet, replacement_profile,
+                                               step + 1U);
                 }
 
-                rohc_comp_handle_feedback(comp.get(), cid, 2U);
+                acknowledge_msn(comp.get(), cid, delivered_msn);
                 for(std::uint32_t tail = 0U; tail < 2U; ++tail)
                 {
                     const auto round = 4U + lost + tail;
@@ -444,7 +498,8 @@ TEST_CASE("Profile replacement clears retired RTP dynamics before compact recove
         const auto packet = make_issue52_packet(cid, 0U, 31U, round);
         require_exact_array(decomp.get(), compress_array(comp.get(), cid, packet), packet);
         if(round == 248U)
-            rohc_comp_handle_feedback(comp.get(), cid, 2U);
+            acknowledge_msn(comp.get(), cid,
+                            static_cast<std::uint16_t>(0xfff0U + round));
     }
 
     // Reuse the CID for IP-only and establish its sequential IPv4-ID behavior.
@@ -453,7 +508,7 @@ TEST_CASE("Profile replacement clears retired RTP dynamics before compact recove
         const auto packet = make_issue52_packet(cid, 3U, 34U, round);
         require_exact_array(decomp.get(), compress_array(comp.get(), cid, packet), packet);
         if(round == 272U)
-            rohc_comp_handle_feedback(comp.get(), cid, 2U);
+            acknowledge_msn(comp.get(), cid, 1U);
     }
 
     // Reuse the CID for RTP again. The replacement IR arrives, but the next
@@ -462,24 +517,76 @@ TEST_CASE("Profile replacement clears retired RTP dynamics before compact recove
     const auto replacement = make_issue52_packet(cid, 0U, 35U, 280U);
     require_exact_array(decomp.get(), compress_array(comp.get(), cid, replacement),
                         replacement);
-    rohc_comp_handle_feedback(comp.get(), cid, 2U);
+    acknowledge_msn(comp.get(), cid, static_cast<std::uint16_t>(0xfff0U + 280U));
 
     const auto lost_refresh = make_issue52_packet(cid, 0U, 35U, 281U);
     const auto lost_wire = compress_array(comp.get(), cid, lost_refresh);
     REQUIRE(lost_wire.size() > 2U);
 
+    // The state-changing refresh is now a newer context revision.  A delayed
+    // ACK for the preceding replacement IR is correlated to its transmitted
+    // MSN but is stale for this revision and must not release compact output.
+    REQUIRE(deliver_ack_msn(comp.get(), cid,
+                            static_cast<std::uint16_t>(0xfff0U + 280U)) ==
+            ROHCCXX_FEEDBACK_STALE);
+
     const auto ambiguous = make_issue52_packet(cid, 0U, 35U, 282U);
     const auto ambiguous_wire = compress_array(comp.get(), cid, ambiguous);
     CAPTURE(lost_wire.size(), ambiguous_wire.size(), ambiguous_wire[0],
             ambiguous_wire[1]);
-    REQUIRE(ambiguous_wire.size() == 986U);
-    REQUIRE(ambiguous_wire[0] == 0xe4U);
-    REQUIRE((ambiguous_wire[1] & 0x80U) == 0U);
-    require_transactional_reject(decomp.get(), ambiguous_wire);
-    require_transactional_reject(decomp.get(), ambiguous_wire);
+    REQUIRE(ambiguous_wire[cid == 0U ? 0U : 1U] == 0xfdU);
+    require_exact_array(decomp.get(), ambiguous_wire, ambiguous);
 
     // NACK-driven refresh recovers without a stale-context commit.
     rohc_comp_handle_feedback(comp.get(), cid, 0U);
     const auto recovery = make_issue52_packet(cid, 0U, 35U, 283U);
     require_exact_array(decomp.get(), compress_array(comp.get(), cid, recovery), recovery);
+}
+
+TEST_CASE("Issue 51 uncorrelated delayed ACK cannot release a replacement generation",
+          "[issue-51]")
+{
+    constexpr std::uint32_t cid = 2U;
+    CompPtr comp(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    DecompPtr decomp(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(comp);
+    REQUIRE(decomp);
+    REQUIRE(rohc_comp_set_mode(comp.get(), ROHCCXX_MODE_O) == 0);
+    REQUIRE(rohc_decomp_set_mode(decomp.get(), ROHCCXX_MODE_O) == 0);
+
+    for(std::uint32_t round = 0U; round < 3U; ++round)
+    {
+        const auto packet = make_packet(round * 16U + cid, cid, 3U, 0U,
+                                        round, 0x5100accedULL);
+        require_exact(decomp.get(), compress(comp.get(), cid, packet), packet);
+    }
+
+    const auto replacement = make_packet(3U * 16U + cid, cid, 0U, 1U,
+                                         3U, 0x5100accedULL);
+    const auto replacement_wire = compress(comp.get(), cid, replacement);
+    REQUIRE(replacement_wire[cid == 0U ? 0U : 1U] == 0xfdU);
+    require_exact(decomp.get(), replacement_wire, replacement);
+
+    // This API intentionally carries no acknowledgment number.  It may be a
+    // delayed ACK for the retired IP-only generation and must not authorize a
+    // profileless packet from the replacement RTP generation.
+    rohc_comp_handle_feedback(comp.get(), cid, 2U);
+    std::uint16_t guarded_msn = 0U;
+    for(std::uint32_t round : {4U, 5U})
+    {
+        const auto guarded = make_packet(round * 16U + cid, cid, 0U, 1U,
+                                         round, 0x5100accedULL);
+        const auto guarded_wire = compress(comp.get(), cid, guarded);
+        REQUIRE(guarded_wire[cid == 0U ? 0U : 1U] == 0xfdU);
+        require_exact(decomp.get(), guarded_wire, guarded);
+        guarded_msn = read16(guarded.data() + 30U);
+    }
+
+    acknowledge_msn(comp.get(), cid, guarded_msn);
+    for(std::uint32_t round : {6U, 7U})
+    {
+        const auto packet = make_packet(round * 16U + cid, cid, 0U, 1U,
+                                        round, 0x5100accedULL);
+        require_exact(decomp.get(), compress(comp.get(), cid, packet), packet);
+    }
 }

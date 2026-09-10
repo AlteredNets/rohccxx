@@ -56,6 +56,8 @@ struct Feedback
     uint16_t acknowledgment_number = 0;
     uint8_t acknowledgment_bits = 0;
     bool acknowledgment_valid = false;
+    uint64_t acknowledged_context_revision = 0;
+    bool context_revision_valid = false;
     bool crc_present = false;
     bool crc_valid = false;
 };
@@ -67,15 +69,18 @@ inline bool feedback_type_from_ack_type(std::uint8_t ack_type, FeedbackType& typ
 inline void record_transmitted_msn(Context& context, uint16_t msn)
 {
     context.transmitted_msn_history[context.transmitted_msn_head] = msn;
+    context.transmitted_context_revision_history[context.transmitted_msn_head] =
+        context.context_revision;
     context.transmitted_msn_head = static_cast<uint8_t>(
         (context.transmitted_msn_head + 1U) % context.transmitted_msn_history.size());
     if(context.transmitted_msn_count < context.transmitted_msn_history.size())
         ++context.transmitted_msn_count;
 }
 
-inline bool transmitted_msn_matches(const Context& context,
-                                    uint16_t acknowledgment,
-                                    uint8_t bits)
+inline bool transmitted_msn_revision(const Context& context,
+                                     uint16_t acknowledgment,
+                                     uint8_t bits,
+                                     uint64_t& revision)
 {
     if(bits == 0U || bits > 16U || context.transmitted_msn_count == 0U)
         return false;
@@ -86,9 +91,20 @@ inline bool transmitted_msn_matches(const Context& context,
             (context.transmitted_msn_head + context.transmitted_msn_history.size() - 1U - offset) %
             context.transmitted_msn_history.size());
         if((context.transmitted_msn_history[index] & mask) == (acknowledgment & mask))
+        {
+            revision = context.transmitted_context_revision_history[index];
             return true;
+        }
     }
     return false;
+}
+
+inline bool transmitted_msn_matches(const Context& context,
+                                    uint16_t acknowledgment,
+                                    uint8_t bits)
+{
+    uint64_t revision = 0;
+    return transmitted_msn_revision(context, acknowledgment, bits, revision);
 }
 
 inline bool write_feedback2_v1(uint8_t* out, size_t* out_len, const Feedback& feedback)
@@ -419,13 +435,26 @@ inline void apply_feedback_to_context(Context& ctx, const Feedback& feedback)
     if(feedback.type == FeedbackType::ACK)
     {
         ctx.nack_count = 0;
-        ctx.profile_replacement_pending = false;
-        if(ctx.rohc_state == RohcState::StaticEstablished ||
-           ctx.rohc_state == RohcState::DynamicEstablished)
+        // A compact unit cannot identify the profile generation it belongs to.
+        // Keep a replacement generation behind explicit IR framing until the
+        // ACK carries an MSN that the v1 delivery path correlated with this
+        // context's post-replacement transmit history.  The legacy feedback
+        // API has no acknowledgment number, so it cannot safely release this
+        // gate after CID reuse.
+        const bool current_revision_ack = feedback.acknowledgment_valid &&
+            feedback.context_revision_valid &&
+            feedback.acknowledged_context_revision == ctx.context_revision;
+        if(current_revision_ack)
+            ctx.profile_replacement_pending = false;
+        const bool may_ack_current_state = !ctx.profile_replacement_pending ||
+                                           current_revision_ack;
+        if(may_ack_current_state &&
+           (ctx.rohc_state == RohcState::StaticEstablished ||
+            ctx.rohc_state == RohcState::DynamicEstablished))
         {
             ctx.static_acked = true;
         }
-        if(ctx.rohc_state == RohcState::DynamicEstablished)
+        if(may_ack_current_state && ctx.rohc_state == RohcState::DynamicEstablished)
             ctx.dynamic_acked = true;
         return;
     }

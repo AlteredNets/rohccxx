@@ -2222,14 +2222,20 @@ rohc_comp_deliver_feedback_v1(struct rohc_comp* comp,
     rohccxx::Context* context = comp->impl.contexts.get(parsed.cid);
     if(!context)
         return ROHCCXX_FEEDBACK_UNCORRELATED;
-    if(!rohccxx::transmitted_msn_matches(*context, parsed.acknowledgment_number,
-                                        parsed.acknowledgment_bits))
+    uint64_t acknowledged_revision = 0;
+    if(!rohccxx::transmitted_msn_revision(*context, parsed.acknowledgment_number,
+                                         parsed.acknowledgment_bits,
+                                         acknowledged_revision))
+        return ROHCCXX_FEEDBACK_STALE;
+    if(acknowledged_revision != context->context_revision)
         return ROHCCXX_FEEDBACK_STALE;
 
     rohccxx::Feedback core{};
     const auto core_status = rohccxx::read_feedback2_v1(parsed.raw, parsed.raw_len, core);
     if(core_status != rohccxx::FeedbackStatus::Accepted)
         return feedback_status_to_c(core_status);
+    core.acknowledged_context_revision = acknowledged_revision;
+    core.context_revision_valid = true;
     rohccxx::apply_feedback_to_context(*context, core);
     return ROHCCXX_FEEDBACK_ACCEPTED;
 }
@@ -2655,7 +2661,9 @@ rohc_compress4(struct rohc_comp* comp,
         replacement.large_cid = comp->impl.large_cid_space;
         replacement.mode = comp->impl.mode;
         replacement.profile_has_been_used = true;
+        replacement.profile_replacement_active = true;
         replacement.profile_replacement_pending = true;
+        replacement.context_revision = context_before_compress.context_revision + 1U;
         *ctx = replacement;
     }
 
@@ -2724,6 +2732,12 @@ rohc_compress4(struct rohc_comp* comp,
                                                                   previous_ipv4_id_sequential,
                                                                   previous_rtp_seq,
                                                                   seq);
+        if(ctx->profile_replacement_active && !rtp_fo_ipv4_safe &&
+           !ctx->profile_replacement_pending)
+        {
+            ++ctx->context_revision;
+            ctx->profile_replacement_pending = true;
+        }
         update_rtp_timestamp_stride(*ctx, seq, ts);
         ctx->rtp.vpxcc = wire::to_host(rtp->vpxcc);
         ctx->rtp.mpt = wire::to_host(rtp->mpt);
@@ -2796,6 +2810,12 @@ rohc_compress4(struct rohc_comp* comp,
                                                                   previous_ipv4_id_sequential,
                                                                   previous_rtp_seq,
                                                                   seq);
+        if(ctx->profile_replacement_active && !rtp_fo_ipv4_safe &&
+           !ctx->profile_replacement_pending)
+        {
+            ++ctx->context_revision;
+            ctx->profile_replacement_pending = true;
+        }
         update_rtp_timestamp_stride(*ctx, seq, ts);
         ctx->rtp.vpxcc = wire::to_host(rtp->vpxcc);
         ctx->rtp.mpt = wire::to_host(rtp->mpt);
@@ -2907,6 +2927,13 @@ rohc_compress4(struct rohc_comp* comp,
         if(!capture_common())
             return -1;
         update_ipv4_id_behavior(*ctx, had_ipv4_context, previous_ipv4_id);
+        if(ctx->profile_replacement_active && had_ipv4_context &&
+           previous.ipv4_id_behavior != ctx->ipv4_id_behavior &&
+           !ctx->profile_replacement_pending)
+        {
+            ++ctx->context_revision;
+            ctx->profile_replacement_pending = true;
+        }
         ctx->udp_sport = wire::to_host(udp->src_port);
         ctx->udp_dport = wire::to_host(udp->dst_port);
         ctx->udp_length_or_coverage = wire::to_host(udp->length);
@@ -2997,6 +3024,13 @@ rohc_compress4(struct rohc_comp* comp,
         if(!capture_common())
             return -1;
         update_ipv4_id_behavior(*ctx, had_ipv4_context, previous_ipv4_id);
+        if(ctx->profile_replacement_active && had_ipv4_context &&
+           previous.ipv4_id_behavior != ctx->ipv4_id_behavior &&
+           !ctx->profile_replacement_pending)
+        {
+            ++ctx->context_revision;
+            ctx->profile_replacement_pending = true;
+        }
         ctx->msn = static_cast<std::uint16_t>(ctx->tx_count + 1U);
         const size_t out_capacity = *rohc_packet_len;
         const size_t payload_len = ip_packet_len - ip_view.header_len;
@@ -3084,6 +3118,13 @@ rohc_compress4(struct rohc_comp* comp,
         if(!capture_common())
             return -1;
         update_ipv4_id_behavior(*ctx, had_ipv4_context, previous_ipv4_id);
+        if(ctx->profile_replacement_active && had_ipv4_context &&
+           previous.ipv4_id_behavior != ctx->ipv4_id_behavior &&
+           !ctx->profile_replacement_pending)
+        {
+            ++ctx->context_revision;
+            ctx->profile_replacement_pending = true;
+        }
         if(ip_packet_len < ip_view.header_len + 8U)
             return -1;
         const uint8_t* esp = ip_packet + ip_view.header_len;
