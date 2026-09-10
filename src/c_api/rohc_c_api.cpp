@@ -2647,14 +2647,16 @@ rohc_compress4(struct rohc_comp* comp,
         // IR framing must continue until feedback proves that the peer replaced
         // the retired profile; a fixed number of optimistic repetitions cannot
         // make that safe when every replacement unit is lost.
-        ctx->profile_replacement_pending = true;
-        ctx->tx_count = 0U;
-        ctx->rohc_state = RohcState::NoContext;
-        ctx->static_acked = false;
-        ctx->dynamic_acked = false;
-        ctx->nack_count = 0U;
-        ctx->transmitted_msn_head = 0U;
-        ctx->transmitted_msn_count = 0U;
+        // Retire every profile-specific field as one generation. Retaining an
+        // RTP stride (or any other dynamic) across an intervening profile can
+        // make a later compact packet appear valid after its refresh is lost.
+        Context replacement{};
+        replacement.cid = cid;
+        replacement.large_cid = comp->impl.large_cid_space;
+        replacement.mode = comp->impl.mode;
+        replacement.profile_has_been_used = true;
+        replacement.profile_replacement_pending = true;
+        *ctx = replacement;
     }
 
     auto append_payload_range = [&](size_t header_len,
@@ -4577,6 +4579,28 @@ rohc_decompress4(struct rohc_decomp* decomp,
 
     if(parsed.type == RohcPacketType::IR)
     {
+        Profile incoming_profile = Profile::Uncompressed;
+        bool incoming_profile_known = true;
+        switch(parsed.profile_id)
+        {
+        case 0x01: incoming_profile = Profile::RTP; break;
+        case 0x02: incoming_profile = Profile::UDP; break;
+        case 0x03: incoming_profile = Profile::ESP; break;
+        case 0x04: incoming_profile = Profile::IP; break;
+        case 0x07: incoming_profile = Profile::RTP_UDP_Lite; break;
+        case 0x08: incoming_profile = Profile::UDP_Lite; break;
+        default: incoming_profile_known = false; break;
+        }
+        if(incoming_profile_known &&
+           context_before_decode.rohc_state != RohcState::NoContext &&
+           context_before_decode.profile != incoming_profile)
+        {
+            Context replacement{};
+            replacement.cid = cid;
+            replacement.large_cid = decomp->impl.large_cid_space;
+            replacement.mode = context_before_decode.mode;
+            *ctx = replacement;
+        }
         switch(parsed.profile_id)
         {
         case 0x02:

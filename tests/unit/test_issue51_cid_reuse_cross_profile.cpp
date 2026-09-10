@@ -16,6 +16,7 @@ namespace
 {
 constexpr std::size_t packet_size = 96U;
 using Packet = std::array<std::uint8_t, packet_size>;
+using ScalePacket = std::array<std::uint8_t, 1024U>;
 
 struct CompDelete { void operator()(rohc_comp* value) const { rohc_comp_free(value); } };
 struct DecompDelete { void operator()(rohc_decomp* value) const { rohc_decomp_free(value); } };
@@ -129,6 +130,90 @@ Packet make_packet(std::uint32_t ordinal, std::uint32_t cid,
     return packet;
 }
 
+ScalePacket make_issue52_packet(std::uint32_t cid, std::uint32_t profile,
+                                std::uint32_t generation, std::uint32_t round)
+{
+    ScalePacket packet{};
+    for(std::size_t pos = 0; pos < packet.size(); ++pos)
+        packet[pos] = static_cast<std::uint8_t>(pos * 37U + 1U + round);
+    packet[0] = 0x45U;
+    packet[1] = static_cast<std::uint8_t>((profile << 4U) | (cid & 3U));
+    write16(packet.data() + 2U, static_cast<std::uint16_t>(packet.size()));
+    write16(packet.data() + 4U, static_cast<std::uint16_t>(round));
+    packet[6] = 0x40U;
+    packet[7] = 0U;
+    packet[8] = static_cast<std::uint8_t>(64U - (cid & 3U));
+    packet[9] = profile == 2U ? 50U : (profile == 3U ? 6U : 17U);
+    packet[12] = 10U;
+    packet[13] = static_cast<std::uint8_t>(32U + generation % 192U);
+    packet[14] = static_cast<std::uint8_t>(16U + cid);
+    packet[15] = 1U;
+    packet[16] = 198U;
+    packet[17] = 51U;
+    packet[18] = static_cast<std::uint8_t>(1U + profile);
+    packet[19] = static_cast<std::uint8_t>(10U + cid);
+    if(profile <= 1U)
+    {
+        write16(packet.data() + 20U,
+                static_cast<std::uint16_t>(12000U + generation * 64U + cid));
+        write16(packet.data() + 22U,
+                static_cast<std::uint16_t>(22000U + generation * 64U + cid));
+        write16(packet.data() + 24U,
+                static_cast<std::uint16_t>(packet.size() - 20U));
+        write16(packet.data() + 26U, 0U);
+    }
+    if(profile == 0U)
+    {
+        packet[28] = 0x80U;
+        packet[29] = static_cast<std::uint8_t>(96U + (cid & 3U));
+        write16(packet.data() + 30U,
+                static_cast<std::uint16_t>(0xfff0U + round));
+        write32(packet.data() + 32U, 0xffffff00U + round * 160U);
+        write32(packet.data() + 36U, 0x51000000U + generation * 16U + cid);
+    }
+    else if(profile == 1U)
+    {
+        packet[28] = 0U;
+    }
+    else if(profile == 2U)
+    {
+        write32(packet.data() + 20U, 0xa0510000U + generation * 16U + cid);
+        write32(packet.data() + 24U, 0xfffffff0U + round);
+    }
+    write32(packet.data() + 48U, round * 16U + cid);
+    write32(packet.data() + 52U, cid);
+    write32(packet.data() + 56U, generation);
+    write16(packet.data() + 10U, 0U);
+    write16(packet.data() + 10U, checksum(packet.data(), 20U));
+    return packet;
+}
+
+template<std::size_t Size>
+std::vector<std::uint8_t> compress_array(rohc_comp* comp, std::uint32_t cid,
+                                         const std::array<std::uint8_t, Size>& packet)
+{
+    std::array<std::uint8_t, 2048> bytes{};
+    std::size_t length = bytes.size();
+    REQUIRE(rohc_comp_set_cid(comp, cid) == 0);
+    REQUIRE(rohc_compress4(comp, packet.data(), packet.size(),
+                           bytes.data(), &length) == 0);
+    return {bytes.begin(), bytes.begin() + static_cast<std::ptrdiff_t>(length)};
+}
+
+template<std::size_t Size>
+void require_exact_array(rohc_decomp* decomp,
+                         const std::vector<std::uint8_t>& compressed,
+                         const std::array<std::uint8_t, Size>& expected)
+{
+    std::array<std::uint8_t, 2048> output{};
+    output.fill(0xa5U);
+    std::size_t output_len = output.size();
+    REQUIRE(rohc_decompress4(decomp, compressed.data(), compressed.size(),
+                             output.data(), &output_len) == 0);
+    REQUIRE(output_len == expected.size());
+    REQUIRE(std::equal(expected.begin(), expected.end(), output.begin()));
+}
+
 std::vector<std::uint8_t> compress(rohc_comp* comp, std::uint32_t cid,
                                    const Packet& packet)
 {
@@ -155,7 +240,7 @@ void require_exact(rohc_decomp* decomp, const std::vector<std::uint8_t>& compres
 void require_transactional_reject(rohc_decomp* decomp,
                                   const std::vector<std::uint8_t>& compressed)
 {
-    std::array<std::uint8_t, 256> output{};
+    std::array<std::uint8_t, 2048> output{};
     output.fill(0xa5U);
     const auto guard = output;
     std::size_t output_len = output.size();
@@ -341,4 +426,60 @@ TEST_CASE("Issue 51 profile replacement matrix keeps compact units behind acknow
             }
         }
     }
+}
+
+TEST_CASE("Profile replacement clears retired RTP dynamics before compact recovery",
+          "[issue-51][issue-52]")
+{
+    constexpr std::uint32_t cid = 4U;
+    CompPtr comp(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    DecompPtr decomp(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(comp);
+    REQUIRE(decomp);
+    REQUIRE(rohc_comp_set_mode(comp.get(), ROHCCXX_MODE_O) == 0);
+    REQUIRE(rohc_decomp_set_mode(decomp.get(), ROHCCXX_MODE_O) == 0);
+    // Establish an older RTP generation so retired RTP timestamp dynamics exist.
+    for(std::uint32_t round : {248U, 249U, 250U})
+    {
+        const auto packet = make_issue52_packet(cid, 0U, 31U, round);
+        require_exact_array(decomp.get(), compress_array(comp.get(), cid, packet), packet);
+        if(round == 248U)
+            rohc_comp_handle_feedback(comp.get(), cid, 2U);
+    }
+
+    // Reuse the CID for IP-only and establish its sequential IPv4-ID behavior.
+    for(std::uint32_t round : {272U, 273U, 274U})
+    {
+        const auto packet = make_issue52_packet(cid, 3U, 34U, round);
+        require_exact_array(decomp.get(), compress_array(comp.get(), cid, packet), packet);
+        if(round == 272U)
+            rohc_comp_handle_feedback(comp.get(), cid, 2U);
+    }
+
+    // Reuse the CID for RTP again. The replacement IR arrives, but the next
+    // state-changing IR-DYN is deliberately lost. The following compact unit
+    // must never authenticate using RTP dynamics retired before the IP phase.
+    const auto replacement = make_issue52_packet(cid, 0U, 35U, 280U);
+    require_exact_array(decomp.get(), compress_array(comp.get(), cid, replacement),
+                        replacement);
+    rohc_comp_handle_feedback(comp.get(), cid, 2U);
+
+    const auto lost_refresh = make_issue52_packet(cid, 0U, 35U, 281U);
+    const auto lost_wire = compress_array(comp.get(), cid, lost_refresh);
+    REQUIRE(lost_wire.size() > 2U);
+
+    const auto ambiguous = make_issue52_packet(cid, 0U, 35U, 282U);
+    const auto ambiguous_wire = compress_array(comp.get(), cid, ambiguous);
+    CAPTURE(lost_wire.size(), ambiguous_wire.size(), ambiguous_wire[0],
+            ambiguous_wire[1]);
+    REQUIRE(ambiguous_wire.size() == 986U);
+    REQUIRE(ambiguous_wire[0] == 0xe4U);
+    REQUIRE((ambiguous_wire[1] & 0x80U) == 0U);
+    require_transactional_reject(decomp.get(), ambiguous_wire);
+    require_transactional_reject(decomp.get(), ambiguous_wire);
+
+    // NACK-driven refresh recovers without a stale-context commit.
+    rohc_comp_handle_feedback(comp.get(), cid, 0U);
+    const auto recovery = make_issue52_packet(cid, 0U, 35U, 283U);
+    require_exact_array(decomp.get(), compress_array(comp.get(), cid, recovery), recovery);
 }
