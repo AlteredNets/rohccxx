@@ -419,6 +419,7 @@ inline void apply_feedback_to_context(Context& ctx, const Feedback& feedback)
     if(feedback.type == FeedbackType::ACK)
     {
         ctx.nack_count = 0;
+        ctx.profile_replacement_pending = false;
         if(ctx.rohc_state == RohcState::StaticEstablished ||
            ctx.rohc_state == RohcState::DynamicEstablished)
         {

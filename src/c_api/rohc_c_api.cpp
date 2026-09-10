@@ -1536,6 +1536,7 @@ static rohccxx_mode_t core_mode_to_c(rohccxx::Mode mode)
 static bool should_emit_ir(const rohccxx::Context& ctx)
 {
     return ctx.tx_count == 0 || ctx.rohc_state == rohccxx::RohcState::NoContext ||
+           ctx.profile_replacement_pending ||
            (ctx.mode == rohccxx::Mode::Reliable && !ctx.static_acked);
 }
 
@@ -2638,11 +2639,15 @@ rohc_compress4(struct rohc_comp* comp,
     const Context context_before_compress = *ctx;
     ctx->cid = cid;
     ctx->large_cid = comp->impl.large_cid_space;
-    if(ctx->tx_count > 0U && ctx->profile != profile && profile != Profile::Uncompressed)
+    if(ctx->profile_has_been_used && ctx->profile != profile &&
+       profile != Profile::Uncompressed)
     {
         // A CID's static and dynamic state belongs to its established profile.
-        // Automatic reclassification must establish the new profile before any
-        // compact packet can safely omit profile-specific fields.
+        // A compact unit carries no profile identifier. After reuse, explicit
+        // IR framing must continue until feedback proves that the peer replaced
+        // the retired profile; a fixed number of optimistic repetitions cannot
+        // make that safe when every replacement unit is lost.
+        ctx->profile_replacement_pending = true;
         ctx->tx_count = 0U;
         ctx->rohc_state = RohcState::NoContext;
         ctx->static_acked = false;
@@ -2665,8 +2670,9 @@ rohc_compress4(struct rohc_comp* comp,
             std::memcpy(rohc_packet + header_len, ip_packet + payload_offset, payload_len);
         *rohc_packet_len = header_len + payload_len;
         ++ctx->tx_count;
+        ctx->profile_has_been_used = true;
         record_transmitted_msn(*ctx, ctx->msn);
-        if(ctx->mode != Mode::Reliable)
+        if(ctx->mode != Mode::Reliable && !ctx->profile_replacement_pending)
         {
             if(ctx->tx_count > 0)
                 ctx->static_acked = true;
@@ -3180,6 +3186,7 @@ rohc_compress4(struct rohc_comp* comp,
     ctx->mode = Mode::Uncompressed;
     ctx->rohc_state = RohcState::DynamicEstablished;
     ctx->tx_count++;
+    ctx->profile_has_been_used = true;
     ctx->nack_count = 0;
     ctx->static_acked = true;
     ctx->dynamic_acked = true;
