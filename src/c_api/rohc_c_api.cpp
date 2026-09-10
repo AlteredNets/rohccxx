@@ -4801,9 +4801,15 @@ rohc_decompress4(struct rohc_decomp* decomp,
         uint32_t ts;
 
         // Private/current RTP FO remains explicitly framed with Add-CID in the
-        // small-CID space; formal PT-0 was handled above.
+        // small-CID space; formal PT-0 was handled above.  Its discriminator
+        // overlaps formal PT-0 for every profile, so never authenticate it
+        // against a non-RTP context.
         const bool private_rtp_framing = !decomp->impl.large_cid_space && parsed.has_add_cid;
-        ok = private_rtp_framing && decode_fo_rtp(packet, packet_len, *ctx, seq, ts, &header_len);
+        const bool private_rtp_context_ready =
+            private_fo_context_ready(Profile::RTP) ||
+            private_fo_context_ready(Profile::RTP_UDP_Lite);
+        ok = private_rtp_framing && private_rtp_context_ready &&
+             decode_fo_rtp(packet, packet_len, *ctx, seq, ts, &header_len);
         if(ok)
             ctx->msn = seq;
         if (ok && ctx->rohc_state != RohcState::DynamicEstablished)

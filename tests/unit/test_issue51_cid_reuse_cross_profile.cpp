@@ -316,6 +316,193 @@ std::vector<std::uint8_t> captured_issue51_pt0()
     }};
     return {witness.begin(), witness.end()};
 }
+
+Packet make_feedback_state_fuzz_packet(std::uint32_t ordinal,
+                                       std::uint32_t cid,
+                                       std::uint32_t profile,
+                                       std::uint32_t epoch,
+                                       std::uint32_t round,
+                                       std::uint64_t salt)
+{
+    const std::uint32_t flow = cid & 3U;
+    Packet packet{};
+    packet[0] = 0x45U;
+    write16(packet.data() + 2U, static_cast<std::uint16_t>(packet.size()));
+    write16(packet.data() + 4U, static_cast<std::uint16_t>(0xfffcU + round));
+    packet[6] = 0x40U;
+    packet[8] = static_cast<std::uint8_t>(64U - flow);
+    packet[9] = profile == 2U ? 50U : (profile == 3U ? 6U : 17U);
+    packet[12] = 10U;
+    packet[13] = static_cast<std::uint8_t>(20U + profile + epoch * 8U);
+    packet[14] = static_cast<std::uint8_t>(30U + flow);
+    packet[15] = 1U;
+    packet[16] = 198U;
+    packet[17] = 51U;
+    packet[18] = static_cast<std::uint8_t>(1U + profile + epoch * 8U);
+    packet[19] = static_cast<std::uint8_t>(10U + flow);
+
+    std::uint64_t state = 0x524f484343585354ULL ^
+                          (static_cast<std::uint64_t>(ordinal) << 17U) ^ salt;
+    for(std::size_t pos = 20U; pos < packet.size(); ++pos)
+    {
+        state ^= state << 13U;
+        state ^= state >> 7U;
+        state ^= state << 17U;
+        packet[pos] = static_cast<std::uint8_t>(state);
+    }
+    if(profile <= 1U)
+    {
+        write16(packet.data() + 20U, static_cast<std::uint16_t>(
+            12000U + epoch * 256U + profile * 64U + flow));
+        write16(packet.data() + 22U, static_cast<std::uint16_t>(
+            22000U + epoch * 256U + profile * 64U + flow));
+        write16(packet.data() + 24U,
+                static_cast<std::uint16_t>(packet.size() - 20U));
+        write16(packet.data() + 26U, 0U);
+    }
+    if(profile == 0U)
+    {
+        packet[28] = 0x80U;
+        packet[29] = static_cast<std::uint8_t>(96U + flow);
+        write16(packet.data() + 30U,
+                static_cast<std::uint16_t>(0xfffcU + round));
+        write32(packet.data() + 32U, 0xffffff00U + round * 160U);
+        write32(packet.data() + 36U, 0x11223000U + epoch * 16U + flow);
+    }
+    else if(profile == 2U)
+    {
+        write32(packet.data() + 20U, 0xa0b00000U + epoch * 16U + flow);
+        write32(packet.data() + 24U, 0xfffffff8U + round);
+    }
+    write32(packet.data() + 48U, ordinal);
+    write32(packet.data() + 52U, cid);
+    write16(packet.data() + 10U, 0U);
+    write16(packet.data() + 10U, checksum(packet.data(), 20U));
+    return packet;
+}
+
+template<std::size_t Size>
+bool control_bit(const std::array<std::uint8_t, Size>& control,
+                 std::size_t offset)
+{
+    return (control[(offset / 8U) % Size] &
+            (1U << (offset % 8U))) != 0U;
+}
+
+template<std::size_t Size>
+void require_feedback_state_fuzz_witness_safe(
+    const std::array<std::uint8_t, Size>& control,
+    std::uint32_t trigger_round)
+{
+    constexpr std::uint32_t profile_rounds = 32U;
+    const std::uint32_t cid = control[0] & 0x0fU;
+    const std::uint32_t starting_profile = control[1] & 0x03U;
+    std::uint64_t salt = 0x4953535545343955ULL;
+    for(const auto byte : control)
+        salt = (salt ^ byte) * 0x100000001b3ULL;
+
+    CompPtr comp(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    DecompPtr decomp(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(comp);
+    REQUIRE(decomp);
+    REQUIRE(rohc_decomp_set_mode(decomp.get(), ROHCCXX_MODE_O) == 0);
+    rohccxx_feedback_v1_t delayed{};
+    bool delayed_valid = false;
+    bool trigger_checked = false;
+    bool recovered_after_trigger = false;
+
+    for(std::uint32_t round = 0U; round < 128U; ++round)
+    {
+        if(control_bit(control, round * 31U + 127U))
+        {
+            decomp.reset(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+            REQUIRE(decomp);
+            REQUIRE(rohc_decomp_set_mode(decomp.get(), ROHCCXX_MODE_O) == 0);
+        }
+        const std::uint32_t epoch = round / profile_rounds;
+        const std::uint32_t profile = (starting_profile + epoch) & 3U;
+        const std::uint32_t ordinal = round * 16U + cid;
+        if(delayed_valid && control_bit(control, round * 13U + 71U))
+        {
+            const auto status = rohc_comp_deliver_feedback_v1(comp.get(), &delayed);
+            REQUIRE((status == ROHCCXX_FEEDBACK_ACCEPTED ||
+                     status == ROHCCXX_FEEDBACK_STALE));
+            delayed_valid = false;
+        }
+
+        const auto packet = make_feedback_state_fuzz_packet(
+            ordinal, cid, profile, epoch, round, salt);
+        const auto compressed = compress(comp.get(), cid, packet);
+        if(control_bit(control, round * 17U + 19U))
+            continue;
+
+        std::array<std::uint8_t, 256> output{};
+        output.fill(0xa5U);
+        const auto guard = output;
+        std::size_t output_len = output.size();
+        const int rc = rohc_decompress4(decomp.get(), compressed.data(),
+                                        compressed.size(), output.data(),
+                                        &output_len);
+        if(round == trigger_round)
+            REQUIRE(rc != 0);
+        if(rc == 0)
+        {
+            REQUIRE(output_len == packet.size());
+            REQUIRE(std::equal(packet.begin(), packet.end(), output.begin()));
+            if(round > trigger_round)
+                recovered_after_trigger = true;
+            const std::size_t type_offset = cid == 0U ? 0U : 1U;
+            if(compressed.size() > type_offset &&
+               (compressed[type_offset] & 0xfeU) == 0xfcU)
+            {
+                rohccxx::Feedback core{};
+                core.cid = cid;
+                core.type = rohccxx::FeedbackType::ACK;
+                core.acknowledgment_number = packet_msn(
+                    packet, profile, round % profile_rounds);
+                core.acknowledgment_bits = 14U;
+                core.acknowledgment_valid = true;
+                std::array<std::uint8_t, ROHCCXX_FEEDBACK_RAW_MAX> raw{};
+                std::size_t raw_len = raw.size();
+                REQUIRE(rohccxx::write_feedback2_v1(
+                    raw.data(), &raw_len, core));
+                rohccxx_feedback_v1_t feedback{};
+                REQUIRE(rohc_feedback_parse_v1(
+                    ROHCCXX_DIRECTION_UPLINK, raw.data(), raw_len,
+                    &feedback) == ROHCCXX_FEEDBACK_ACCEPTED);
+                if(control_bit(control, round * 29U + 113U))
+                {
+                    const auto status = rohc_comp_deliver_feedback_v1(
+                        comp.get(), &feedback);
+                    REQUIRE((status == ROHCCXX_FEEDBACK_ACCEPTED ||
+                             status == ROHCCXX_FEEDBACK_STALE));
+                }
+                else
+                {
+                    // Recreate the fuzzer's delayed delivery without applying
+                    // this ACK until its scheduled control bit is set.
+                    delayed = feedback;
+                    delayed_valid = true;
+                }
+            }
+        }
+        else
+        {
+            REQUIRE(output_len == 0U);
+            REQUIRE(output == guard);
+            if(round == trigger_round)
+            {
+                // Replaying the witness proves the failed interpretation did
+                // not advance context before the later intact refresh recovers.
+                require_transactional_reject(decomp.get(), compressed);
+            }
+        }
+        if(round == trigger_round)
+            trigger_checked = true;
+    }
+    REQUIRE(trigger_checked);
+    REQUIRE(recovered_after_trigger);
+}
 }
 
 TEST_CASE("Issue 51 exact control sequence stays exact and refresh rejection is transactional",
@@ -589,4 +776,18 @@ TEST_CASE("Issue 51 uncorrelated delayed ACK cannot release a replacement genera
                                         round, 0x5100accedULL);
         require_exact(decomp.get(), compress(comp.get(), cid, packet), packet);
     }
+}
+
+TEST_CASE("Issue 51 rejects private RTP interpretations outside an RTP context",
+          "[issue-51]")
+{
+    // Exact minimized libFuzzer witnesses. Both establish an ESP context, lose
+    // the second context unit, then present formal ESP PT-0 bytes that the old
+    // generic FO-RTP fallback accepted as shorter, wrong ESP packets.
+    require_feedback_state_fuzz_witness_safe(
+        std::array<std::uint8_t, 4>{{0xffU, 0x62U, 0x62U, 0x00U}}, 7U);
+    require_feedback_state_fuzz_witness_safe(
+        std::array<std::uint8_t, 7>{{
+            0x04U, 0x8eU, 0x00U, 0x40U, 0x71U, 0x00U, 0x00U,
+        }}, 2U);
 }
