@@ -445,7 +445,10 @@ inline void apply_feedback_to_context(Context& ctx, const Feedback& feedback)
             feedback.context_revision_valid &&
             feedback.acknowledged_context_revision == ctx.context_revision;
         if(current_revision_ack)
+        {
             ctx.profile_replacement_pending = false;
+            ctx.formal_pt0_since_confirmation = 0U;
+        }
         const bool may_ack_current_state = !ctx.profile_replacement_pending ||
                                            current_revision_ack;
         if(may_ack_current_state &&

@@ -8,6 +8,7 @@
 #include "rohccxx/core/emit_esp_fo.hpp"
 #include "rohccxx/core/emit_ip_fo.hpp"
 #include "rohccxx/core/emit_udp_fo.hpp"
+#include "rohccxx/core/feedback.hpp"
 #include "rohccxx/core/rohcoipsec.hpp"
 
 #include <array>
@@ -71,6 +72,35 @@ std::vector<std::uint8_t> hex_bytes(const char* text)
         bytes[index] = static_cast<std::uint8_t>((high << 4U) | low);
     }
     return bytes;
+}
+
+bool is_ir_packet(const std::vector<std::uint8_t>& packet, std::uint32_t cid)
+{
+    const std::size_t offset = cid == 0U ? 0U : 1U;
+    return packet.size() > offset && (packet[offset] & 0xfeU) == 0xfcU;
+}
+
+void acknowledge_refresh(rohc_comp* comp, Pt0Profile profile, std::uint32_t cid,
+                         std::uint32_t ordinal,
+                         const std::vector<std::uint8_t>& packet)
+{
+    if(ordinal < 2U || !is_ir_packet(packet, cid))
+        return;
+    rohccxx::Feedback feedback{};
+    feedback.cid = cid;
+    feedback.type = rohccxx::FeedbackType::ACK;
+    feedback.acknowledgment_number = static_cast<std::uint16_t>(
+        profile == Pt0Profile::Esp ? ordinal : ordinal + 1U);
+    feedback.acknowledgment_bits = 14U;
+    feedback.acknowledgment_valid = true;
+    std::array<std::uint8_t, ROHCCXX_FEEDBACK_RAW_MAX> raw{};
+    std::size_t raw_len = raw.size();
+    REQUIRE(rohccxx::write_feedback2_v1(raw.data(), &raw_len, feedback));
+    rohccxx_feedback_v1_t parsed{};
+    REQUIRE(rohc_feedback_parse_v1(ROHCCXX_DIRECTION_UPLINK, raw.data(), raw_len,
+                                   &parsed) == ROHCCXX_FEEDBACK_ACCEPTED);
+    REQUIRE(rohc_comp_deliver_feedback_v1(comp, &parsed) ==
+            ROHCCXX_FEEDBACK_ACCEPTED);
 }
 
 std::vector<std::uint8_t> make_rtp_packet(std::uint16_t sequence,
@@ -177,8 +207,12 @@ bool compress_prefix(Pt0Profile profile,
         std::size_t rohc_len = rohc.size();
         if(rohc_compress4(comp.get(), ip.data(), ip.size(), rohc.data(), &rohc_len) != 0)
             return false;
+        const std::vector<std::uint8_t> packet(
+            rohc.begin(), rohc.begin() + static_cast<std::ptrdiff_t>(rohc_len));
+        acknowledge_refresh(comp.get(), profile, 0U,
+                            static_cast<std::uint32_t>(ordinal), packet);
         if(ordinal == final_ordinal)
-            final_rohc.assign(rohc.begin(), rohc.begin() + static_cast<std::ptrdiff_t>(rohc_len));
+            final_rohc = packet;
     }
     return true;
 }
@@ -243,6 +277,8 @@ void require_public_round_trip_to(Pt0Profile profile,
                                            static_cast<std::ptrdiff_t>(rohc_len));
         if(ordinal == final_ordinal) REQUIRE(rohc[0] == expected_octet);
         require_guarded_decode(decomp.get(), rohc, ip);
+        acknowledge_refresh(comp.get(), profile, 0U,
+                            static_cast<std::uint32_t>(ordinal), rohc);
     }
 }
 
@@ -280,6 +316,11 @@ CollisionFixture establish_before(Pt0Profile profile, std::size_t collision_ordi
             require_guarded_decode(fixture.decomp.get(),
                                    std::vector<std::uint8_t>(rohc.begin(), rohc.begin() +
                                        static_cast<std::ptrdiff_t>(rohc_len)), ip);
+            acknowledge_refresh(fixture.comp.get(), profile, 0U,
+                                static_cast<std::uint32_t>(ordinal),
+                                std::vector<std::uint8_t>(
+                                    rohc.begin(), rohc.begin() +
+                                        static_cast<std::ptrdiff_t>(rohc_len)));
         }
     }
     return fixture;
@@ -377,16 +418,25 @@ std::vector<std::uint8_t> compress_packet(rohc_comp* comp, std::uint32_t cid,
 
 } // namespace
 
-TEST_CASE("public C API round-trips every RFC 5225 PT-0 first octet")
+TEST_CASE("public C API round-trips every safely emitted RFC 5225 PT-0 first octet")
 {
     // PT-0 is exactly 0 | MSN(4) | CRC-3(3), so all 128 zero-MSB values are
-    // structurally reachable.  A per-context TOS witness supplies each CRC-3
-    // value without fabricating wire packets or bypassing the public encoder.
+    // structurally decodable.  Each profile's two MSN values used by context
+    // establishment are reserved from later wrap emission because that would
+    // exceed the unambiguous four-bit forward window. A per-context
+    // TOS witness supplies every CRC-3 value for the 14 safe MSN values without
+    // fabricating wire packets or bypassing the public encoder.
     for(const auto profile : {Pt0Profile::Udp, Pt0Profile::Esp, Pt0Profile::Ip})
     {
         for(unsigned value = 0; value <= 0x7fU; ++value)
         {
             const auto octet = static_cast<std::uint8_t>(value);
+            const auto msn_lsb = static_cast<std::uint8_t>(octet >> 3U);
+            const bool context_interval = profile == Pt0Profile::Esp
+                ? (msn_lsb == 0U || msn_lsb == 1U)
+                : (msn_lsb == 1U || msn_lsb == 2U);
+            if(context_interval)
+                continue;
             CAPTURE(static_cast<unsigned>(profile), value);
             const auto tos = find_tos_for_octet(profile, octet);
             require_public_round_trip_to(profile, tos,
@@ -824,7 +874,7 @@ TEST_CASE("PT-0 stale reordering rejects CRC-3 collision witnesses transactional
     }
 }
 
-TEST_CASE("PT-0 no-reordering interval accepts delta 14 and rejects delta 15")
+TEST_CASE("PT-0 no-reordering interval accepts delta 14 and refreshes before delta 15")
 {
     for(const auto profile : {Pt0Profile::Udp, Pt0Profile::Esp, Pt0Profile::Ip})
     {
@@ -861,8 +911,53 @@ TEST_CASE("PT-0 no-reordering interval accepts delta 14 and rejects delta 15")
                     require_guarded_decode(decomp.get(), rohc, ip);
                 if(ordinal == 16U)
                 {
-                    REQUIRE(rohc.size() - 160U == 1U);
-                    require_failed_transaction(decomp.get(), rohc);
+                    REQUIRE(rohc.size() - 160U > 1U);
+                    require_guarded_decode(decomp.get(), rohc, ip);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("PT-0 forward gaps cannot alias a later compressor packet to stale state")
+{
+    // Four MSN LSBs repeat after 16 values.  Establish the context, lose 16
+    // consecutive compressor outputs, and submit the next ordered packet.  A
+    // wrong delta-1 reconstruction can collide under CRC-3; it must never be
+    // returned as a successful packet.
+    for(const auto profile : {Pt0Profile::Udp, Pt0Profile::Esp, Pt0Profile::Ip})
+    {
+        for(unsigned tos = 0U; tos <= 0xffU; ++tos)
+        {
+            CAPTURE(static_cast<unsigned>(profile), tos);
+            CompPtr comp(rohc_comp_new2(0, ROHCCXX_DIRECTION_UPLINK));
+            DecompPtr decomp(rohc_decomp_new2(0, ROHCCXX_DIRECTION_UPLINK));
+            REQUIRE(comp);
+            REQUIRE(decomp);
+            for(std::uint32_t ordinal = 0U; ordinal <= 18U; ++ordinal)
+            {
+                const auto original = make_packet(profile, ordinal,
+                                                  static_cast<std::uint8_t>(tos));
+                const auto rohc = compress_packet(comp.get(), 0U, original);
+                if(ordinal >= 2U && ordinal < 18U)
+                    continue;
+
+                std::array<std::uint8_t, 514> output{};
+                output.fill(0xa5U);
+                const auto guard_before = output;
+                std::size_t output_len = output.size() - 2U;
+                const int rc = rohc_decompress4(decomp.get(), rohc.data(), rohc.size(),
+                                                output.data() + 1U, &output_len);
+                if(rc == 0)
+                {
+                    REQUIRE(output_len == original.size());
+                    REQUIRE(std::memcmp(output.data() + 1U, original.data(),
+                                        original.size()) == 0);
+                }
+                else
+                {
+                    REQUIRE(output_len == 0U);
+                    REQUIRE(output == guard_before);
                 }
             }
         }
@@ -907,7 +1002,8 @@ TEST_CASE("UDP formal PT-0 round-trips four interleaved small-CID flows")
                                             0U, flow);
             const auto rohc = compress_packet(comp.get(), flow, packet);
             require_guarded_decode(decomp.get(), rohc, packet);
-            if(ordinal >= 2U)
+            acknowledge_refresh(comp.get(), Pt0Profile::Udp, flow, ordinal, rohc);
+            if(ordinal >= 2U && !is_ir_packet(rohc, flow))
                 REQUIRE(rohc.size() - 160U == (flow == 0U ? 1U : 2U));
         }
     }
@@ -1003,7 +1099,8 @@ TEST_CASE("ESP formal PT-0 round-trips four interleaved small-CID flows")
                                             0U, flow);
             const auto rohc = compress_packet(comp.get(), flow, packet);
             require_guarded_decode(decomp.get(), rohc, packet);
-            if(ordinal >= 2U)
+            acknowledge_refresh(comp.get(), Pt0Profile::Esp, flow, ordinal, rohc);
+            if(ordinal >= 2U && !is_ir_packet(rohc, flow))
                 REQUIRE(rohc.size() - 160U == (flow == 0U ? 1U : 2U));
         }
     }
@@ -1232,7 +1329,8 @@ TEST_CASE("IP-only formal PT-0 round-trips four interleaved small-CID flows")
                                             0U, flow);
             const auto rohc = compress_packet(comp.get(), flow, packet);
             require_guarded_decode(decomp.get(), rohc, packet);
-            if(ordinal >= 2U)
+            acknowledge_refresh(comp.get(), Pt0Profile::Ip, flow, ordinal, rohc);
+            if(ordinal >= 2U && !is_ir_packet(rohc, flow))
                 REQUIRE(rohc.size() - 160U == (flow == 0U ? 1U : 2U));
         }
     }

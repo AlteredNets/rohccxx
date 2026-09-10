@@ -810,6 +810,7 @@ inline bool standard_context_equal(const Context& a, const Context& b)
            a.profile_has_been_used == b.profile_has_been_used &&
            a.profile_replacement_active == b.profile_replacement_active &&
            a.profile_replacement_pending == b.profile_replacement_pending &&
+           a.formal_pt0_since_confirmation == b.formal_pt0_since_confirmation &&
            a.context_revision == b.context_revision &&
            a.msn == b.msn && a.reorder_ratio == b.reorder_ratio &&
            a.ip_version == b.ip_version && a.ipv4_tos == b.ipv4_tos &&

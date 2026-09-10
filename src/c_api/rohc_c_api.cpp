@@ -1540,6 +1540,30 @@ static bool should_emit_ir(const rohccxx::Context& ctx)
            (ctx.mode == rohccxx::Mode::Reliable && !ctx.static_acked);
 }
 
+static std::uint8_t formal_pt0_forward_limit(const rohccxx::Context& ctx)
+{
+    constexpr std::array<std::uint8_t, 4> p_by_reorder_ratio{{1U, 3U, 7U, 11U}};
+    if(ctx.reorder_ratio >= p_by_reorder_ratio.size())
+        return 0U;
+    return static_cast<std::uint8_t>(15U - p_by_reorder_ratio[ctx.reorder_ratio]);
+}
+
+static void require_confirmation_before_pt0_alias(rohccxx::Context& ctx)
+{
+    const auto limit = formal_pt0_forward_limit(ctx);
+    if(limit > 0U && ctx.formal_pt0_since_confirmation >= limit &&
+       !ctx.profile_replacement_pending)
+    {
+        // PT-0 carries four MSN LSBs.  Past the decoder's unambiguous forward
+        // interval, a loss gap aliases a later packet to an earlier delta and
+        // CRC-3 cannot rule out every wrong reconstruction.  Advance the
+        // revision once and hold explicit context framing until the peer ACKs
+        // this exact revision.
+        ++ctx.context_revision;
+        ctx.profile_replacement_pending = true;
+    }
+}
+
 static bool should_emit_ir_dyn(const rohccxx::Context& ctx)
 {
     // ROHCv2 has no IR-DYN format. Repeat the standards-compliant IR while
@@ -2666,6 +2690,10 @@ rohc_compress4(struct rohc_comp* comp,
         replacement.context_revision = context_before_compress.context_revision + 1U;
         *ctx = replacement;
     }
+    if(profile == Profile::UDP || profile == Profile::ESP || profile == Profile::IP)
+    {
+        require_confirmation_before_pt0_alias(*ctx);
+    }
 
     auto append_payload_range = [&](size_t header_len,
                                     size_t payload_offset,
@@ -3003,6 +3031,7 @@ rohc_compress4(struct rohc_comp* comp,
                     std::memset(rohc_packet, 0, *rohc_packet_len);
                     std::memcpy(rohc_packet, formal.data(), formal_len);
                     *rohc_packet_len = formal_len;
+                    ++ctx->formal_pt0_since_confirmation;
                 }
             }
             else
@@ -3090,6 +3119,7 @@ rohc_compress4(struct rohc_comp* comp,
                         return -1;
                     std::memcpy(rohc_packet, formal.data(), formal_len);
                     *rohc_packet_len = formal_len;
+                    ++ctx->formal_pt0_since_confirmation;
                 }
             }
             else
@@ -3178,6 +3208,7 @@ rohc_compress4(struct rohc_comp* comp,
                         return -1;
                     std::memcpy(rohc_packet, formal.data(), formal_len);
                     *rohc_packet_len = formal_len;
+                    ++ctx->formal_pt0_since_confirmation;
                 }
             }
             else if(!emit_ir_esp(rohc_packet, rohc_packet_len, *ctx))
