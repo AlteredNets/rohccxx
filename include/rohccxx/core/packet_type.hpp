@@ -128,8 +128,7 @@ inline bool parse_rohc_packet(const uint8_t* in,
         return false;
 
     parsed.type = detect_packet_type(parsed.packet[0]);
-    if(parsed.packet[0] == 0x00 && parsed.packet_len > 1 &&
-       is_uncompressed_ip_payload(parsed.packet + 1, parsed.packet_len - 1))
+    if(is_uncompressed_ip_payload(parsed.packet, parsed.packet_len))
     {
         parsed.type = RohcPacketType::Uncompressed;
     }

@@ -217,7 +217,8 @@ std::uint16_t issue32_packet_msn(const std::vector<std::uint8_t>& packet,
 }
 
 void require_issue32_fuzz_witness_safe(
-    const std::vector<std::uint8_t>& witness, std::uint32_t trigger_round)
+    const std::vector<std::uint8_t>& witness, std::uint32_t trigger_round,
+    const std::vector<std::uint8_t>& expected_trigger_compressed = {})
 {
     REQUIRE(!witness.empty());
     const auto witness_bit = [&](std::size_t offset)
@@ -267,6 +268,13 @@ void require_issue32_fuzz_witness_safe(
         std::size_t compressed_len = compressed.size();
         REQUIRE(rohc_compress4(comp.get(), packet.data(), packet.size(),
                                compressed.data(), &compressed_len) == 0);
+        if(round == trigger_round && !expected_trigger_compressed.empty())
+        {
+            REQUIRE(compressed_len == expected_trigger_compressed.size());
+            REQUIRE(std::equal(expected_trigger_compressed.begin(),
+                               expected_trigger_compressed.end(),
+                               compressed.begin()));
+        }
         if(witness_bit(round * 17U + 19U))
             continue;
 
@@ -1183,6 +1191,17 @@ TEST_CASE("Issue 32 private ESP marker fuzz witness cannot consume formal PT-0 p
 {
     require_issue32_fuzz_witness_safe(
         {0x01U, 0x02U, 0x00U, 0x08U, 0x39U, 0x89U}, 7U);
+}
+
+TEST_CASE("Issue 53 CID-0 IP PT-0 cannot install an uncompressed context after restart",
+          "[issue-53]")
+{
+    require_issue32_fuzz_witness_safe(
+        hex_bytes("00000000a5a5a5a5a5a5a5a5a5a50010000000100012"), 111U,
+        hex_bytes(
+            "004f91004ce8a712b4b32e7ec65371bd3036986f39c32e86cf50783cb8000006f"
+            "00000000025bd341820d2d7de8bdafbc25189a85fc5e0a594315d994eec798354c6"
+            "cfd447e5d6abc0e5bea9d6"));
 }
 
 TEST_CASE("UDP formal PT-0 uses RFC 5225 small-CID framing")

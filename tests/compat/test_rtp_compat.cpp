@@ -282,8 +282,10 @@ void require_uncompressed_roundtrip(const uint8_t* packet, size_t packet_len)
     size_t out_len = sizeof(out);
 
     REQUIRE(rohc_compress4(comp, packet, packet_len, rohc, &rohc_len) == 0);
-    REQUIRE(rohc_len == packet_len + 1);
-    REQUIRE(rohc[0] == 0x00);
+    REQUIRE(rohc_len == packet_len + 3U);
+    REQUIRE(rohc[0] == 0xfdU);
+    REQUIRE(rohc[1] == 0x00U);
+    REQUIRE(std::memcmp(rohc + 3U, packet, packet_len) == 0);
     REQUIRE(rohc_decompress4(decomp, rohc, rohc_len, out, &out_len) == 0);
     REQUIRE(out_len == packet_len);
     REQUIRE(std::memcmp(out, packet, packet_len) == 0);

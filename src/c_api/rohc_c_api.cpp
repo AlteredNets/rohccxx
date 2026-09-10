@@ -3272,11 +3272,8 @@ rohc_compress4(struct rohc_comp* comp,
     ctx->dynamic_acked = true;
 
     DBG("FALLBACK: emitting uncompressed 2");
-    const size_t out_capacity = *rohc_packet_len;
-    if(!emit_uncompressed(rohc_packet, rohc_packet_len, ip_packet, ip_packet_len))
-        return -1;
-    if(!ctx->large_cid && !prepend_small_cid(rohc_packet, rohc_packet_len,
-                                             out_capacity, cid))
+    if(!emit_uncompressed_ir(rohc_packet, rohc_packet_len, *ctx,
+                             ip_packet, ip_packet_len))
         return -1;
     return 0;
 }
@@ -3807,25 +3804,59 @@ rohc_decompress4(struct rohc_decomp* decomp,
         return output_length_guard.finish(rc);
     };
 
-    // Resolve a structurally valid uncompressed-profile packet before using
-    // the previous context's profile to select a compressed-only decoder.
-    // In particular, an Add-CID/uncompressed IPv6 packet following a UDP
-    // context also begins with the PT-0 discriminator byte (0x00).
-    if(parsed.type == RohcPacketType::Uncompressed && parsed.packet_len > 1 &&
-       is_uncompressed_ip_payload(parsed.packet + 1, parsed.packet_len - 1))
+    // RFC 3095 Normal packets do not identify their profile. They are valid
+    // only after an authenticated profile-0 IR established this exact CID.
+    // Treating a payload-shaped CID-0 PT-0 unit as a context bootstrap lets
+    // compact input install a false Uncompressed context after packet loss or
+    // decoder restart.
+    const bool live_uncompressed_context =
+        context_before_decode.rohc_state != RohcState::NoContext &&
+        context_before_decode.profile == Profile::Uncompressed;
+    if(parsed.type == RohcPacketType::Uncompressed && live_uncompressed_context)
     {
-        const size_t original_len = parsed.packet_len - 1;
+        const size_t original_len = parsed.packet_len;
         if(reconstruction_len < original_len)
-            return fail_with_feedback(cid);
+            return finish_decoding(fail_with_feedback(cid));
 
-        std::memcpy(reconstruction_packet, parsed.packet + 1, original_len);
+        std::memcpy(reconstruction_packet, parsed.packet, original_len);
         reconstruction_len = original_len;
-        ctx->profile = Profile::Uncompressed;
-        ctx->mode = Mode::Uncompressed;
-        ctx->rohc_state = RohcState::DynamicEstablished;
         ctx->tx_count++;
         ctx->nack_count = 0;
-        decomp->impl.mode = ctx->mode;
+        return finish_decoding(verify_rohcoipsec_icv(0));
+    }
+
+    if(parsed.type == RohcPacketType::IR && parsed.profile_id == 0x00U)
+    {
+        const size_t header_len = (parsed.has_add_cid ? 1U : 0U) + 3U +
+                                  (parsed.has_large_cid ? parsed.cid_len : 0U);
+        if(parsed.wire_len <= header_len || header_len > 5U)
+            return finish_decoding(fail_with_feedback(cid));
+
+        std::array<uint8_t, 5U> crc_header{};
+        std::memcpy(crc_header.data(), parsed.wire, header_len);
+        const uint8_t received_crc = crc_header[header_len - 1U];
+        crc_header[header_len - 1U] = 0U;
+        const uint8_t* const original = parsed.wire + header_len;
+        const size_t original_len = parsed.wire_len - header_len;
+        if(utils::crc8(crc_header.data(), header_len) != received_crc ||
+           !is_uncompressed_ip_payload(original, original_len) ||
+           reconstruction_len < original_len)
+        {
+            return finish_decoding(fail_with_feedback(cid));
+        }
+
+        Context replacement{};
+        replacement.cid = cid;
+        replacement.large_cid = decomp->impl.large_cid_space;
+        replacement.profile = Profile::Uncompressed;
+        replacement.mode = Mode::Uncompressed;
+        replacement.rohc_state = RohcState::DynamicEstablished;
+        replacement.tx_count = 1U;
+        replacement.profile_has_been_used = true;
+        *ctx = replacement;
+        decomp->impl.mode = Mode::Uncompressed;
+        std::memcpy(reconstruction_packet, original, original_len);
+        reconstruction_len = original_len;
         return finish_decoding(verify_rohcoipsec_icv(0));
     }
 
