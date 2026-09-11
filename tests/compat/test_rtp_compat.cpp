@@ -282,8 +282,10 @@ void require_uncompressed_roundtrip(const uint8_t* packet, size_t packet_len)
     size_t out_len = sizeof(out);
 
     REQUIRE(rohc_compress4(comp, packet, packet_len, rohc, &rohc_len) == 0);
-    REQUIRE(rohc_len == packet_len + 1);
-    REQUIRE(rohc[0] == 0x00);
+    REQUIRE(rohc_len == packet_len + 3U);
+    REQUIRE(rohc[0] == 0xfdU);
+    REQUIRE(rohc[1] == 0x00U);
+    REQUIRE(std::memcmp(rohc + 3U, packet, packet_len) == 0);
     REQUIRE(rohc_decompress4(decomp, rohc, rohc_len, out, &out_len) == 0);
     REQUIRE(out_len == packet_len);
     REQUIRE(std::memcmp(out, packet, packet_len) == 0);
@@ -2114,8 +2116,12 @@ void require_profile_parity_fixture(const ProfileParityFixture& fixture)
         if(i == 2 && fixture.profile == ParityProfile::Rtp)
         {
             expected.clear();
+            const auto msn_lsb = static_cast<std::uint8_t>(1002U & 0x1fU);
             expected.push_back(static_cast<std::uint8_t>(
-                ((1002U & 0x0fU) << 3U) | rohccxx::utils::crc3(packet, 40U)));
+                0x80U | ((msn_lsb >> 1U) & 0x0fU)));
+            expected.push_back(static_cast<std::uint8_t>(
+                ((msn_lsb & 0x01U) << 7U) |
+                (rohccxx::utils::crc7(packet, 40U) & 0x7fU)));
             expected.insert(expected.end(), packet + 40U, packet + sizeof(packet));
         }
         else if(i == 2 && fixture.profile == ParityProfile::RtpUdpLite)

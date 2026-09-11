@@ -109,8 +109,8 @@ TEST_CASE("Sprint 7: Compressor recovers after NACK", "[sprint7][recovery]")
     rohc_len = sizeof(rohc);
     REQUIRE(rohc_compress4(comp, ip, sizeof(ip),
                             rohc, &rohc_len) == 0);
-    REQUIRE(rohc_len == sizeof(ip) - 40U + 1U);
-    REQUIRE((rohc[0] & 0x80U) == 0U);
+    REQUIRE(rohc_len == sizeof(ip) - 40U + 2U);
+    REQUIRE((rohc[0] & 0xf0U) == 0x80U);
 
     // Corrupt the PT-0 CRC bits, not the payload.
     rohc[0] ^= 0x01U;
@@ -246,8 +246,8 @@ TEST_CASE("ROHC feedback handling gates invalid and per-CID recovery behavior", 
         make_valid_rtp(ip, 1002, 100320, 0xCAFEBABE);
         rohc_len = sizeof(rohc);
         REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
-        REQUIRE(rohc_len == sizeof(ip) - 40U + 1U);
-        REQUIRE((rohc[0] & 0x80U) == 0U);
+        REQUIRE(rohc_len == sizeof(ip) - 40U + 2U);
+        REQUIRE((rohc[0] & 0xf0U) == 0x80U);
 
         rohc_comp_handle_feedback(comp, 0, 0);
 
@@ -337,8 +337,8 @@ TEST_CASE("ROHC feedback handling gates invalid and per-CID recovery behavior", 
         make_valid_rtp(ip, 1002, 100320, 0x01020304);
         rohc_len = sizeof(rohc);
         REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
-        REQUIRE(rohc_len == sizeof(ip) - 40U + 1U);
-        REQUIRE((rohc[0] & 0x80U) == 0U);
+        REQUIRE(rohc_len == sizeof(ip) - 40U + 2U);
+        REQUIRE((rohc[0] & 0xf0U) == 0x80U);
 
         REQUIRE(rohc_comp_set_cid(comp, 3) == 0);
         make_valid_rtp(ip, 2000, 200000, 0xAABBCCDD);
@@ -358,8 +358,8 @@ TEST_CASE("ROHC feedback handling gates invalid and per-CID recovery behavior", 
         make_valid_rtp(ip, 1003, 100480, 0x01020304);
         rohc_len = sizeof(rohc);
         REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
-        REQUIRE(rohc_len == sizeof(ip) - 40U + 1U);
-        REQUIRE((rohc[0] & 0x80U) == 0U);
+        REQUIRE(rohc_len == sizeof(ip) - 40U + 2U);
+        REQUIRE((rohc[0] & 0xf0U) == 0x80U);
 
         REQUIRE(rohc_comp_set_cid(comp, 3) == 0);
         make_valid_rtp(ip, 2003, 200480, 0xAABBCCDD);
@@ -416,8 +416,8 @@ TEST_CASE("ROHC modes expose U O and R transition behavior", "[modes][feedback]"
     make_valid_rtp(ip, 1004, 100640, 0xCAFEBABE);
     rohc_len = sizeof(rohc);
     REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
-    REQUIRE(rohc_len == sizeof(ip) - 40U + 1U);
-    REQUIRE((rohc[0] & 0x80U) == 0U);
+    REQUIRE(rohc_len == sizeof(ip) - 40U + 2U);
+    REQUIRE((rohc[0] & 0xf0U) == 0x80U);
 
     rohc_comp_handle_feedback(comp, 0, static_cast<std::uint8_t>(rohccxx::FeedbackType::STATIC_NACK));
     make_valid_rtp(ip, 1005, 100800, 0xCAFEBABE);

@@ -58,6 +58,8 @@ struct Feedback
     bool acknowledgment_valid = false;
     uint64_t acknowledged_context_revision = 0;
     bool context_revision_valid = false;
+    uint16_t acknowledged_context_distance = 0;
+    bool context_distance_valid = false;
     bool crc_present = false;
     bool crc_valid = false;
 };
@@ -80,7 +82,8 @@ inline void record_transmitted_msn(Context& context, uint16_t msn)
 inline bool transmitted_msn_revision(const Context& context,
                                      uint16_t acknowledgment,
                                      uint8_t bits,
-                                     uint64_t& revision)
+                                     uint64_t& revision,
+                                     uint16_t* transmitted_msn = nullptr)
 {
     if(bits == 0U || bits > 16U || context.transmitted_msn_count == 0U)
         return false;
@@ -93,6 +96,8 @@ inline bool transmitted_msn_revision(const Context& context,
         if((context.transmitted_msn_history[index] & mask) == (acknowledgment & mask))
         {
             revision = context.transmitted_context_revision_history[index];
+            if(transmitted_msn)
+                *transmitted_msn = context.transmitted_msn_history[index];
             return true;
         }
     }
@@ -445,7 +450,12 @@ inline void apply_feedback_to_context(Context& ctx, const Feedback& feedback)
             feedback.context_revision_valid &&
             feedback.acknowledged_context_revision == ctx.context_revision;
         if(current_revision_ack)
+        {
             ctx.profile_replacement_pending = false;
+            ctx.formal_pt0_since_confirmation = feedback.context_distance_valid
+                ? static_cast<std::uint8_t>(feedback.acknowledged_context_distance)
+                : 0U;
+        }
         const bool may_ack_current_state = !ctx.profile_replacement_pending ||
                                            current_revision_ack;
         if(may_ack_current_state &&
