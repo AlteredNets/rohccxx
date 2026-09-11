@@ -77,9 +77,15 @@ struct Context
     uint8_t   nack_count = 0;
     bool      static_acked = false;
     bool      dynamic_acked = false;
+    bool      profile_has_been_used = false;
+    bool      profile_replacement_active = false;
+    bool      profile_replacement_pending = false;
+    uint8_t   formal_pt0_since_confirmation = 0;
+    uint64_t  context_revision = 0;
     uint16_t  msn = 0;
     uint8_t   reorder_ratio = 0;
     std::array<uint16_t, 64> transmitted_msn_history{};
+    std::array<uint64_t, 64> transmitted_context_revision_history{};
     uint8_t transmitted_msn_head = 0;
     uint8_t transmitted_msn_count = 0;
 
