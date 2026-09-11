@@ -1656,7 +1656,7 @@ TEST_CASE("RTP formal PT-0 round-trips four interleaved small-CID flows")
             require_guarded_decode(decomp.get(), rohc, packet);
             if(ordinal >= 2U)
             {
-                REQUIRE(rohc.size() - 160U == (flow == 0U ? 1U : 2U));
+                REQUIRE(rohc.size() - 160U == (flow == 0U ? 2U : 3U));
                 if(flow != 0U) REQUIRE(rohc[0] == static_cast<std::uint8_t>(0xe0U | flow));
             }
         }
@@ -1680,8 +1680,82 @@ TEST_CASE("RTP formal PT-0 reconstructs sequence timestamp and IPv4-ID wrap")
             const auto packet = make_rtp_packet(sequence, timestamp, id);
             const auto rohc = compress_rtp(comp.get(), 0U, packet);
             require_guarded_decode(decomp.get(), rohc, packet);
-            if(ordinal >= 2U) REQUIRE(rohc.size() - 160U == 1U);
+            if(ordinal >= 2U) REQUIRE(rohc.size() - 160U == 2U);
         }
+    }
+}
+
+TEST_CASE("Issue 32 delayed legacy RTP PT-0 WAN witness rejects transactionally",
+          "[issue32]")
+{
+    // Preserved from combined-D mini-PC -> AWS Ohio -> Pi5:
+    // 300 ms delay, 5% loss, 5% duplication, 10% reorder, seed 531034.
+    // The compact ordinal 83 arrived after the ordinal 291 refresh and
+    // previously authenticated a reconstruction 16 RTP sequence numbers
+    // ahead through a CRC-3 collision.
+    const std::array<const char*, 3> context_units{{
+        "e3fd013840110a142101c633010d2ee355f31122300406003d2300000000630fa000061a80e7b2f3646a5234c0000000030000000355ef1af6a30824d0533d55114373f54e904f65dbaa5f6dd1aa0b8922a02ff5140eaa05bb6a3ab2cd",
+        "e3fd011040110a142101c633010d2ee355f31122300404003d2301000000630fa100061b208fe011894454ac6700000013000000036d91ecd5d8f51e76d6995a7af4578f2458dcf9f0b7f009917868e605f184bb6aacafc899c04b3bff",
+        "e3fd01a140110a142101c633010d2ee355f31122300404003d2312000000630fb2000625c01d251f4779c74c640000012300000003da3b55cf1cee37bf6ac06f193f99ac574fb3e04f97e2d5387e1024f6e77ea6edb4395f816ccc93d8",
+    }};
+    const std::array<const char*, 3> context_packets{{
+        "45000060230040003d1128380a142101c633010d2ee355f3004c000080630fa000061a8011223004e7b2f3646a5234c0000000030000000355ef1af6a30824d0533d55114373f54e904f65dbaa5f6dd1aa0b8922a02ff5140eaa05bb6a3ab2cd",
+        "45000060230140003d1128370a142101c633010d2ee355f3004c000080630fa100061b20112230048fe011894454ac6700000013000000036d91ecd5d8f51e76d6995a7af4578f2458dcf9f0b7f009917868e605f184bb6aacafc899c04b3bff",
+        "45000060231240003d1128260a142101c633010d2ee355f3004c000080630fb2000625c0112230041d251f4779c74c640000012300000003da3b55cf1cee37bf6ac06f193f99ac574fb3e04f97e2d5387e1024f6e77ea6edb4395f816ccc93d8",
+    }};
+    const auto delayed = hex_bytes(
+        "e32e8699a2e5c4afa6fd0000005300000003934ee819dde68dcc5be7fc3763bb42589ad13042940f55d746701a54def10c06420ac44b1b65ef18");
+    const auto recovery_unit = hex_bytes(
+        "e3fd019240110a142101c633010d2ee355f31122300404003d2313000000630fb3000626607577fdaa57c1d4c30000013300000003e245a3ec67130d19ef64607288bdd63d87207c648a4db178ac734bd1b6d5e893163c92a3c6bd1aea");
+    const auto recovery_packet = hex_bytes(
+        "45000060231340003d1128250a142101c633010d2ee355f3004c000080630fb300062660112230047577fdaa57c1d4c30000013300000003e245a3ec67130d19ef64607288bdd63d87207c648a4db178ac734bd1b6d5e893163c92a3c6bd1aea");
+
+    DecompPtr decomp(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(decomp);
+    for(std::size_t index = 0U; index < context_units.size(); ++index)
+        require_guarded_decode(decomp.get(), hex_bytes(context_units[index]),
+                               hex_bytes(context_packets[index]));
+    require_failed_transaction(decomp.get(), delayed, 510U, true, 3U);
+    require_failed_transaction(decomp.get(), delayed, 510U, true, 3U);
+    require_guarded_decode(decomp.get(), recovery_unit, recovery_packet);
+}
+
+TEST_CASE("Issue 32 current RTP PT-0 emission resists delayed CRC aliases",
+          "[issue32]")
+{
+    for(const std::uint32_t cid : {1U, 3U})
+    {
+        CAPTURE(cid);
+        CompPtr comp(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+        DecompPtr decomp(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+        REQUIRE(comp);
+        REQUIRE(decomp);
+        std::vector<std::uint8_t> delayed;
+
+        for(std::uint32_t ordinal = 0U; ordinal < 22U; ++ordinal)
+        {
+            const auto packet = make_rtp_packet(
+                static_cast<std::uint16_t>(4000U + ordinal),
+                400000U + ordinal * 160U,
+                static_cast<std::uint16_t>(8000U + ordinal), cid);
+            const auto rohc = compress_rtp(comp.get(), cid, packet);
+            require_guarded_decode(decomp.get(), rohc, packet);
+            if(ordinal == 2U)
+            {
+                const std::size_t base = cid == 0U ? 0U : 1U;
+                REQUIRE(rohc.size() - 160U == (cid == 0U ? 2U : 3U));
+                REQUIRE((rohc[base] & 0xf0U) == 0x80U);
+                delayed = rohc;
+            }
+        }
+
+        REQUIRE(!delayed.empty());
+        require_failed_transaction(decomp.get(), delayed, 510U, true, cid);
+        require_failed_transaction(decomp.get(), delayed, 510U, true, cid);
+
+        const auto recovery = make_rtp_packet(4022U, 403520U, 8022U, cid);
+        const auto recovery_rohc = compress_rtp(comp.get(), cid, recovery);
+        require_guarded_decode(decomp.get(), recovery_rohc, recovery);
     }
 }
 
@@ -1745,9 +1819,9 @@ TEST_CASE("corrupted RTP PT-0 fails without changing output or context")
         valid = compress_rtp(comp.get(), 0U, expected);
         if(ordinal < 2U) require_guarded_decode(decomp.get(), valid, expected);
     }
-    REQUIRE(valid.size() - 160U == 1U);
+    REQUIRE(valid.size() - 160U == 2U);
     auto corrupt = valid;
-    corrupt[0] ^= 0x01U;
+    corrupt[1] ^= 0x01U;
     require_failed_transaction(decomp.get(), corrupt);
     require_guarded_decode(decomp.get(), valid, expected);
 }

@@ -93,7 +93,7 @@ inline RohcPacketType detect_packet_type(uint8_t b)
         return RohcPacketType::FO_ESP;
     if(b == 0x77)
         return RohcPacketType::FO_UDP_Lite;
-    if((b & 0xE0) == 0xA0)
+    if((b & 0xE0) == 0x80 || (b & 0xE0) == 0xA0)
         return RohcPacketType::FormalCO;
     if((b & 0x80) == 0x00)
         return RohcPacketType::FO_RTP;

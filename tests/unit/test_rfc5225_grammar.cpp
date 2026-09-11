@@ -1714,7 +1714,7 @@ TEST_CASE("RFC 5225 parser rejects malformed packet starts and impossible CID fo
 
     const MalformedStartCase cases[] = {
         {"add-cid-only", {0xE5}, 1, false},
-        {"add-cid-unknown-packet", {0xE5, 0x80}, 2, false},
+        {"add-cid-unknown-packet", {0xE5, 0xC0}, 2, false},
         {"add-cid-in-large-cid-space", {0xE5, 0xF8, 0x01, 0x00}, 4, true},
         {"ir-missing-profile-id", {0xFD}, 1, false},
         {"ir-dyn-missing-profile-id", {0xF8}, 1, false},
