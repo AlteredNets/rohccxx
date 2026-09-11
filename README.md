@@ -21,8 +21,8 @@ This repository is source-available under those terms, not OSI open-source.
   small-CID-0, no-IP-options flows in the RFC 5225 RTP/UDP/IP, UDP/IP, ESP/IP,
   and IP-only profiles, plus the remaining optional oracle hooks,
   is documented in [`docs/external_oracle.md`](docs/external_oracle.md).
-- Version 0.8.0-rc.2 release-candidate scope and validation are documented in
-  [`docs/release_v0.8.0-rc.2.md`](docs/release_v0.8.0-rc.2.md). This is a pre-v1
+- Version 0.8.0-rc.3 release-candidate scope and validation are documented in
+  [`docs/release_v0.8.0-rc.3.md`](docs/release_v0.8.0-rc.3.md). This is a pre-v1
   candidate and does not claim production readiness.
 
 ## Dependencies
@@ -56,7 +56,7 @@ cmake --install build
 Release builds derive the project version from an exact git tag at `HEAD`. Tags may use either `vX.Y.Z[-prerelease]` or `X.Y.Z[-prerelease]`; the configured project version strips a leading `v`. Untagged builds use the version in the checked-in `VERSION` file, and local builds may override the version explicitly:
 
 ```bash
-cmake -B build -S . -DROHCCXX_VERSION=0.8.0-rc.2
+cmake -B build -S . -DROHCCXX_VERSION=0.8.0-rc.3
 ```
 
 The installed C API exposes the compiled release version:
@@ -81,11 +81,11 @@ librohccxx.so.<major>.<minor>.<patch>
 The Debian package is named `librohccxx` and the generated package file is `librohccxx-X.Y.Z[-prerelease].deb`. Installing a newer package version upgrades the package-owned shared library files and updates the loader cache through `ldconfig`. Debian package builds require `dpkg-dev` so CPack can run `dpkg-shlibdeps` and derive shared-library dependencies automatically.
 
 ```bash
-git tag v0.8.0-rc.2
+git tag v0.8.0-rc.3
 cmake -B build -S . -DROHCCXX_BUILD_TESTS=OFF
 cmake --build build
 cmake --build build --target package
-sudo dpkg -i build/librohccxx-0.8.0-rc.2.deb
+sudo dpkg -i build/librohccxx-0.8.0-rc.3.deb
 ```
 
 ## Execute Tests
