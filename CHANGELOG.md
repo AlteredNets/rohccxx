@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.0-rc.3 - 2026-09-11
+
+- Prevent delayed ESP PT-0 packets from being accepted after a full four-bit
+  MSN wrap with incorrect IPv4 ID and ESP sequence values (#32).
+- Emit PT-0-CRC7 for current ESP traffic and transactionally retire legacy
+  CRC-3 units after stronger-generation refresh.
+- Retain the pre-v1 release-candidate status and the v0.8.0 ABI version.
+
 ## 0.8.0-rc.2 - 2026-09-10
 
 - Reject silent RTP reconstruction after loss when the required context is unavailable (#49).
