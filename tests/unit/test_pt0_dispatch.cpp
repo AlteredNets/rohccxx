@@ -371,6 +371,38 @@ std::vector<std::uint8_t> make_packet(Pt0Profile profile,
     return packet;
 }
 
+std::vector<std::uint8_t> make_rc2_soak_esp_packet(std::uint32_t round,
+                                                    std::size_t size = 96U)
+{
+    REQUIRE(size >= 56U);
+    constexpr std::uint32_t cid = 9U;
+    std::vector<std::uint8_t> packet(size);
+    auto* ip = packet.data();
+    ip[0] = 0x45U;
+    ip[1] = 0x21U;
+    put16(ip + 2U, static_cast<std::uint16_t>(packet.size()));
+    put16(ip + 4U, static_cast<std::uint16_t>(round));
+    put16(ip + 6U, 0x4000U);
+    ip[8] = 63U;
+    ip[9] = 50U;
+    ip[12] = 10U;
+    ip[13] = 32U;
+    ip[14] = 25U;
+    ip[15] = 1U;
+    ip[16] = 198U;
+    ip[17] = 51U;
+    ip[18] = 3U;
+    ip[19] = 19U;
+    put32(ip + 20U, 0xa0510000U + cid);
+    put32(ip + 24U, 0xfffffff0U + round);
+    for(std::size_t pos = 28U; pos < packet.size(); ++pos)
+        packet[pos] = static_cast<std::uint8_t>(pos + round + cid);
+    put32(ip + 48U, round * 16U + cid);
+    put32(ip + 52U, cid);
+    put16(ip + 10U, ipv4_checksum(ip));
+    return packet;
+}
+
 std::size_t ordinal_for_octet(Pt0Profile profile, std::uint8_t octet)
 {
     const std::size_t msn_lsb = static_cast<std::size_t>(octet >> 3U);
@@ -614,7 +646,10 @@ TEST_CASE("public C API round-trips every safely emitted RFC 5225 PT-0 first oct
     // exceed the unambiguous four-bit forward window. A per-context
     // TOS witness supplies every CRC-3 value for the 14 safe MSN values without
     // fabricating wire packets or bypassing the public encoder.
-    for(const auto profile : {Pt0Profile::Udp, Pt0Profile::Esp, Pt0Profile::Ip})
+    // Current ESP emission uses PT-0-CRC7 and has dedicated framing and
+    // delayed-unit coverage below. This exhaustive octet test covers the
+    // remaining current one-octet CRC-3 emitters.
+    for(const auto profile : {Pt0Profile::Udp, Pt0Profile::Ip})
     {
         for(unsigned value = 0; value <= 0x7fU; ++value)
         {
@@ -635,7 +670,8 @@ TEST_CASE("public C API round-trips every safely emitted RFC 5225 PT-0 first oct
 
 TEST_CASE("public C API resolves every PT-0 private-FO marker for every formal profile")
 {
-    for(const auto profile : {Pt0Profile::Udp, Pt0Profile::Esp, Pt0Profile::Ip})
+    // Legacy ESP marker overlap remains covered by the Issue 47 witness.
+    for(const auto profile : {Pt0Profile::Udp, Pt0Profile::Ip})
     {
         for(const std::uint8_t marker : {0x77U, 0x78U, 0x79U, 0x7aU})
         {
@@ -660,8 +696,8 @@ TEST_CASE("public C API reproduces the scientific comparator collision ordinals"
     const FixturePin pins[] = {
         {Pt0Profile::Udp, 14U, 161U, 0x78U,
          "4816fc555718ec1a4f88bec98dcdf0f08323d023954769052095cbaac92f34e7"},
-        {Pt0Profile::Esp, 47U, 161U, 0x78U,
-         "98d3a21878eceb5108366f581e6b2d378f19dfe045e07de2bc4fdf959865746f"},
+        {Pt0Profile::Esp, 47U, 162U, 0x97U,
+         "dba96689be806bd04de2ec60dd783fed18375e376431aaa4c759563d2ba9bee1"},
         {Pt0Profile::Ip, 61U, 161U, 0x77U,
          "cdc4301feabce8de95c830901cf6c575f049cb73729a52f819cf88a6fbfc11df"},
     };
@@ -1080,7 +1116,8 @@ TEST_CASE("PT-0 no-reordering interval accepts delta 14 and refreshes before del
                 if(ordinal < 2U || ordinal == 15U)
                     require_guarded_decode(decomp.get(), rohc, ip);
                 if(ordinal == 15U)
-                    REQUIRE(rohc.size() - 160U == 1U);
+                    REQUIRE(rohc.size() - 160U ==
+                            (profile == Pt0Profile::Esp ? 2U : 1U));
             }
         }
 
@@ -1301,7 +1338,7 @@ TEST_CASE("unsafe UDP fields retain private FO and PT-0 failures are transaction
     }
 }
 
-TEST_CASE("ESP formal PT-0 uses RFC 5225 small-CID framing")
+TEST_CASE("ESP formal PT-0-CRC7 uses RFC 5225 small-CID framing")
 {
     for(const std::uint32_t cid : {0U, 1U, 15U})
     {
@@ -1317,9 +1354,11 @@ TEST_CASE("ESP formal PT-0 uses RFC 5225 small-CID framing")
             require_guarded_decode(decomp.get(), rohc, packet);
             if(ordinal >= 2U)
             {
-                REQUIRE(rohc.size() - 160U == (cid == 0U ? 1U : 2U));
+                REQUIRE(rohc.size() - 160U == (cid == 0U ? 2U : 3U));
                 if(cid != 0U)
                     REQUIRE(rohc[0] == static_cast<std::uint8_t>(0xe0U | cid));
+                const std::size_t base = cid == 0U ? 0U : 1U;
+                REQUIRE((rohc[base] & 0xe0U) == 0x80U);
             }
         }
     }
@@ -1341,7 +1380,7 @@ TEST_CASE("ESP formal PT-0 round-trips four interleaved small-CID flows")
             require_guarded_decode(decomp.get(), rohc, packet);
             acknowledge_refresh(comp.get(), Pt0Profile::Esp, flow, ordinal, rohc);
             if(ordinal >= 2U && !is_ir_packet(rohc, flow))
-                REQUIRE(rohc.size() - 160U == (flow == 0U ? 1U : 2U));
+                REQUIRE(rohc.size() - 160U == (flow == 0U ? 2U : 3U));
         }
     }
 }
@@ -1380,7 +1419,7 @@ TEST_CASE("ESP PT-0 requires safely reconstructable fields and progression")
             put32(packet.data() + 24U, 0xfffffffeU + ordinal);
             const auto rohc = compress_packet(comp.get(), 0U, packet);
             require_guarded_decode(decomp.get(), rohc, packet);
-            if(ordinal == 2U) REQUIRE(rohc.size() - 160U == 1U);
+            if(ordinal == 2U) REQUIRE(rohc.size() - 160U == 2U);
         }
     }
 }
@@ -1519,7 +1558,7 @@ TEST_CASE("malformed ESP PT-0 fails transactionally and remains retryable")
         valid = compress_packet(comp.get(), 1U, expected);
         if(ordinal < 2U) require_guarded_decode(decomp.get(), valid, expected);
     }
-    REQUIRE(valid.size() - 160U == 2U);
+    REQUIRE(valid.size() - 160U == 3U);
     auto corrupt = valid;
     corrupt[1] ^= 0x01U;
     require_failed_transaction(decomp.get(), corrupt, 510U, true, 1U);
@@ -1757,6 +1796,104 @@ TEST_CASE("Issue 32 current RTP PT-0 emission resists delayed CRC aliases",
         const auto recovery_rohc = compress_rtp(comp.get(), cid, recovery);
         require_guarded_decode(decomp.get(), recovery_rohc, recovery);
     }
+}
+
+TEST_CASE("Issue 32 RC2 delayed ESP PT-0 wrap witness rejects transactionally",
+          "[issue32][rc2-wan]")
+{
+    // Exact compressed witness from the published v0.8.0-rc.2 geographic
+    // soak: mini-PC -> AWS Ohio -> Pi5, seed 80200203, CID 9, ordinal 89.
+    // The round-5 unit arrived after the live context reached round 20. Its
+    // four MSN LSBs decoded as forward delta 1, producing round 21's IPv4 ID
+    // and wrapped ESP sequence; CRC-3 authenticated that wrong header.
+    // compressed SHA-384: a3f5c2d8de831930d04827f6b312c5298eaee09a79cd908f66b05a2cc37f0931d71157e11b4874fd1b378d4faf1fb667
+    // expected SHA-384:   e3a34dcf9d3df649e24f9746fe5c411a02fbcb2d04a74343b5f35f79fb6751004c962c5e5f58e8b72a478f80c6f74025
+    // wrong RC2 SHA-384:  eb6c87a119bdf9e7546157f9cbfea2f86c8f608570aa2b4703807e0f606e1dd36dd4dc50b8ff5a96b5823c621b55b361
+    constexpr std::uint32_t cid = 9U;
+    const auto delayed = hex_bytes(
+        "e92f2a9df8076fc05c5f12a0a5a7edaa6e1bf20eb8bc000000590000000900000000c374fbe1307402f853f2a2b97c18"
+        "13e20202211dc8976ff51026e0f49a5dd596ddf44369fa005c435ae46d068f9574e14bf0271cd1a2aca876cf1c56f4af"
+        "0bfb967adfd7f99a343a8f64d359df1b7c2720ab0801c8ae4767014342297be9da725dc14c9a369ed54c98dd38e81600"
+        "3af74d531278371459977f05cbde8cfb9085b00932986a1542032a7902613148c628b7afbf5d5f57daa8f11208281ba9"
+        "c8baa58e23281df5abfb339c7abe3573bb4c8312d9fafe0cc5b6e90e8a322d8ce4494f86a46fa3c65e552433fb114c2c"
+        "c2eb15cb076a2dd4ec20d487bfa40ae6c1713a90a79cf8b9f30e0fd0b870a5917cd0a3fa19fd0a1f2258048d2d101f87"
+        "bd7eb0578675ceaaac254846b932b0b3a956d5f0beed2e03b5c2962558821acaa9c96e39fda11961bdefb05316547310"
+        "354fd7620a974638240914156bd2cefbc46c984a6975d1fbd516adf5d1ea14e0f8bb209d8d0bd0be2a82277a1e61c87d"
+        "617d9605de0f2e685914b2d7b0c98037a6d145d081f86181f97e77707b443ee98c2e77dd9d76857a2f4c836a96119327"
+        "8f3406a567b96d62763447a29c732dcfbfb6c5acf345712be057e20e25a74e26a1f5f651f6b2fcbb6ca820775a69110e"
+        "aa152b72381f53099171f2b767447c6134a8a1501e4b881364c353d1d6ea98b716144f3cdcb9e014fa3206e50f62f1fd"
+        "0ffea04c4bec1c155934ffaa8a397626875c5e59db312aa57fa52faaf8d4811a13306c822e09e70d50d736add166757c"
+        "e0d7e13655213b9913aeb43400a64d9759423f179454c2dd33e71a5fa3333a4b8e6ea65276ab90f856ce9dca304d477b"
+        "ab2389373e86369ca6d0c56433b94a249aed913b3322b5abca8fac019754d51fe18012098b8298617bc1959dde3ed9e1"
+        "09e961b886a7836ef5e1f3b828d85e7aed508c4773ea37940178323d7741d460f8540624cabe08a78aed42babc0c9525"
+        "bc7075b0e627015c3749e55db768ec3500132ec52c9a3622bb14b5a5ff2aa7397ec67915a0f6c357a0aee431b6aa458a"
+        "69298e5815870dc665828a4047034965c0541a81b1dc3147d2eb59cdecedb1bf227d3af0a5d368862887ee95b5efeb27"
+        "849fdcd67f258d18478e87e1b17abdbb887ff94e2b170a63cb98845324f0faca813b6524870bb68e46b5ab33ef4a05e8"
+        "10f112447018ce9e03bd21d9cf03b435af9e61611fcd86aa239941263846aaf15c71b515d15a672aee4dbe2ccaf5ccd9"
+        "b23f8850172bc4b0837da089986ed7e84e65cda772f16b08e0147a094486dad9ac51dcfbdcc5ca9c529c8a2a5ae78e57"
+        "150392f6677d9a8c375c2cbf10aecad7c9a59ee9f7029d90c98b24b7838262a58da86f55d3206a52e2f071360f1bce4c"
+        "b5a678c41f4c04bbc1499e5fac1391c0b3d1db105b7baaf74270eec549405d51988a5f8e9564a0bc39c1adc6a4bf78b8"
+        "a660650a4dea8e31a0710e29eec84fb00be94a4166b3731e0c9b732459b001dc1711ae7159978e81b9edc9600ff6a977"
+        "eba5202d78475fb3f90193b0d295429ccb028a447944a37766020b8b2375d4196544e2e6be60fd7fcc881fdd870083b7"
+        "a0143503352633b1411907b656928d5f7903b9478aa4f464f77fb4d527d9a593c53029bef1561eb0e23d29d586e3aeef"
+        "b00b35013c9a8c3408964f69e2221574ea225144159621ca99eaae7e915149a9e507fc3af5ca3950daf0a6e52c09815a"
+        "a3671da1a427");
+    REQUIRE(delayed.size() == 1254U);
+    REQUIRE(delayed[0] == 0xe9U);
+    REQUIRE(delayed[1] == 0x2fU);
+
+    auto expected = make_rc2_soak_esp_packet(5U, 1280U);
+    REQUIRE(delayed.size() - 2U == expected.size() - 28U);
+    std::copy(delayed.begin() + 2U, delayed.end(), expected.begin() + 28U);
+
+    CompPtr comp(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    DecompPtr decomp(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(comp);
+    REQUIRE(decomp);
+    for(std::uint32_t round = 0U; round <= 20U; ++round)
+    {
+        const auto packet = make_rc2_soak_esp_packet(round);
+        const auto rohc = compress_packet(comp.get(), cid, packet);
+        if(round == 5U)
+        {
+            REQUIRE(rohc[0] == delayed[0]);
+            if((rohc[1] & 0x80U) == 0U)
+                REQUIRE(rohc[1] == delayed[1]);
+            else
+                REQUIRE((rohc[1] & 0xe0U) == 0x80U);
+            continue;
+        }
+        require_guarded_decode(decomp.get(), rohc, packet);
+    }
+
+    for(unsigned attempt = 0U; attempt < 2U; ++attempt)
+    {
+        std::vector<std::uint8_t> output(expected.size() + 2U, 0xa5U);
+        output.front() = 0x3cU;
+        output.back() = 0xc3U;
+        const auto before = output;
+        std::size_t output_len = expected.size();
+        const int rc = rohc_decompress4(decomp.get(), delayed.data(), delayed.size(),
+                                        output.data() + 1U, &output_len);
+        INFO("every successful decompression must equal the intended original");
+        if(rc == 0)
+        {
+            REQUIRE(output_len == expected.size());
+            REQUIRE(std::memcmp(output.data() + 1U, expected.data(),
+                                expected.size()) == 0);
+        }
+        else
+        {
+            REQUIRE(output_len == 0U);
+            REQUIRE(output == before);
+            REQUIRE(rohc_decomp_has_feedback(decomp.get()) == 1);
+        }
+    }
+
+    const auto recovery = make_rc2_soak_esp_packet(21U);
+    const auto recovery_rohc = compress_packet(comp.get(), cid, recovery);
+    REQUIRE(is_ir_packet(recovery_rohc, cid));
+    require_guarded_decode(decomp.get(), recovery_rohc, recovery);
 }
 
 TEST_CASE("unsafe RTP field changes retain the private FO fallback")

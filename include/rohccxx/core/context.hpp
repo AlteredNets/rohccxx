@@ -81,6 +81,8 @@ struct Context
     bool      profile_replacement_active = false;
     bool      profile_replacement_pending = false;
     uint8_t   formal_pt0_since_confirmation = 0;
+    bool      formal_pt0_crc7_seen = false;
+    bool      formal_pt0_crc3_retired = false;
     uint64_t  context_revision = 0;
     uint16_t  msn = 0;
     uint8_t   reorder_ratio = 0;
