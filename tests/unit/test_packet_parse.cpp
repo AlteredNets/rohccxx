@@ -10,6 +10,7 @@
 #include "rohccxx/core/cid.hpp"
 #include "rohccxx/core/emit_ir.hpp"
 #include "rohccxx/core/emit_ir_dyn.hpp"
+#include "rohccxx/core/emit_uncompressed.hpp"
 #include "rohccxx/core/emit_esp_fo.hpp"
 #include "rohccxx/core/emit_ip_fo.hpp"
 #include "rohccxx/core/emit_rtp_fo.hpp"
@@ -141,6 +142,29 @@ std::vector<std::uint8_t> make_collision_regression_packet(std::uint32_t ordinal
     return packet;
 }
 
+void acknowledge_collision_refresh(rohc_comp* comp,
+                                   const std::vector<std::uint8_t>& compressed,
+                                   std::size_t compressed_len,
+                                   std::uint16_t sequence)
+{
+    if(compressed_len == 0U || (compressed[0] & 0xfeU) != 0xfcU)
+        return;
+
+    rohccxx::Feedback feedback{};
+    feedback.type = rohccxx::FeedbackType::ACK;
+    feedback.acknowledgment_number = sequence;
+    feedback.acknowledgment_bits = 14U;
+    feedback.acknowledgment_valid = true;
+    std::array<std::uint8_t, ROHCCXX_FEEDBACK_RAW_MAX> raw{};
+    std::size_t raw_len = raw.size();
+    REQUIRE(rohccxx::write_feedback2_v1(raw.data(), &raw_len, feedback));
+    rohccxx_feedback_v1_t parsed{};
+    REQUIRE(rohc_feedback_parse_v1(ROHCCXX_DIRECTION_UPLINK, raw.data(), raw_len,
+                                   &parsed) == ROHCCXX_FEEDBACK_ACCEPTED);
+    REQUIRE(rohc_comp_deliver_feedback_v1(comp, &parsed) ==
+            ROHCCXX_FEEDBACK_ACCEPTED);
+}
+
 void require_collision_regression_round_trips(bool zero_payload)
 {
     constexpr std::size_t packet_count = 49017;
@@ -171,8 +195,8 @@ void require_collision_regression_round_trips(bool zero_payload)
 
         if(!zero_payload && (i == 41095U || i == 49016U))
         {
-            REQUIRE(compressed_len == 1201);
-            REQUIRE((compressed[0] & 0x80U) == 0U);
+            REQUIRE(compressed_len == 1202);
+            REQUIRE((compressed[0] & 0xf0U) == 0x80U);
         }
 
         std::size_t output_len = output.size();
@@ -187,6 +211,12 @@ void require_collision_regression_round_trips(bool zero_payload)
            std::memcmp(output.data(), input.data(), input.size()) != 0)
         {
             ++incorrect_round_trips;
+        }
+        if(i >= 2U && api_status == 0 && output_len == input.size() &&
+           std::memcmp(output.data(), input.data(), input.size()) == 0)
+        {
+            acknowledge_collision_refresh(comp, compressed, compressed_len,
+                static_cast<std::uint16_t>(0x1000U + i));
         }
 
         if(!zero_payload && (i == 41095U || i == 49016U))
@@ -537,19 +567,17 @@ TEST_CASE("ROHC packet parser identifies current RFC 5225 packet families")
     REQUIRE(parsed.cid == 3);
     REQUIRE(parsed.type == rohccxx::RohcPacketType::Segment);
 
-    uint8_t uncompressed[21] = {};
-    uncompressed[0] = 0x00;
-    uncompressed[1] = 0x45;
-    uncompressed[3] = 0x00;
-    uncompressed[4] = 0x14;
+    uint8_t uncompressed[20] = {};
+    uncompressed[0] = 0x45;
+    uncompressed[2] = 0x00;
+    uncompressed[3] = 0x14;
     REQUIRE(rohccxx::parse_rohc_packet(uncompressed, sizeof(uncompressed), parsed));
     REQUIRE(parsed.type == rohccxx::RohcPacketType::Uncompressed);
 
-    uint8_t malformed_uncompressed[21] = {};
-    malformed_uncompressed[0] = 0x00;
-    malformed_uncompressed[1] = 0x45;
-    malformed_uncompressed[3] = 0x00;
-    malformed_uncompressed[4] = 0x18;
+    uint8_t malformed_uncompressed[20] = {};
+    malformed_uncompressed[0] = 0x45;
+    malformed_uncompressed[2] = 0x00;
+    malformed_uncompressed[3] = 0x18;
     REQUIRE(rohccxx::parse_rohc_packet(malformed_uncompressed, sizeof(malformed_uncompressed), parsed));
     REQUIRE(parsed.type == rohccxx::RohcPacketType::FO_RTP);
 }
@@ -567,23 +595,39 @@ TEST_CASE("CID 0 FO-RTP packets cannot be mistaken for uncompressed IPv6")
     }
 }
 
-TEST_CASE("CID 0 genuine uncompressed IPv6 works without an RTP context")
+TEST_CASE("CID 0 uncompressed Normal requires an explicit profile context")
 {
-    std::array<std::uint8_t, 48> rohc{};
-    rohc[0] = 0x00;
-    make_valid_ipv6_udp_without_transport(rohc.data() + 1, rohc.size() - 1);
+    std::array<std::uint8_t, 47> ip{};
+    make_valid_ipv6_udp_without_transport(ip.data(), ip.size());
 
     rohc_decomp* decomp = rohc_decomp_new2(0, ROHCCXX_DIRECTION_UPLINK);
     REQUIRE(decomp != nullptr);
     std::array<std::uint8_t, 64> output{};
+    output.fill(0xa5U);
+    const auto guard = output;
     std::size_t output_len = output.size();
-    REQUIRE(rohc_decompress4(decomp,
-                             rohc.data(),
-                             rohc.size(),
-                             output.data(),
-                             &output_len) == 0);
-    REQUIRE(output_len == rohc.size() - 1);
-    REQUIRE(std::memcmp(output.data(), rohc.data() + 1, output_len) == 0);
+    REQUIRE(rohc_decompress4(decomp, ip.data(), ip.size(), output.data(), &output_len) != 0);
+    REQUIRE(output_len == 0U);
+    REQUIRE(output == guard);
+
+    rohccxx::Context context{};
+    context.cid = 0U;
+    std::array<std::uint8_t, 64> ir{};
+    std::size_t ir_len = ir.size();
+    REQUIRE(rohccxx::emit_uncompressed_ir(ir.data(), &ir_len, context,
+                                          ip.data(), ip.size()));
+    output_len = output.size();
+    REQUIRE(rohc_decompress4(decomp, ir.data(), ir_len,
+                             output.data(), &output_len) == 0);
+    REQUIRE(output_len == ip.size());
+    REQUIRE(std::equal(ip.begin(), ip.end(), output.begin()));
+
+    ip.back() ^= 0x5aU;
+    output_len = output.size();
+    REQUIRE(rohc_decompress4(decomp, ip.data(), ip.size(),
+                             output.data(), &output_len) == 0);
+    REQUIRE(output_len == ip.size());
+    REQUIRE(std::equal(ip.begin(), ip.end(), output.begin()));
     rohc_decomp_free(decomp);
 }
 
@@ -612,7 +656,7 @@ TEST_CASE("RTP FO round-trips sequential IPv4 IDs and DF flags")
         rohccxx::ParsedRohcPacket parsed{};
         REQUIRE(rohccxx::parse_rohc_packet(rohc, rohc_len, parsed));
         if(i >= 2)
-            REQUIRE(parsed.type == rohccxx::RohcPacketType::FO_RTP);
+            REQUIRE(parsed.type == rohccxx::RohcPacketType::FormalCO);
 
         std::uint8_t out[128] = {};
         std::size_t out_len = sizeof(out);
@@ -666,8 +710,10 @@ TEST_CASE("ROHC uncompressed profile round-trips IPv4 and IPv6 packets")
         std::uint8_t out[80] = {};
         std::size_t out_len = sizeof(out);
         REQUIRE(rohc_compress4(comp, packet, packet_len, rohc, &rohc_len) == 0);
-        REQUIRE(rohc_len == packet_len + 1U);
-        REQUIRE(rohc[0] == 0x00);
+        REQUIRE(rohc_len == packet_len + 3U);
+        REQUIRE(rohc[0] == 0xfdU);
+        REQUIRE(rohc[1] == 0x00U);
+        REQUIRE(std::memcmp(rohc + 3U, packet, packet_len) == 0);
         REQUIRE(rohc_decompress4(decomp, rohc, rohc_len, out, &out_len) == 0);
         REQUIRE(out_len == packet_len);
         REQUIRE(std::memcmp(out, packet, packet_len) == 0);
@@ -686,23 +732,28 @@ TEST_CASE("ROHC uncompressed profile rejects malformed packets and reports feedb
     rohc_decomp* decomp = rohc_decomp_new2(4, ROHCCXX_DIRECTION_UPLINK);
     REQUIRE(decomp != nullptr);
 
-    std::uint8_t malformed[21] = {};
-    malformed[0] = 0x00;
-    malformed[1] = 0x45;
-    malformed[3] = 0x00;
-    malformed[4] = 0x18;
+    std::uint8_t malformed[23] = {};
+    malformed[0] = 0xfdU;
+    malformed[1] = 0x00U;
+    malformed[2] = 0x55U;
+    malformed[3] = 0x45U;
+    malformed[5] = 0x00U;
+    malformed[6] = 0x14U;
     std::uint8_t out[32] = {};
     std::size_t out_len = sizeof(out);
     REQUIRE(rohc_decompress4(decomp, malformed, sizeof(malformed), out, &out_len) != 0);
     REQUIRE(rohc_decomp_has_feedback(decomp) == 1);
 
-    std::uint8_t valid[21] = {};
-    valid[0] = 0x00;
-    valid[1] = 0x45;
-    valid[3] = 0x00;
-    valid[4] = 0x14;
+    std::uint8_t ip[20] = {};
+    ip[0] = 0x45U;
+    ip[2] = 0x00U;
+    ip[3] = 0x14U;
+    rohccxx::Context context{};
+    std::uint8_t valid[32] = {};
+    std::size_t valid_len = sizeof(valid);
+    REQUIRE(rohccxx::emit_uncompressed_ir(valid, &valid_len, context, ip, sizeof(ip)));
     out_len = 4;
-    REQUIRE(rohc_decompress4(decomp, valid, sizeof(valid), out, &out_len) != 0);
+    REQUIRE(rohc_decompress4(decomp, valid, valid_len, out, &out_len) != 0);
     REQUIRE(rohc_decomp_has_feedback(decomp) == 1);
 
     rohc_decomp_free(decomp);
@@ -713,30 +764,35 @@ TEST_CASE("ROHC uncompressed profile preserves Add-CID context isolation")
     rohc_decomp* decomp = rohc_decomp_new2(4, ROHCCXX_DIRECTION_UPLINK);
     REQUIRE(decomp != nullptr);
 
-    std::uint8_t packet[22] = {};
-    packet[0] = 0xE3;
-    packet[1] = 0x00;
-    packet[2] = 0x45;
-    packet[4] = 0x00;
-    packet[5] = 0x14;
+    std::uint8_t ip[20] = {};
+    ip[0] = 0x45U;
+    ip[2] = 0x00U;
+    ip[3] = 0x14U;
+    rohccxx::Context context{};
+    context.cid = 3U;
+    std::uint8_t ir[32] = {};
+    std::size_t ir_len = sizeof(ir);
+    REQUIRE(rohccxx::emit_uncompressed_ir(ir, &ir_len, context, ip, sizeof(ip)));
 
     std::uint8_t out[32] = {};
     std::size_t out_len = sizeof(out);
-    REQUIRE(rohc_decompress4(decomp, packet, sizeof(packet), out, &out_len) == 0);
+    REQUIRE(rohc_decompress4(decomp, ir, ir_len, out, &out_len) == 0);
     REQUIRE(out_len == 20);
     REQUIRE(out[0] == 0x45);
 
-    std::uint8_t other_cid_packet[22] = {};
-    other_cid_packet[0] = 0xE2;
-    other_cid_packet[1] = 0x00;
-    other_cid_packet[2] = 0x45;
-    other_cid_packet[4] = 0x00;
-    other_cid_packet[5] = 0x14;
+    std::uint8_t normal[21] = {0xe3U};
+    std::memcpy(normal + 1U, ip, sizeof(ip));
+    out_len = sizeof(out);
+    REQUIRE(rohc_decompress4(decomp, normal, sizeof(normal), out, &out_len) == 0);
+    REQUIRE(out_len == sizeof(ip));
+
+    std::uint8_t other_cid_packet[21] = {0xe2U};
+    std::memcpy(other_cid_packet + 1U, ip, sizeof(ip));
 
     out_len = sizeof(out);
-    REQUIRE(rohc_decompress4(decomp, other_cid_packet, sizeof(other_cid_packet), out, &out_len) == 0);
-    REQUIRE(out_len == 20);
-    REQUIRE(out[0] == 0x45);
+    REQUIRE(rohc_decompress4(decomp, other_cid_packet,
+                             sizeof(other_cid_packet), out, &out_len) != 0);
+    REQUIRE(out_len == 0U);
 
     rohc_decomp_free(decomp);
 }
@@ -761,7 +817,7 @@ TEST_CASE("Add-CID uncompressed IPv6 supersedes a prior UDP context")
     std::size_t udp_ir_len = udp_ir.size();
     REQUIRE(rohccxx::emit_ir_udp(udp_ir.data(), &udp_ir_len, udp_context));
     const std::uint8_t uncompressed_ipv6[] = {
-        0xeb, 0x00, 0x60, 0x0c, 0xab, 0x83, 0x00, 0x28, 0x11, 0x40,
+        0x60, 0x0c, 0xab, 0x83, 0x00, 0x28, 0x11, 0x40,
         0xfd, 0x77, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xfd, 0x77, 0x00, 0x01,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -779,12 +835,21 @@ TEST_CASE("Add-CID uncompressed IPv6 supersedes a prior UDP context")
     REQUIRE(rohc_decompress4(decomp, udp_ir.data(), udp_ir_len,
                              output.data(), &output_len) == 0);
 
+    rohccxx::Context uncompressed_context{};
+    uncompressed_context.cid = 11U;
+    std::array<std::uint8_t, 128> uncompressed_ir{};
+    std::size_t uncompressed_ir_len = uncompressed_ir.size();
+    REQUIRE(rohccxx::emit_uncompressed_ir(uncompressed_ir.data(),
+                                          &uncompressed_ir_len,
+                                          uncompressed_context,
+                                          uncompressed_ipv6,
+                                          sizeof(uncompressed_ipv6)));
     output.fill(0xa5);
     output_len = output.size() - 8;
-    REQUIRE(rohc_decompress4(decomp, uncompressed_ipv6, sizeof(uncompressed_ipv6),
+    REQUIRE(rohc_decompress4(decomp, uncompressed_ir.data(), uncompressed_ir_len,
                              output.data() + 4, &output_len) == 0);
-    REQUIRE(output_len == sizeof(uncompressed_ipv6) - 2);
-    REQUIRE(std::memcmp(output.data() + 4, uncompressed_ipv6 + 2, output_len) == 0);
+    REQUIRE(output_len == sizeof(uncompressed_ipv6));
+    REQUIRE(std::memcmp(output.data() + 4, uncompressed_ipv6, output_len) == 0);
     REQUIRE(std::all_of(output.begin(), output.begin() + 4,
                         [](std::uint8_t value) { return value == 0xa5; }));
     REQUIRE(std::all_of(output.begin() + 4 + output_len, output.end(),
@@ -823,9 +888,11 @@ TEST_CASE("ROHC compressor preserves nonzero small CID on uncompressed fallback"
     compressed_len = compressed.size();
     REQUIRE(rohc_compress4(comp, unsupported.data(), unsupported.size(),
                            compressed.data(), &compressed_len) == 0);
-    REQUIRE(compressed_len == unsupported.size() + 2U);
+    REQUIRE(compressed_len == unsupported.size() + 4U);
     REQUIRE(compressed[0] == 0xe3U);
-    REQUIRE(compressed[1] == 0x00U);
+    REQUIRE(compressed[1] == 0xfdU);
+    REQUIRE(compressed[2] == 0x00U);
+    REQUIRE(std::equal(unsupported.begin(), unsupported.end(), compressed.begin() + 4U));
 
     output.fill(0xa5U);
     output_len = output.size();
@@ -1253,7 +1320,7 @@ TEST_CASE("ROHC packet parser rejects malformed packet starts")
     uint8_t add_cid_only[] = {0xE1};
     REQUIRE_FALSE(rohccxx::parse_rohc_packet(add_cid_only, sizeof(add_cid_only), parsed));
 
-    uint8_t unknown[] = {0x80};
+    uint8_t unknown[] = {0xC0};
     REQUIRE_FALSE(rohccxx::parse_rohc_packet(unknown, sizeof(unknown), parsed));
 
     uint8_t truncated_ir[] = {0xFD};
@@ -1479,7 +1546,9 @@ TEST_CASE("IPv4 fragments use uncompressed fallback and round-trip exactly")
         std::size_t out_len = sizeof(out);
 
         REQUIRE(rohc_compress4(comp, ip, sizeof(ip), rohc, &rohc_len) == 0);
-        REQUIRE(rohc[0] == 0x00);
+        REQUIRE(rohc_len == sizeof(ip) + 3U);
+        REQUIRE(rohc[0] == 0xfdU);
+        REQUIRE(rohc[1] == 0x00U);
         REQUIRE(rohc_decompress4(decomp, rohc, rohc_len, out, &out_len) == 0);
         REQUIRE(out_len == sizeof(ip));
         REQUIRE(std::memcmp(out, ip, sizeof(ip)) == 0);
@@ -2053,20 +2122,25 @@ TEST_CASE("ROHC decompressor skips interspersed feedback before compressed paylo
     feedback.has_mode = true;
     feedback.mode = rohccxx::Mode::Reliable;
 
-    std::uint8_t uncompressed[21] = {};
-    uncompressed[0] = 0x00;
-    uncompressed[1] = 0x45;
-    uncompressed[3] = 0x00;
-    uncompressed[4] = 0x14;
+    std::uint8_t ip[20] = {};
+    ip[0] = 0x45U;
+    ip[2] = 0x00U;
+    ip[3] = 0x14U;
+    rohccxx::Context context{};
+    std::uint8_t uncompressed[32] = {};
+    std::size_t uncompressed_len = sizeof(uncompressed);
+    REQUIRE(rohccxx::emit_uncompressed_ir(uncompressed, &uncompressed_len,
+                                          context, ip, sizeof(ip)));
 
     std::uint8_t packet[64] = {};
     size_t packet_len = sizeof(packet);
-    REQUIRE(rohccxx::write_piggybacked_feedback(packet, &packet_len, feedback, uncompressed, sizeof(uncompressed)));
+    REQUIRE(rohccxx::write_piggybacked_feedback(packet, &packet_len, feedback,
+                                                uncompressed, uncompressed_len));
 
     std::uint8_t out[64] = {};
     size_t out_len = sizeof(out);
     REQUIRE(rohc_decompress4(decomp, packet, packet_len, out, &out_len) == 0);
-    REQUIRE(out_len == sizeof(uncompressed) - 1U);
+    REQUIRE(out_len == sizeof(ip));
     REQUIRE(out[0] == 0x45);
     REQUIRE(rohc_decomp_has_feedback(decomp) == 0);
 
@@ -2531,11 +2605,15 @@ TEST_CASE("ROHC decompressor explicitly rejects unsupported framework packet sta
 TEST_CASE("ROHC decompressor clears stale feedback after successful packet")
 {
     std::uint8_t bad[] = {0xE3, 0x7A, 0x00, 0x12, 0x34, 0x56};
-    std::uint8_t good[21] = {};
-    good[0] = 0x00;
-    good[1] = 0x45;
-    good[3] = 0x00;
-    good[4] = 0x14;
+    std::uint8_t ip[20] = {};
+    ip[0] = 0x45U;
+    ip[2] = 0x00U;
+    ip[3] = 0x14U;
+    rohccxx::Context context{};
+    std::uint8_t good[32] = {};
+    std::size_t good_len = sizeof(good);
+    REQUIRE(rohccxx::emit_uncompressed_ir(good, &good_len, context,
+                                          ip, sizeof(ip)));
 
     rohc_decomp* decomp = rohc_decomp_new2(4, ROHCCXX_DIRECTION_UPLINK);
     REQUIRE(decomp != nullptr);
@@ -2546,9 +2624,9 @@ TEST_CASE("ROHC decompressor clears stale feedback after successful packet")
     REQUIRE(rohc_decomp_has_feedback(decomp) == 1);
 
     out_len = sizeof(out);
-    REQUIRE(rohc_decompress4(decomp, good, sizeof(good), out, &out_len) == 0);
+    REQUIRE(rohc_decompress4(decomp, good, good_len, out, &out_len) == 0);
     REQUIRE(rohc_decomp_has_feedback(decomp) == 0);
-    REQUIRE(out_len == sizeof(good) - 1U);
+    REQUIRE(out_len == sizeof(ip));
 
     rohc_decomp_free(decomp);
 }
@@ -2863,7 +2941,7 @@ TEST_CASE("ROHC packet parser rejects malformed Add-CID FO starts")
     const std::uint8_t add_cid_only[] = {0xE3};
     REQUIRE_FALSE(rohccxx::parse_rohc_packet(add_cid_only, sizeof(add_cid_only), parsed));
 
-    const std::uint8_t add_cid_unknown[] = {0xE3, 0x80};
+    const std::uint8_t add_cid_unknown[] = {0xE3, 0xC0};
     REQUIRE_FALSE(rohccxx::parse_rohc_packet(add_cid_unknown, sizeof(add_cid_unknown), parsed));
 }
 

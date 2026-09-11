@@ -8,6 +8,7 @@
 #include "rohccxx/core/emit_esp_fo.hpp"
 #include "rohccxx/core/emit_ip_fo.hpp"
 #include "rohccxx/core/emit_udp_fo.hpp"
+#include "rohccxx/core/feedback.hpp"
 #include "rohccxx/core/rohcoipsec.hpp"
 
 #include <array>
@@ -73,6 +74,41 @@ std::vector<std::uint8_t> hex_bytes(const char* text)
     return bytes;
 }
 
+bool is_ir_packet(const std::vector<std::uint8_t>& packet, std::uint32_t cid)
+{
+    const std::size_t offset = cid == 0U ? 0U : 1U;
+    return packet.size() > offset && (packet[offset] & 0xfeU) == 0xfcU;
+}
+
+rohccxx_feedback_v1_t make_ack(std::uint32_t cid, std::uint16_t msn)
+{
+    rohccxx::Feedback feedback{};
+    feedback.cid = cid;
+    feedback.type = rohccxx::FeedbackType::ACK;
+    feedback.acknowledgment_number = msn;
+    feedback.acknowledgment_bits = 14U;
+    feedback.acknowledgment_valid = true;
+    std::array<std::uint8_t, ROHCCXX_FEEDBACK_RAW_MAX> raw{};
+    std::size_t raw_len = raw.size();
+    REQUIRE(rohccxx::write_feedback2_v1(raw.data(), &raw_len, feedback));
+    rohccxx_feedback_v1_t parsed{};
+    REQUIRE(rohc_feedback_parse_v1(ROHCCXX_DIRECTION_UPLINK, raw.data(), raw_len,
+                                   &parsed) == ROHCCXX_FEEDBACK_ACCEPTED);
+    return parsed;
+}
+
+void acknowledge_refresh(rohc_comp* comp, Pt0Profile profile, std::uint32_t cid,
+                         std::uint32_t ordinal,
+                         const std::vector<std::uint8_t>& packet)
+{
+    if(ordinal < 2U || !is_ir_packet(packet, cid))
+        return;
+    const auto parsed = make_ack(cid, static_cast<std::uint16_t>(
+        profile == Pt0Profile::Esp ? ordinal : ordinal + 1U));
+    REQUIRE(rohc_comp_deliver_feedback_v1(comp, &parsed) ==
+            ROHCCXX_FEEDBACK_ACCEPTED);
+}
+
 std::vector<std::uint8_t> make_rtp_packet(std::uint16_t sequence,
                                           std::uint32_t timestamp,
                                           std::uint16_t ipv4_id,
@@ -104,6 +140,188 @@ std::vector<std::uint8_t> make_rtp_packet(std::uint16_t sequence,
         packet[pos] = static_cast<std::uint8_t>(pos + sequence + flow);
     put16(ip + 10U, ipv4_checksum(ip));
     return packet;
+}
+
+std::vector<std::uint8_t> make_issue32_fuzz_packet(std::uint32_t ordinal,
+                                                    std::uint32_t cid,
+                                                    std::uint32_t profile,
+                                                    std::uint32_t epoch,
+                                                    std::uint32_t round,
+                                                    std::uint64_t salt)
+{
+    constexpr std::size_t packet_size = 96U;
+    const std::uint32_t flow = cid & 3U;
+    std::vector<std::uint8_t> packet(packet_size);
+    auto* ip = packet.data();
+    ip[0] = 0x45U;
+    put16(ip + 2U, static_cast<std::uint16_t>(packet.size()));
+    put16(ip + 4U, static_cast<std::uint16_t>(0xfffcU + round));
+    ip[6] = 0x40U;
+    ip[8] = static_cast<std::uint8_t>(64U - flow);
+    ip[9] = profile == 2U ? 50U : (profile == 3U ? 6U : 17U);
+    ip[12] = 10U;
+    ip[13] = static_cast<std::uint8_t>(20U + profile + epoch * 8U);
+    ip[14] = static_cast<std::uint8_t>(30U + flow);
+    ip[15] = 1U;
+    ip[16] = 198U;
+    ip[17] = 51U;
+    ip[18] = static_cast<std::uint8_t>(1U + profile + epoch * 8U);
+    ip[19] = static_cast<std::uint8_t>(10U + flow);
+
+    std::uint64_t state = 0x524f484343585354ULL ^
+                          (static_cast<std::uint64_t>(ordinal) << 17U) ^ salt;
+    for(std::size_t pos = 20U; pos < packet.size(); ++pos)
+    {
+        state ^= state << 13U;
+        state ^= state >> 7U;
+        state ^= state << 17U;
+        packet[pos] = static_cast<std::uint8_t>(state);
+    }
+    if(profile <= 1U)
+    {
+        put16(ip + 20U, static_cast<std::uint16_t>(12000U + epoch * 256U +
+                                                   profile * 64U + flow));
+        put16(ip + 22U, static_cast<std::uint16_t>(22000U + epoch * 256U +
+                                                   profile * 64U + flow));
+        put16(ip + 24U, static_cast<std::uint16_t>(packet.size() - 20U));
+        put16(ip + 26U, 0U);
+    }
+    if(profile == 0U)
+    {
+        ip[28] = 0x80U;
+        ip[29] = static_cast<std::uint8_t>(96U + flow);
+        put16(ip + 30U, static_cast<std::uint16_t>(0xfffcU + round));
+        put32(ip + 32U, 0xffffff00U + round * 160U);
+        put32(ip + 36U, 0x11223000U + epoch * 16U + flow);
+    }
+    else if(profile == 2U)
+    {
+        put32(ip + 20U, 0xa0b00000U + epoch * 16U + flow);
+        put32(ip + 24U, 0xfffffff8U + round);
+    }
+    put32(ip + 48U, ordinal);
+    put32(ip + 52U, cid);
+    put16(ip + 10U, ipv4_checksum(ip));
+    return packet;
+}
+
+std::uint16_t issue32_packet_msn(const std::vector<std::uint8_t>& packet,
+                                 std::uint32_t profile,
+                                 std::uint32_t generation_round)
+{
+    if(profile == 0U)
+        return static_cast<std::uint16_t>((packet[30] << 8U) | packet[31]);
+    if(profile == 2U)
+        return static_cast<std::uint16_t>((packet[26] << 8U) | packet[27]);
+    return static_cast<std::uint16_t>(generation_round + 1U);
+}
+
+void require_issue32_fuzz_witness_safe(
+    const std::vector<std::uint8_t>& witness, std::uint32_t trigger_round,
+    const std::vector<std::uint8_t>& expected_trigger_compressed = {})
+{
+    REQUIRE(!witness.empty());
+    const auto witness_bit = [&](std::size_t offset)
+    {
+        offset %= witness.size() * 8U;
+        return (witness[offset / 8U] & (1U << (offset % 8U))) != 0U;
+    };
+    std::uint64_t salt = 0x4953535545343955ULL;
+    for(const auto byte : witness)
+        salt = (salt ^ byte) * 0x100000001b3ULL;
+    const std::uint32_t cid = witness[0] & 0x0fU;
+    const std::uint32_t starting_profile =
+        witness.size() > 1U ? witness[1] & 0x03U : 0U;
+    CompPtr comp(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    DecompPtr decomp(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(comp);
+    REQUIRE(decomp);
+    REQUIRE(rohc_decomp_set_mode(decomp.get(), ROHCCXX_MODE_O) == 0);
+    rohccxx_feedback_v1_t delayed{};
+    bool delayed_valid = false;
+    bool trigger_was_safe = false;
+    bool recovered_after_trigger = false;
+
+    for(std::uint32_t round = 0U; round < 128U; ++round)
+    {
+        if(witness_bit(round * 31U + 127U))
+        {
+            decomp.reset(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+            REQUIRE(decomp);
+            REQUIRE(rohc_decomp_set_mode(decomp.get(), ROHCCXX_MODE_O) == 0);
+        }
+        const std::uint32_t epoch = round / 32U;
+        const std::uint32_t profile = (starting_profile + epoch) & 3U;
+        const std::uint32_t ordinal = round * 16U + cid;
+        if(delayed_valid && witness_bit(round * 13U + 71U))
+        {
+            const auto status = rohc_comp_deliver_feedback_v1(comp.get(), &delayed);
+            REQUIRE((status == ROHCCXX_FEEDBACK_ACCEPTED ||
+                     status == ROHCCXX_FEEDBACK_STALE));
+            delayed_valid = false;
+        }
+
+        const auto packet = make_issue32_fuzz_packet(ordinal, cid, profile,
+                                                     epoch, round, salt);
+        REQUIRE(rohc_comp_set_cid(comp.get(), cid) == 0);
+        std::array<std::uint8_t, 2048> compressed{};
+        std::size_t compressed_len = compressed.size();
+        REQUIRE(rohc_compress4(comp.get(), packet.data(), packet.size(),
+                               compressed.data(), &compressed_len) == 0);
+        if(round == trigger_round && !expected_trigger_compressed.empty())
+        {
+            REQUIRE(compressed_len == expected_trigger_compressed.size());
+            REQUIRE(std::equal(expected_trigger_compressed.begin(),
+                               expected_trigger_compressed.end(),
+                               compressed.begin()));
+        }
+        if(witness_bit(round * 17U + 19U))
+            continue;
+
+        std::array<std::uint8_t, 256> output{};
+        output.fill(0xa5U);
+        const auto guard = output;
+        std::size_t output_len = output.size();
+        const int rc = rohc_decompress4(decomp.get(), compressed.data(), compressed_len,
+                                        output.data(), &output_len);
+        if(rc == 0)
+        {
+            REQUIRE(output_len == packet.size());
+            REQUIRE(std::equal(packet.begin(), packet.end(), output.begin()));
+            if(round == trigger_round)
+                trigger_was_safe = true;
+            if(round > trigger_round)
+                recovered_after_trigger = true;
+            const std::vector<std::uint8_t> frame(
+                compressed.begin(), compressed.begin() +
+                static_cast<std::ptrdiff_t>(compressed_len));
+            if(is_ir_packet(frame, cid))
+            {
+                const auto feedback = make_ack(
+                    cid, issue32_packet_msn(packet, profile, round % 32U));
+                if(witness_bit(round * 29U + 113U))
+                {
+                    const auto status = rohc_comp_deliver_feedback_v1(comp.get(), &feedback);
+                    REQUIRE((status == ROHCCXX_FEEDBACK_ACCEPTED ||
+                             status == ROHCCXX_FEEDBACK_STALE));
+                }
+                else
+                {
+                    delayed = feedback;
+                    delayed_valid = true;
+                }
+            }
+        }
+        else
+        {
+            REQUIRE(output_len == 0U);
+            REQUIRE(output == guard);
+            if(round == trigger_round)
+                trigger_was_safe = true;
+        }
+    }
+    REQUIRE(trigger_was_safe);
+    REQUIRE(recovered_after_trigger);
 }
 
 std::vector<std::uint8_t> make_packet(Pt0Profile profile,
@@ -177,8 +395,12 @@ bool compress_prefix(Pt0Profile profile,
         std::size_t rohc_len = rohc.size();
         if(rohc_compress4(comp.get(), ip.data(), ip.size(), rohc.data(), &rohc_len) != 0)
             return false;
+        const std::vector<std::uint8_t> packet(
+            rohc.begin(), rohc.begin() + static_cast<std::ptrdiff_t>(rohc_len));
+        acknowledge_refresh(comp.get(), profile, 0U,
+                            static_cast<std::uint32_t>(ordinal), packet);
         if(ordinal == final_ordinal)
-            final_rohc.assign(rohc.begin(), rohc.begin() + static_cast<std::ptrdiff_t>(rohc_len));
+            final_rohc = packet;
     }
     return true;
 }
@@ -243,6 +465,8 @@ void require_public_round_trip_to(Pt0Profile profile,
                                            static_cast<std::ptrdiff_t>(rohc_len));
         if(ordinal == final_ordinal) REQUIRE(rohc[0] == expected_octet);
         require_guarded_decode(decomp.get(), rohc, ip);
+        acknowledge_refresh(comp.get(), profile, 0U,
+                            static_cast<std::uint32_t>(ordinal), rohc);
     }
 }
 
@@ -280,6 +504,11 @@ CollisionFixture establish_before(Pt0Profile profile, std::size_t collision_ordi
             require_guarded_decode(fixture.decomp.get(),
                                    std::vector<std::uint8_t>(rohc.begin(), rohc.begin() +
                                        static_cast<std::ptrdiff_t>(rohc_len)), ip);
+            acknowledge_refresh(fixture.comp.get(), profile, 0U,
+                                static_cast<std::uint32_t>(ordinal),
+                                std::vector<std::uint8_t>(
+                                    rohc.begin(), rohc.begin() +
+                                        static_cast<std::ptrdiff_t>(rohc_len)));
         }
     }
     return fixture;
@@ -377,16 +606,25 @@ std::vector<std::uint8_t> compress_packet(rohc_comp* comp, std::uint32_t cid,
 
 } // namespace
 
-TEST_CASE("public C API round-trips every RFC 5225 PT-0 first octet")
+TEST_CASE("public C API round-trips every safely emitted RFC 5225 PT-0 first octet")
 {
     // PT-0 is exactly 0 | MSN(4) | CRC-3(3), so all 128 zero-MSB values are
-    // structurally reachable.  A per-context TOS witness supplies each CRC-3
-    // value without fabricating wire packets or bypassing the public encoder.
+    // structurally decodable.  Each profile's two MSN values used by context
+    // establishment are reserved from later wrap emission because that would
+    // exceed the unambiguous four-bit forward window. A per-context
+    // TOS witness supplies every CRC-3 value for the 14 safe MSN values without
+    // fabricating wire packets or bypassing the public encoder.
     for(const auto profile : {Pt0Profile::Udp, Pt0Profile::Esp, Pt0Profile::Ip})
     {
         for(unsigned value = 0; value <= 0x7fU; ++value)
         {
             const auto octet = static_cast<std::uint8_t>(value);
+            const auto msn_lsb = static_cast<std::uint8_t>(octet >> 3U);
+            const bool context_interval = profile == Pt0Profile::Esp
+                ? (msn_lsb == 0U || msn_lsb == 1U)
+                : (msn_lsb == 1U || msn_lsb == 2U);
+            if(context_interval)
+                continue;
             CAPTURE(static_cast<unsigned>(profile), value);
             const auto tos = find_tos_for_octet(profile, octet);
             require_public_round_trip_to(profile, tos,
@@ -824,7 +1062,7 @@ TEST_CASE("PT-0 stale reordering rejects CRC-3 collision witnesses transactional
     }
 }
 
-TEST_CASE("PT-0 no-reordering interval accepts delta 14 and rejects delta 15")
+TEST_CASE("PT-0 no-reordering interval accepts delta 14 and refreshes before delta 15")
 {
     for(const auto profile : {Pt0Profile::Udp, Pt0Profile::Esp, Pt0Profile::Ip})
     {
@@ -861,12 +1099,109 @@ TEST_CASE("PT-0 no-reordering interval accepts delta 14 and rejects delta 15")
                     require_guarded_decode(decomp.get(), rohc, ip);
                 if(ordinal == 16U)
                 {
-                    REQUIRE(rohc.size() - 160U == 1U);
-                    require_failed_transaction(decomp.get(), rohc);
+                    REQUIRE(rohc.size() - 160U > 1U);
+                    require_guarded_decode(decomp.get(), rohc, ip);
                 }
             }
         }
     }
+}
+
+TEST_CASE("PT-0 forward gaps cannot alias a later compressor packet to stale state")
+{
+    // Four MSN LSBs repeat after 16 values.  Establish the context, lose 16
+    // consecutive compressor outputs, and submit the next ordered packet.  A
+    // wrong delta-1 reconstruction can collide under CRC-3; it must never be
+    // returned as a successful packet.
+    for(const auto profile : {Pt0Profile::Udp, Pt0Profile::Esp, Pt0Profile::Ip})
+    {
+        for(unsigned tos = 0U; tos <= 0xffU; ++tos)
+        {
+            CAPTURE(static_cast<unsigned>(profile), tos);
+            CompPtr comp(rohc_comp_new2(0, ROHCCXX_DIRECTION_UPLINK));
+            DecompPtr decomp(rohc_decomp_new2(0, ROHCCXX_DIRECTION_UPLINK));
+            REQUIRE(comp);
+            REQUIRE(decomp);
+            for(std::uint32_t ordinal = 0U; ordinal <= 18U; ++ordinal)
+            {
+                const auto original = make_packet(profile, ordinal,
+                                                  static_cast<std::uint8_t>(tos));
+                const auto rohc = compress_packet(comp.get(), 0U, original);
+                if(ordinal >= 2U && ordinal < 18U)
+                    continue;
+
+                std::array<std::uint8_t, 514> output{};
+                output.fill(0xa5U);
+                const auto guard_before = output;
+                std::size_t output_len = output.size() - 2U;
+                const int rc = rohc_decompress4(decomp.get(), rohc.data(), rohc.size(),
+                                                output.data() + 1U, &output_len);
+                if(rc == 0)
+                {
+                    REQUIRE(output_len == original.size());
+                    REQUIRE(std::memcmp(output.data() + 1U, original.data(),
+                                        original.size()) == 0);
+                }
+                else
+                {
+                    REQUIRE(output_len == 0U);
+                    REQUIRE(output == guard_before);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("Delayed refresh ACK cannot authorize PT-0 beyond its forward window")
+{
+    CompPtr comp(rohc_comp_new2(0U, ROHCCXX_DIRECTION_UPLINK));
+    DecompPtr decomp(rohc_decomp_new2(0U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(comp);
+    REQUIRE(decomp);
+    rohccxx_feedback_v1_t delayed{};
+    for(std::uint32_t ordinal = 0U; ordinal <= 32U; ++ordinal)
+    {
+        const auto original = make_packet(Pt0Profile::Udp, ordinal, 158U);
+        const auto rohc = compress_packet(comp.get(), 0U, original);
+        if(ordinal <= 1U || ordinal == 16U)
+            require_guarded_decode(decomp.get(), rohc, original);
+        if(ordinal == 16U)
+        {
+            REQUIRE(is_ir_packet(rohc, 0U));
+            delayed = make_ack(0U, static_cast<std::uint16_t>(ordinal + 1U));
+        }
+    }
+
+    REQUIRE(rohc_comp_deliver_feedback_v1(comp.get(), &delayed) ==
+            ROHCCXX_FEEDBACK_STALE);
+    const auto current = make_packet(Pt0Profile::Udp, 33U, 158U);
+    const auto current_rohc = compress_packet(comp.get(), 0U, current);
+    REQUIRE(is_ir_packet(current_rohc, 0U));
+    require_guarded_decode(decomp.get(), current_rohc, current);
+}
+
+TEST_CASE("Issue 32 one-byte fuzz witness cannot silently retain an old RTP IPv4 ID",
+          "[issue-32]")
+{
+    require_issue32_fuzz_witness_safe({0x81U}, 22U);
+}
+
+TEST_CASE("Issue 32 private ESP marker fuzz witness cannot consume formal PT-0 payload",
+          "[issue-32]")
+{
+    require_issue32_fuzz_witness_safe(
+        {0x01U, 0x02U, 0x00U, 0x08U, 0x39U, 0x89U}, 7U);
+}
+
+TEST_CASE("Issue 53 CID-0 IP PT-0 cannot install an uncompressed context after restart",
+          "[issue-53]")
+{
+    require_issue32_fuzz_witness_safe(
+        hex_bytes("00000000a5a5a5a5a5a5a5a5a5a50010000000100012"), 111U,
+        hex_bytes(
+            "004f91004ce8a712b4b32e7ec65371bd3036986f39c32e86cf50783cb8000006f"
+            "00000000025bd341820d2d7de8bdafbc25189a85fc5e0a594315d994eec798354c6"
+            "cfd447e5d6abc0e5bea9d6"));
 }
 
 TEST_CASE("UDP formal PT-0 uses RFC 5225 small-CID framing")
@@ -907,7 +1242,8 @@ TEST_CASE("UDP formal PT-0 round-trips four interleaved small-CID flows")
                                             0U, flow);
             const auto rohc = compress_packet(comp.get(), flow, packet);
             require_guarded_decode(decomp.get(), rohc, packet);
-            if(ordinal >= 2U)
+            acknowledge_refresh(comp.get(), Pt0Profile::Udp, flow, ordinal, rohc);
+            if(ordinal >= 2U && !is_ir_packet(rohc, flow))
                 REQUIRE(rohc.size() - 160U == (flow == 0U ? 1U : 2U));
         }
     }
@@ -1003,7 +1339,8 @@ TEST_CASE("ESP formal PT-0 round-trips four interleaved small-CID flows")
                                             0U, flow);
             const auto rohc = compress_packet(comp.get(), flow, packet);
             require_guarded_decode(decomp.get(), rohc, packet);
-            if(ordinal >= 2U)
+            acknowledge_refresh(comp.get(), Pt0Profile::Esp, flow, ordinal, rohc);
+            if(ordinal >= 2U && !is_ir_packet(rohc, flow))
                 REQUIRE(rohc.size() - 160U == (flow == 0U ? 1U : 2U));
         }
     }
@@ -1232,7 +1569,8 @@ TEST_CASE("IP-only formal PT-0 round-trips four interleaved small-CID flows")
                                             0U, flow);
             const auto rohc = compress_packet(comp.get(), flow, packet);
             require_guarded_decode(decomp.get(), rohc, packet);
-            if(ordinal >= 2U)
+            acknowledge_refresh(comp.get(), Pt0Profile::Ip, flow, ordinal, rohc);
+            if(ordinal >= 2U && !is_ir_packet(rohc, flow))
                 REQUIRE(rohc.size() - 160U == (flow == 0U ? 1U : 2U));
         }
     }
@@ -1318,7 +1656,7 @@ TEST_CASE("RTP formal PT-0 round-trips four interleaved small-CID flows")
             require_guarded_decode(decomp.get(), rohc, packet);
             if(ordinal >= 2U)
             {
-                REQUIRE(rohc.size() - 160U == (flow == 0U ? 1U : 2U));
+                REQUIRE(rohc.size() - 160U == (flow == 0U ? 2U : 3U));
                 if(flow != 0U) REQUIRE(rohc[0] == static_cast<std::uint8_t>(0xe0U | flow));
             }
         }
@@ -1342,8 +1680,82 @@ TEST_CASE("RTP formal PT-0 reconstructs sequence timestamp and IPv4-ID wrap")
             const auto packet = make_rtp_packet(sequence, timestamp, id);
             const auto rohc = compress_rtp(comp.get(), 0U, packet);
             require_guarded_decode(decomp.get(), rohc, packet);
-            if(ordinal >= 2U) REQUIRE(rohc.size() - 160U == 1U);
+            if(ordinal >= 2U) REQUIRE(rohc.size() - 160U == 2U);
         }
+    }
+}
+
+TEST_CASE("Issue 32 delayed legacy RTP PT-0 WAN witness rejects transactionally",
+          "[issue32]")
+{
+    // Preserved from combined-D mini-PC -> AWS Ohio -> Pi5:
+    // 300 ms delay, 5% loss, 5% duplication, 10% reorder, seed 531034.
+    // The compact ordinal 83 arrived after the ordinal 291 refresh and
+    // previously authenticated a reconstruction 16 RTP sequence numbers
+    // ahead through a CRC-3 collision.
+    const std::array<const char*, 3> context_units{{
+        "e3fd013840110a142101c633010d2ee355f31122300406003d2300000000630fa000061a80e7b2f3646a5234c0000000030000000355ef1af6a30824d0533d55114373f54e904f65dbaa5f6dd1aa0b8922a02ff5140eaa05bb6a3ab2cd",
+        "e3fd011040110a142101c633010d2ee355f31122300404003d2301000000630fa100061b208fe011894454ac6700000013000000036d91ecd5d8f51e76d6995a7af4578f2458dcf9f0b7f009917868e605f184bb6aacafc899c04b3bff",
+        "e3fd01a140110a142101c633010d2ee355f31122300404003d2312000000630fb2000625c01d251f4779c74c640000012300000003da3b55cf1cee37bf6ac06f193f99ac574fb3e04f97e2d5387e1024f6e77ea6edb4395f816ccc93d8",
+    }};
+    const std::array<const char*, 3> context_packets{{
+        "45000060230040003d1128380a142101c633010d2ee355f3004c000080630fa000061a8011223004e7b2f3646a5234c0000000030000000355ef1af6a30824d0533d55114373f54e904f65dbaa5f6dd1aa0b8922a02ff5140eaa05bb6a3ab2cd",
+        "45000060230140003d1128370a142101c633010d2ee355f3004c000080630fa100061b20112230048fe011894454ac6700000013000000036d91ecd5d8f51e76d6995a7af4578f2458dcf9f0b7f009917868e605f184bb6aacafc899c04b3bff",
+        "45000060231240003d1128260a142101c633010d2ee355f3004c000080630fb2000625c0112230041d251f4779c74c640000012300000003da3b55cf1cee37bf6ac06f193f99ac574fb3e04f97e2d5387e1024f6e77ea6edb4395f816ccc93d8",
+    }};
+    const auto delayed = hex_bytes(
+        "e32e8699a2e5c4afa6fd0000005300000003934ee819dde68dcc5be7fc3763bb42589ad13042940f55d746701a54def10c06420ac44b1b65ef18");
+    const auto recovery_unit = hex_bytes(
+        "e3fd019240110a142101c633010d2ee355f31122300404003d2313000000630fb3000626607577fdaa57c1d4c30000013300000003e245a3ec67130d19ef64607288bdd63d87207c648a4db178ac734bd1b6d5e893163c92a3c6bd1aea");
+    const auto recovery_packet = hex_bytes(
+        "45000060231340003d1128250a142101c633010d2ee355f3004c000080630fb300062660112230047577fdaa57c1d4c30000013300000003e245a3ec67130d19ef64607288bdd63d87207c648a4db178ac734bd1b6d5e893163c92a3c6bd1aea");
+
+    DecompPtr decomp(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(decomp);
+    for(std::size_t index = 0U; index < context_units.size(); ++index)
+        require_guarded_decode(decomp.get(), hex_bytes(context_units[index]),
+                               hex_bytes(context_packets[index]));
+    require_failed_transaction(decomp.get(), delayed, 510U, true, 3U);
+    require_failed_transaction(decomp.get(), delayed, 510U, true, 3U);
+    require_guarded_decode(decomp.get(), recovery_unit, recovery_packet);
+}
+
+TEST_CASE("Issue 32 current RTP PT-0 emission resists delayed CRC aliases",
+          "[issue32]")
+{
+    for(const std::uint32_t cid : {1U, 3U})
+    {
+        CAPTURE(cid);
+        CompPtr comp(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+        DecompPtr decomp(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+        REQUIRE(comp);
+        REQUIRE(decomp);
+        std::vector<std::uint8_t> delayed;
+
+        for(std::uint32_t ordinal = 0U; ordinal < 22U; ++ordinal)
+        {
+            const auto packet = make_rtp_packet(
+                static_cast<std::uint16_t>(4000U + ordinal),
+                400000U + ordinal * 160U,
+                static_cast<std::uint16_t>(8000U + ordinal), cid);
+            const auto rohc = compress_rtp(comp.get(), cid, packet);
+            require_guarded_decode(decomp.get(), rohc, packet);
+            if(ordinal == 2U)
+            {
+                const std::size_t base = cid == 0U ? 0U : 1U;
+                REQUIRE(rohc.size() - 160U == (cid == 0U ? 2U : 3U));
+                REQUIRE((rohc[base] & 0xf0U) == 0x80U);
+                delayed = rohc;
+            }
+        }
+
+        REQUIRE(!delayed.empty());
+        require_failed_transaction(decomp.get(), delayed, 510U, true, cid);
+        require_failed_transaction(decomp.get(), delayed, 510U, true, cid);
+
+        const auto recovery = make_rtp_packet(4022U, 403520U, 8022U, cid);
+        const auto recovery_rohc = compress_rtp(comp.get(), cid, recovery);
+        require_guarded_decode(decomp.get(), recovery_rohc, recovery);
     }
 }
 
@@ -1407,9 +1819,9 @@ TEST_CASE("corrupted RTP PT-0 fails without changing output or context")
         valid = compress_rtp(comp.get(), 0U, expected);
         if(ordinal < 2U) require_guarded_decode(decomp.get(), valid, expected);
     }
-    REQUIRE(valid.size() - 160U == 1U);
+    REQUIRE(valid.size() - 160U == 2U);
     auto corrupt = valid;
-    corrupt[0] ^= 0x01U;
+    corrupt[1] ^= 0x01U;
     require_failed_transaction(decomp.get(), corrupt);
     require_guarded_decode(decomp.get(), valid, expected);
 }

@@ -12,6 +12,8 @@ add_executable(unit_tests
     unit/test_pt0_dispatch.cpp
     unit/test_issue40_protocol_alignment.cpp
     unit/test_issue39_rtp_udp_checksum.cpp
+    unit/test_issue49_rtp_loss_recovery.cpp
+    unit/test_issue51_cid_reuse_cross_profile.cpp
     unit/test_issue43_ip_fo_ambiguity.cpp
     unit/test_issue45_private_udp_fo_context.cpp
     unit/test_feedback_correlation.cpp
