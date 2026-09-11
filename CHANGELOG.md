@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.0-rc.2 - 2026-09-10
+
+- Reject silent RTP reconstruction after loss when the required context is unavailable (#49).
+- Prevent stale cross-profile context acceptance after CID reuse and lost replacement context (#51).
+- Require explicit context establishment for the CID-0 PT-0/uncompressed alias case (#53).
+- Prevent the validated PT-0 forward-loss and delayed-reorder CRC alias cases (#32).
+- Retain the pre-v1 release-candidate status and the v0.8.0 ABI version.
+
 ## 0.8.0-rc.1 - 2026-09-09
 
 - Reconcile the validated pre-v1 correctness and interoperability composition.
