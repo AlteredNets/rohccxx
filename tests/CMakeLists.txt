@@ -67,6 +67,30 @@ set_tests_properties(version_resolution_and_source_package_metadata PROPERTIES
     TIMEOUT 120
 )
 
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME issue32_rc3_redline_replay_regression
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/regression/issue32_rc3_replay.py
+            --library $<TARGET_FILE:rohccxx_shared>
+            --trace ${CMAKE_CURRENT_SOURCE_DIR}/regression/issue32_rc3_arrival_trace.jsonl
+    )
+    set_tests_properties(issue32_rc3_redline_replay_regression PROPERTIES
+        LABELS "issue32;regression;redline"
+        TIMEOUT 120
+    )
+    add_test(NAME issue32_residual_wan_forward_replay_regression
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/regression/issue32_rc3_replay.py
+            --library $<TARGET_FILE:rohccxx_shared>
+            --trace ${CMAKE_CURRENT_SOURCE_DIR}/regression/issue32_residual_wan_forward_trace.jsonl
+    )
+    set_tests_properties(issue32_residual_wan_forward_replay_regression PROPERTIES
+        LABELS "issue32;regression;wan;redline"
+        TIMEOUT 120
+    )
+endif()
+
 
 # -----------------------------
 # Quality Gates: TSAN and Valgrind
