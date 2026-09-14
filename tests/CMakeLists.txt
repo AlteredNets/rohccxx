@@ -69,6 +69,33 @@ set_tests_properties(version_resolution_and_source_package_metadata PROPERTIES
 
 find_package(Python3 COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
+    set(ROHCCXX_ISSUE32_REPLAY_ENVIRONMENT "")
+    if(ROHCCXX_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        if(APPLE)
+            execute_process(
+                COMMAND ${CMAKE_CXX_COMPILER} -print-file-name=libclang_rt.asan_osx_dynamic.dylib
+                OUTPUT_VARIABLE ROHCCXX_ASAN_RUNTIME
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+            )
+            if(IS_ABSOLUTE "${ROHCCXX_ASAN_RUNTIME}" AND EXISTS "${ROHCCXX_ASAN_RUNTIME}")
+                list(APPEND ROHCCXX_ISSUE32_REPLAY_ENVIRONMENT
+                    "DYLD_INSERT_LIBRARIES=${ROHCCXX_ASAN_RUNTIME}"
+                )
+            endif()
+        elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
+            execute_process(
+                COMMAND ${CMAKE_CXX_COMPILER} -print-file-name=libclang_rt.asan-x86_64.so
+                OUTPUT_VARIABLE ROHCCXX_ASAN_RUNTIME
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+            )
+            if(IS_ABSOLUTE "${ROHCCXX_ASAN_RUNTIME}" AND EXISTS "${ROHCCXX_ASAN_RUNTIME}")
+                list(APPEND ROHCCXX_ISSUE32_REPLAY_ENVIRONMENT
+                    "LD_PRELOAD=${ROHCCXX_ASAN_RUNTIME}"
+                )
+            endif()
+        endif()
+    endif()
+
     add_test(NAME issue32_rc3_redline_replay_regression
         COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/regression/issue32_rc3_replay.py
@@ -79,6 +106,12 @@ if(Python3_Interpreter_FOUND)
         LABELS "issue32;regression;redline"
         TIMEOUT 120
     )
+    if(ROHCCXX_ISSUE32_REPLAY_ENVIRONMENT)
+        set_tests_properties(issue32_rc3_redline_replay_regression PROPERTIES
+            ENVIRONMENT "${ROHCCXX_ISSUE32_REPLAY_ENVIRONMENT}"
+        )
+    endif()
+
     add_test(NAME issue32_residual_wan_forward_replay_regression
         COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/regression/issue32_rc3_replay.py
@@ -89,6 +122,11 @@ if(Python3_Interpreter_FOUND)
         LABELS "issue32;regression;wan;redline"
         TIMEOUT 120
     )
+    if(ROHCCXX_ISSUE32_REPLAY_ENVIRONMENT)
+        set_tests_properties(issue32_residual_wan_forward_replay_regression PROPERTIES
+            ENVIRONMENT "${ROHCCXX_ISSUE32_REPLAY_ENVIRONMENT}"
+        )
+    endif()
 endif()
 
 
