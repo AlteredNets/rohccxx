@@ -71,6 +71,10 @@ find_package(Python3 COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
     set(ROHCCXX_ISSUE32_REPLAY_ENVIRONMENT "")
     if(ROHCCXX_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        list(APPEND ROHCCXX_ISSUE32_REPLAY_ENVIRONMENT
+            "ASAN_OPTIONS=detect_leaks=0:halt_on_error=1"
+            "UBSAN_OPTIONS=halt_on_error=1"
+        )
         if(APPLE)
             execute_process(
                 COMMAND ${CMAKE_CXX_COMPILER} -print-file-name=libclang_rt.asan_osx_dynamic.dylib
