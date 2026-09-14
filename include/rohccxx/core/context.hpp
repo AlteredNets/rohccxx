@@ -83,6 +83,10 @@ struct Context
     uint8_t   formal_pt0_since_confirmation = 0;
     bool      formal_pt0_crc7_seen = false;
     bool      formal_pt0_crc3_retired = false;
+    // Legacy CRC-3 PT-0 carries no context generation identity. These gates
+    // prevent stale compact packets from committing after ambiguous refreshes.
+    bool      reject_legacy_udp_pt0_until_refresh = false;
+    bool      limit_legacy_udp_pt0_to_sequential = false;
     uint64_t  context_revision = 0;
     uint16_t  msn = 0;
     uint8_t   reorder_ratio = 0;

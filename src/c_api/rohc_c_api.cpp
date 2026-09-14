@@ -1544,6 +1544,19 @@ static std::uint8_t formal_pt0_forward_limit(const rohccxx::Context& ctx)
     return static_cast<std::uint8_t>(15U - p_by_reorder_ratio[ctx.reorder_ratio]);
 }
 
+static bool legacy_pt0_delta_safe_for_profile(const rohccxx::Context& ctx,
+                                              std::uint16_t delta)
+{
+    if(delta == 0U)
+        return false;
+    // RTP PT-0 has only four MSN bits and CRC-3 while also deriving timestamp
+    // state from MSN deltas. A forward gap is indistinguishable from an older
+    // delayed compact unit after a 16-value alias, so require refresh for gaps.
+    if(ctx.profile == rohccxx::Profile::RTP)
+        return delta == 1U;
+    return true;
+}
+
 static bool profile_uses_formal_pt0(rohccxx::Profile profile)
 {
     return profile == rohccxx::Profile::RTP || profile == rohccxx::Profile::UDP ||
@@ -4148,36 +4161,52 @@ rohc_decompress4(struct rohc_decomp* decomp,
         size_t formal_payload_len = 0U;
         if(formal_valid)
         {
+            if(context_before_decode.reject_legacy_udp_pt0_until_refresh)
+                formal_valid = false;
+        }
+        if(formal_valid)
+        {
             std::uint16_t next_msn = 0U;
             formal_valid = decode_forward_formal_pt0_msn(formal_context, formal.msn,
                                                           next_msn);
             if(formal_valid)
             {
                 const auto delta = static_cast<std::uint16_t>(next_msn - formal_context.msn);
-                formal_context.msn = next_msn;
-                formal_context.ipv4_id =
-                    static_cast<std::uint16_t>(formal_context.ipv4_id + delta);
-                size_t formal_header_len = 1U;
-                if(formal_context.udp_checksum_used)
+                // Legacy PT-0 carries only four MSN LSBs and CRC-3.  Keep
+                // loss recovery inside the post-refresh W-LSB interval, but
+                // reject any candidate that would cross that ambiguity window.
+                formal_valid =
+                    legacy_pt0_delta_safe_for_profile(formal_context, delta);
+                if(formal_valid && context_before_decode.limit_legacy_udp_pt0_to_sequential)
+                    formal_valid = delta == 1U;
+                if(formal_valid)
                 {
-                    if(packet_len < formal_header_len + 2U)
-                        formal_valid = false;
-                    else
+                    formal_context.msn = next_msn;
+                    formal_context.ipv4_id =
+                        static_cast<std::uint16_t>(formal_context.ipv4_id + delta);
+                    formal_context.limit_legacy_udp_pt0_to_sequential = false;
+                    size_t formal_header_len = 1U;
+                    if(formal_context.udp_checksum_used)
                     {
-                        formal_context.udp_check = static_cast<std::uint16_t>(
-                            (static_cast<std::uint16_t>(packet[formal_header_len]) << 8U) |
-                            packet[formal_header_len + 1U]);
-                        formal_header_len += 2U;
+                        if(packet_len < formal_header_len + 2U)
+                            formal_valid = false;
+                        else
+                        {
+                            formal_context.udp_check = static_cast<std::uint16_t>(
+                                (static_cast<std::uint16_t>(packet[formal_header_len]) << 8U) |
+                                packet[formal_header_len + 1U]);
+                            formal_header_len += 2U;
+                        }
                     }
+                    formal_valid = formal_valid && detail::payload_after_header(
+                                                                 packet, packet_len, formal_header_len,
+                                                                 formal_payload,
+                                                                 formal_payload_len) &&
+                        build_fixed_udp_ipv4_header(formal_header, formal_context,
+                                                    formal_payload_len) &&
+                        utils::crc3(formal_header.data(), formal_header.size()) ==
+                            formal.header_crc;
                 }
-                formal_valid = formal_valid && detail::payload_after_header(
-                                                             packet, packet_len, formal_header_len,
-                                                             formal_payload,
-                                                             formal_payload_len) &&
-                    build_fixed_udp_ipv4_header(formal_header, formal_context,
-                                                formal_payload_len) &&
-                    utils::crc3(formal_header.data(), formal_header.size()) ==
-                        formal.header_crc;
             }
         }
 
@@ -4300,6 +4329,8 @@ rohc_decompress4(struct rohc_decomp* decomp,
         {
             if(context_before_decode.formal_pt0_crc3_retired)
                 return false;
+            if(context_before_decode.reject_legacy_udp_pt0_until_refresh)
+                return false;
             candidate_context = context_before_decode;
             rfc5225::FormalCoPacket candidate{};
             if(!rfc5225::read_formal_co_base(
@@ -4311,6 +4342,8 @@ rohc_decompress4(struct rohc_decomp* decomp,
                                                next_msn))
                 return false;
             const auto delta = static_cast<std::uint16_t>(next_msn - candidate_context.msn);
+            if(!legacy_pt0_delta_safe_for_profile(candidate_context, delta))
+                return false;
             candidate_context.msn = next_msn;
             candidate_context.ipv4_id =
                 static_cast<std::uint16_t>(candidate_context.ipv4_id + delta);
@@ -4404,22 +4437,32 @@ rohc_decompress4(struct rohc_decomp* decomp,
         size_t formal_payload_len = 0U;
         if(formal_valid)
         {
+            if(context_before_decode.reject_legacy_udp_pt0_until_refresh)
+                formal_valid = false;
+        }
+        if(formal_valid)
+        {
             std::uint16_t next_msn = 0U;
             formal_valid = decode_forward_formal_pt0_msn(formal_context, formal.msn,
                                                           next_msn);
             if(formal_valid)
             {
                 const auto delta = static_cast<std::uint16_t>(next_msn - formal_context.msn);
-                formal_context.msn = next_msn;
-                formal_context.ipv4_id =
-                    static_cast<std::uint16_t>(formal_context.ipv4_id + delta);
-                formal_valid = detail::payload_after_header(packet, packet_len, 1U,
-                                                             formal_payload,
-                                                             formal_payload_len) &&
-                    build_fixed_ip_ipv4_header(formal_header, formal_context,
-                                               formal_payload_len) &&
-                    utils::crc3(formal_header.data(), formal_header.size()) ==
-                        formal.header_crc;
+                formal_valid =
+                    legacy_pt0_delta_safe_for_profile(formal_context, delta);
+                if(formal_valid)
+                {
+                    formal_context.msn = next_msn;
+                    formal_context.ipv4_id =
+                        static_cast<std::uint16_t>(formal_context.ipv4_id + delta);
+                    formal_valid = detail::payload_after_header(packet, packet_len, 1U,
+                                                                 formal_payload,
+                                                                 formal_payload_len) &&
+                        build_fixed_ip_ipv4_header(formal_header, formal_context,
+                                                   formal_payload_len) &&
+                        utils::crc3(formal_header.data(), formal_header.size()) ==
+                            formal.header_crc;
+                }
             }
         }
 
@@ -4485,6 +4528,11 @@ rohc_decompress4(struct rohc_decomp* decomp,
         size_t formal_payload_len = 0U;
         if(formal_valid)
         {
+            if(context_before_decode.reject_legacy_udp_pt0_until_refresh)
+                formal_valid = false;
+        }
+        if(formal_valid)
+        {
             std::uint16_t next_msn = 0U;
             formal_valid = decode_forward_formal_pt0_msn(formal_context, formal.msn,
                                                           next_msn);
@@ -4492,12 +4540,11 @@ rohc_decompress4(struct rohc_decomp* decomp,
             {
                 const auto delta = static_cast<std::uint16_t>(next_msn - formal_context.msn);
                 // The legacy one-octet RTP PT-0 form has only four MSN bits
-                // and CRC-3.  It cannot safely distinguish a forward gap from
-                // an old unit delayed by one 16-value sequence cycle.  Keep
-                // sequential interoperability, but require explicit context
-                // refresh to recover any gap instead of accepting an aliased
-                // reconstruction.
-                formal_valid = delta == 1U;
+                // and CRC-3. Keep loss recovery inside the post-refresh W-LSB
+                // interval, but reject any candidate that would cross that
+                // ambiguity window.
+                formal_valid =
+                    legacy_pt0_delta_safe_for_profile(formal_context, delta);
                 if(formal_valid)
                 {
                     formal_context.msn = next_msn;
@@ -4654,6 +4701,8 @@ rohc_decompress4(struct rohc_decomp* decomp,
 
             const std::uint16_t msn_delta =
                 static_cast<std::uint16_t>(next_msn - meaning.context.msn);
+            if(!legacy_pt0_delta_safe_for_profile(meaning.context, msn_delta))
+                return meaning;
             meaning.context.msn = next_msn;
             if(meaning.context.ipv4_id_behavior == 0U)
                 meaning.context.ipv4_id =
@@ -4895,9 +4944,44 @@ rohc_decompress4(struct rohc_decomp* decomp,
             ok = false;
             break;
         }
+        if(ok && incoming_profile_known)
+        {
+            ctx->formal_pt0_since_confirmation = 0U;
+            if(context_before_decode.rohc_state != RohcState::NoContext &&
+               cid != 0U && context_before_decode.profile != incoming_profile &&
+               profile_uses_formal_pt0(incoming_profile))
+            {
+                ctx->reject_legacy_udp_pt0_until_refresh = true;
+                ctx->limit_legacy_udp_pt0_to_sequential = false;
+            }
+            else if(context_before_decode.rohc_state != RohcState::NoContext &&
+                    cid != 0U && incoming_profile == Profile::UDP &&
+                    !ctx->udp_checksum_used)
+            {
+                ctx->reject_legacy_udp_pt0_until_refresh = false;
+                ctx->limit_legacy_udp_pt0_to_sequential = true;
+            }
+            else if(context_before_decode.profile == incoming_profile)
+            {
+                ctx->reject_legacy_udp_pt0_until_refresh = false;
+                ctx->limit_legacy_udp_pt0_to_sequential = false;
+            }
+        }
     }
     else if(parsed.type == RohcPacketType::IR_DYN)
     {
+        Profile incoming_profile = Profile::Uncompressed;
+        bool incoming_profile_known = true;
+        switch(parsed.profile_id)
+        {
+        case 0x01: incoming_profile = Profile::RTP; break;
+        case 0x02: incoming_profile = Profile::UDP; break;
+        case 0x03: incoming_profile = Profile::ESP; break;
+        case 0x04: incoming_profile = Profile::IP; break;
+        case 0x07: incoming_profile = Profile::RTP_UDP_Lite; break;
+        case 0x08: incoming_profile = Profile::UDP_Lite; break;
+        default: incoming_profile_known = false; break;
+        }
         switch(parsed.profile_id)
         {
         case 0x02:
@@ -4922,6 +5006,13 @@ rohc_decompress4(struct rohc_decomp* decomp,
             ok = false;
             break;
         }
+        if(ok && incoming_profile_known &&
+           context_before_decode.profile == incoming_profile)
+        {
+            ctx->formal_pt0_since_confirmation = 0U;
+            ctx->reject_legacy_udp_pt0_until_refresh = false;
+            ctx->limit_legacy_udp_pt0_to_sequential = false;
+        }
     }
     else if(parsed.type == RohcPacketType::FO_RTP &&
             !prefer_private_rtp_fo &&
@@ -4939,53 +5030,70 @@ rohc_decompress4(struct rohc_decomp* decomp,
            rfc5225::read_formal_co_base(packet, 1U, ctx->profile,
                                         rfc5225::FormalCoVariant::Pt0Crc3, formal))
         {
-            if(!stage_authenticated_output)
+            if(ctx->reject_legacy_udp_pt0_until_refresh)
+                ok = false;
+            else
             {
-                reconstruction_len = std::min(reconstruction_len, max_reconstructed_ip_packet);
-                formal_co_output.reset(new(std::nothrow) uint8_t[reconstruction_len]);
-                if(!formal_co_output)
-                    return fail_with_feedback(cid);
-                reconstruction_packet = formal_co_output.get();
-                stage_formal_co_output = true;
-            }
-            std::uint16_t next_msn = 0U;
-            ok = decode_forward_formal_pt0_msn(*ctx, formal.msn, next_msn);
-            DBG("formal PT0 profile=%u cid=%u ref_msn=%u decoded_msn=%u lsb=%u crc=%u",
-                static_cast<unsigned>(ctx->profile), static_cast<unsigned>(cid),
-                static_cast<unsigned>(ctx->msn), static_cast<unsigned>(next_msn),
-                static_cast<unsigned>(formal.msn), static_cast<unsigned>(formal.header_crc));
-            if(ok)
-            {
-                const std::uint16_t msn_delta = static_cast<std::uint16_t>(next_msn - ctx->msn);
-                ctx->msn = next_msn;
-                if(ctx->ip_version == 4 && ctx->ipv4_id_behavior == 0U)
-                    ctx->ipv4_id = static_cast<std::uint16_t>(ctx->ipv4_id + msn_delta);
-                if(ctx->profile == Profile::ESP)
-                    ctx->esp_sequence += msn_delta;
-                if(ctx->profile == Profile::RTP)
+                if(!stage_authenticated_output)
                 {
-                    ctx->rtp.last_seq = next_msn;
-                    ctx->rtp.last_ts += ctx->rtp.ts_stride * msn_delta;
+                    reconstruction_len = std::min(reconstruction_len, max_reconstructed_ip_packet);
+                    formal_co_output.reset(new(std::nothrow) uint8_t[reconstruction_len]);
+                    if(!formal_co_output)
+                        return fail_with_feedback(cid);
+                    reconstruction_packet = formal_co_output.get();
+                    stage_formal_co_output = true;
                 }
-                header_len = 1U;
-                if(ctx->profile == Profile::UDP && ctx->udp_checksum_used)
+                std::uint16_t next_msn = 0U;
+                ok = decode_forward_formal_pt0_msn(*ctx, formal.msn, next_msn);
+                DBG("formal PT0 profile=%u cid=%u ref_msn=%u decoded_msn=%u lsb=%u crc=%u",
+                    static_cast<unsigned>(ctx->profile), static_cast<unsigned>(cid),
+                    static_cast<unsigned>(ctx->msn), static_cast<unsigned>(next_msn),
+                    static_cast<unsigned>(formal.msn), static_cast<unsigned>(formal.header_crc));
+                if(ok)
                 {
-                    if(packet_len < header_len + 2U)
+                    const std::uint16_t msn_delta =
+                        static_cast<std::uint16_t>(next_msn - ctx->msn);
+                    ok = legacy_pt0_delta_safe_for_profile(*ctx, msn_delta);
+                    if(ok && ctx->profile == Profile::UDP &&
+                       ctx->limit_legacy_udp_pt0_to_sequential)
+                        ok = msn_delta == 1U;
+                    if(ok)
                     {
-                        ok = false;
+                        ctx->msn = next_msn;
+                        if(ctx->ip_version == 4 && ctx->ipv4_id_behavior == 0U)
+                            ctx->ipv4_id =
+                                static_cast<std::uint16_t>(ctx->ipv4_id + msn_delta);
+                        if(ctx->profile == Profile::ESP)
+                            ctx->esp_sequence += msn_delta;
+                        if(ctx->profile == Profile::RTP)
+                        {
+                            ctx->rtp.last_seq = next_msn;
+                            ctx->rtp.last_ts += ctx->rtp.ts_stride * msn_delta;
+                        }
                     }
-                    else
+                    header_len = 1U;
+                    if(ok && ctx->profile == Profile::UDP && ctx->udp_checksum_used)
                     {
-                        ctx->udp_check = static_cast<std::uint16_t>(
-                            (static_cast<std::uint16_t>(packet[header_len]) << 8U) |
-                            packet[header_len + 1U]);
-                        header_len += 2U;
+                        if(packet_len < header_len + 2U)
+                        {
+                            ok = false;
+                        }
+                        else
+                        {
+                            ctx->udp_check = static_cast<std::uint16_t>(
+                                (static_cast<std::uint16_t>(packet[header_len]) << 8U) |
+                                packet[header_len + 1U]);
+                            header_len += 2U;
+                        }
                     }
+                    formal_co_crc = formal.header_crc;
+                    verify_formal_co_crc = true;
+                    formal_co_uncompressed_header_len = ctx->profile == Profile::RTP ? 40U :
+                        (ctx->profile == Profile::UDP || ctx->profile == Profile::ESP ? 28U :
+                                                                                         20U);
                 }
-                formal_co_crc = formal.header_crc;
-                verify_formal_co_crc = true;
-                formal_co_uncompressed_header_len = ctx->profile == Profile::RTP ? 40U :
-                    (ctx->profile == Profile::UDP || ctx->profile == Profile::ESP ? 28U : 20U);
+                if(ctx->profile == Profile::UDP)
+                    ctx->limit_legacy_udp_pt0_to_sequential = false;
             }
         }
     }
