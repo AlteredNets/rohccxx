@@ -1549,6 +1549,14 @@ static bool legacy_pt0_delta_safe_for_profile(const rohccxx::Context& ctx,
 {
     if(delta == 0U)
         return false;
+    // A compact PT-0 unit has no profile or context-generation identifier.  A
+    // CID that has crossed a profile replacement boundary can still see older
+    // compact units after the replacement refresh because network reordering is
+    // independent of context lifetime.  CRC-3 may authenticate the newer
+    // profile's reconstruction, so only the next sequential unit is safe; any
+    // gap is ambiguous and must be a transactional reject.
+    if(ctx.profile_replacement_active || ctx.compact_profile_replacement_seen)
+        return delta == 1U;
     // RTP PT-0 has only four MSN bits and CRC-3 while also deriving timestamp
     // state from MSN deltas. A forward gap is indistinguishable from an older
     // delayed compact unit after a 16-value alias, so require refresh for gaps.
@@ -2710,6 +2718,7 @@ rohc_compress4(struct rohc_comp* comp,
         replacement.profile_has_been_used = true;
         replacement.profile_replacement_active = true;
         replacement.profile_replacement_pending = true;
+        replacement.compact_profile_replacement_seen = true;
         replacement.context_revision = context_before_compress.context_revision + 1U;
         *ctx = replacement;
     }
@@ -4951,6 +4960,7 @@ rohc_decompress4(struct rohc_decomp* decomp,
                cid != 0U && context_before_decode.profile != incoming_profile &&
                profile_uses_formal_pt0(incoming_profile))
             {
+                ctx->compact_profile_replacement_seen = true;
                 ctx->reject_legacy_udp_pt0_until_refresh = true;
                 ctx->limit_legacy_udp_pt0_to_sequential = false;
             }

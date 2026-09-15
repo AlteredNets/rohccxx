@@ -815,6 +815,7 @@ inline bool standard_context_equal(const Context& a, const Context& b)
            a.formal_pt0_crc3_retired == b.formal_pt0_crc3_retired &&
            a.reject_legacy_udp_pt0_until_refresh == b.reject_legacy_udp_pt0_until_refresh &&
            a.limit_legacy_udp_pt0_to_sequential == b.limit_legacy_udp_pt0_to_sequential &&
+           a.compact_profile_replacement_seen == b.compact_profile_replacement_seen &&
            a.context_revision == b.context_revision &&
            a.msn == b.msn && a.reorder_ratio == b.reorder_ratio &&
            a.ip_version == b.ip_version && a.ipv4_tos == b.ipv4_tos &&

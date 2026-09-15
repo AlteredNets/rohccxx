@@ -87,6 +87,7 @@ struct Context
     // prevent stale compact packets from committing after ambiguous refreshes.
     bool      reject_legacy_udp_pt0_until_refresh = false;
     bool      limit_legacy_udp_pt0_to_sequential = false;
+    bool      compact_profile_replacement_seen = false;
     uint64_t  context_revision = 0;
     uint16_t  msn = 0;
     uint8_t   reorder_ratio = 0;

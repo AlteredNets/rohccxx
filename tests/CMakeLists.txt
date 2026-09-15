@@ -131,6 +131,22 @@ if(Python3_Interpreter_FOUND)
             ENVIRONMENT "${ROHCCXX_ISSUE32_REPLAY_ENVIRONMENT}"
         )
     endif()
+
+    add_test(NAME issue63_rc4_lane_d_replay_regression
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/regression/issue63_lane_d_replay.py
+            --library $<TARGET_FILE:rohccxx_shared>
+            --mismatches ${CMAKE_CURRENT_SOURCE_DIR}/regression/issue63_lane_d_mismatches.jsonl
+    )
+    set_tests_properties(issue63_rc4_lane_d_replay_regression PROPERTIES
+        LABELS "issue63;regression;redline"
+        TIMEOUT 120
+    )
+    if(ROHCCXX_ISSUE32_REPLAY_ENVIRONMENT)
+        set_tests_properties(issue63_rc4_lane_d_replay_regression PROPERTIES
+            ENVIRONMENT "${ROHCCXX_ISSUE32_REPLAY_ENVIRONMENT}"
+        )
+    endif()
 endif()
 
 
