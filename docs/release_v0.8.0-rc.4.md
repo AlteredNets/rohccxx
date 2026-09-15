@@ -23,8 +23,8 @@ This candidate retains the v0.8.0 ABI version and the pre-v1 product maturity.
 It does not claim v1 readiness, production certification, Army approval, or
 universal safety outside the tested envelope.
 
-The release-candidate workflow is expected to register 292 CTest cases, pass
-289 executed cases, and skip the three optional external-oracle interoperability
+The release-candidate workflow is expected to register 293 CTest cases, pass
+290 executed cases, and skip the three optional external-oracle interoperability
 tests when those external oracles are not provided. The pinned rohc-lib
 interoperability oracle remains
 70589cc2b8650f82453815c84ba41b0ab80a52a0.
