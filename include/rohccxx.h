@@ -489,6 +489,11 @@ ROHCCXX_API int
 rohc_decomp_get_mode(const struct rohc_decomp* decomp,
                      rohccxx_mode_t* mode);
 
+/* Enable positive ACK feedback after accepted IR and IR-DYN refreshes. */
+ROHCCXX_API int
+rohc_decomp_set_context_refresh_ack_enabled(struct rohc_decomp* decomp,
+                                            int enabled);
+
 /* Configure RFC 5795 segmentation MRRU. Use 0 to disable reassembly. */
 ROHCCXX_API int
 rohc_decomp_set_mrru(struct rohc_decomp* decomp,

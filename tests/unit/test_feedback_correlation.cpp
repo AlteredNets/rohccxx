@@ -15,7 +15,9 @@
 namespace
 {
 struct CompDelete { void operator()(rohc_comp* value) const { rohc_comp_free(value); } };
+struct DecompDelete { void operator()(rohc_decomp* value) const { rohc_decomp_free(value); } };
 using CompPtr = std::unique_ptr<rohc_comp, CompDelete>;
+using DecompPtr = std::unique_ptr<rohc_decomp, DecompDelete>;
 
 void put16(std::uint8_t* out, std::uint16_t value)
 {
@@ -82,6 +84,51 @@ rohccxx_feedback_v1_t make_feedback(std::uint32_t cid,
             ROHCCXX_FEEDBACK_ACCEPTED);
     return parsed;
 }
+}
+
+TEST_CASE("Successful context refresh produces a correlated ACK")
+{
+    CompPtr compressor(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    DecompPtr decompressor(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(compressor);
+    REQUIRE(decompressor);
+    REQUIRE(rohc_decomp_set_context_refresh_ack_enabled(decompressor.get(), 1) == 0);
+
+    REQUIRE(rohc_comp_set_cid(compressor.get(), 1U) == 0);
+
+    std::size_t acknowledgments = 0;
+    std::size_t compact_packets = 0;
+    for(std::uint16_t msn = 1U; msn <= 48U; ++msn)
+    {
+        const auto expected = udp_packet(msn, 0U);
+        const auto wire = compress(compressor.get(), msn, 0U);
+        if(wire.size() < expected.size())
+            ++compact_packets;
+
+        std::array<std::uint8_t, 256> output{};
+        std::size_t output_len = output.size();
+        REQUIRE(rohc_decompress4(decompressor.get(), wire.data(), wire.size(),
+                                 output.data(), &output_len) == 0);
+        REQUIRE(output_len == expected.size());
+        REQUIRE(std::memcmp(output.data(), expected.data(), expected.size()) == 0);
+
+        if(rohc_decomp_has_feedback(decompressor.get()) == 1)
+        {
+            rohccxx_feedback_v1_t feedback{};
+            REQUIRE(rohc_decomp_get_feedback_v1(decompressor.get(), &feedback) ==
+                    ROHCCXX_FEEDBACK_ACCEPTED);
+            REQUIRE(feedback.cid == 1U);
+            REQUIRE(feedback.feedback_type ==
+                    static_cast<std::uint8_t>(rohccxx::FeedbackType::ACK));
+            REQUIRE(feedback.acknowledgment_valid == 1);
+            REQUIRE(rohc_comp_deliver_feedback_v1(compressor.get(), &feedback) ==
+                    ROHCCXX_FEEDBACK_ACCEPTED);
+            ++acknowledgments;
+        }
+    }
+
+    REQUIRE(acknowledgments >= 3U);
+    REQUIRE(compact_packets > 24U);
 }
 
 TEST_CASE("Feedback v1 rejects retired CID acknowledgments transactionally")
