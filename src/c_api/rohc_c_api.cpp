@@ -1362,6 +1362,7 @@ namespace rohccxx_internal
         rohccxx::ContextTable contexts;
         bool large_cid_space = false;
         rohccxx::Feedback last_feedback;
+        bool acknowledge_context_refresh = false;
         bool has_feedback = false;
         size_t mrru = 0;
         bool reassembly_active = false;
@@ -3616,6 +3617,16 @@ rohc_decomp_set_mode(struct rohc_decomp* decomp, rohccxx_mode_t mode)
 }
 
 ROHCCXX_API int
+rohc_decomp_set_context_refresh_ack_enabled(struct rohc_decomp* decomp, int enabled)
+{
+    if(!decomp)
+        return -1;
+    std::lock_guard<std::recursive_mutex> lock(decomp->impl.mutex);
+    decomp->impl.acknowledge_context_refresh = enabled != 0;
+    return 0;
+}
+
+ROHCCXX_API int
 rohc_decomp_get_mode(const struct rohc_decomp* decomp, rohccxx_mode_t* mode)
 {
     if(!decomp || !mode)
@@ -3673,6 +3684,11 @@ rohc_decompress4(struct rohc_decomp* decomp,
     if (rohc_packet_len == 0)
         return -1;
 
+    // Feedback is a single, repeatably readable slot rather than a consumable
+    // queue. Preserve a pending event if this call later qualifies for an
+    // opt-in positive refresh ACK; an ACK must never hide an earlier NACK.
+    const bool feedback_pending_before_decode = decomp->impl.has_feedback;
+    const Feedback feedback_before_decode = decomp->impl.last_feedback;
     decomp->impl.has_feedback = false;
 
     auto fail_with_feedback = [&](uint32_t feedback_cid) -> int
@@ -3819,6 +3835,20 @@ rohc_decompress4(struct rohc_decomp* decomp,
             if(stage_authenticated_output || stage_formal_co_output)
                 std::memcpy(ip_packet, reconstruction_packet, reconstruction_len);
             *ip_packet_len = reconstruction_len;
+            if((parsed.type == RohcPacketType::IR || parsed.type == RohcPacketType::IR_DYN) &&
+               profile_uses_formal_pt0(ctx->profile) &&
+               decomp->impl.acknowledge_context_refresh)
+            {
+                if(feedback_pending_before_decode)
+                {
+                    decomp->impl.last_feedback = feedback_before_decode;
+                    decomp->impl.has_feedback = true;
+                }
+                else
+                {
+                    set_feedback(decomp->impl, cid, FeedbackType::ACK);
+                }
+            }
         }
         return output_length_guard.finish(rc);
     };

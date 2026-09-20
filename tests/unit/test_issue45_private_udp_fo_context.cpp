@@ -422,7 +422,7 @@ void establish_private_static_context(rohc_decomp* decomp,
 
 } // namespace
 
-TEST_CASE("Private UDP FO without an established CID context fails transactionally")
+TEST_CASE("Private UDP FO without an established CID context fails transactionally", "[issue-45]")
 {
     DecompPtr decomp(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
     REQUIRE(decomp != nullptr);
@@ -452,27 +452,27 @@ TEST_CASE("Private UDP FO without an established CID context fails transactional
     REQUIRE(output == original_output);
 }
 
-TEST_CASE("Generated private UDP FO without static context is rejected")
+TEST_CASE("Generated private UDP FO without static context is rejected", "[issue-45]")
 {
     require_fresh_context_rejection(make_private_fo(PrivateProfile::Udp, 1U));
 }
 
-TEST_CASE("Generated private IP FO without static context is rejected")
+TEST_CASE("Generated private IP FO without static context is rejected", "[issue-45]")
 {
     require_fresh_context_rejection(make_private_fo(PrivateProfile::Ip, 1U));
 }
 
-TEST_CASE("Generated private ESP FO without static context is rejected")
+TEST_CASE("Generated private ESP FO without static context is rejected", "[issue-45]")
 {
     require_fresh_context_rejection(make_private_fo(PrivateProfile::Esp, 1U));
 }
 
-TEST_CASE("Generated private UDP-Lite FO without static context is rejected")
+TEST_CASE("Generated private UDP-Lite FO without static context is rejected", "[issue-45]")
 {
     require_fresh_context_rejection(make_private_fo(PrivateProfile::UdpLite, 1U));
 }
 
-TEST_CASE("Private FO missing-context rejection covers small CIDs and directions")
+TEST_CASE("Private FO missing-context rejection covers small CIDs and directions", "[issue-45]")
 {
     constexpr std::array<std::uint32_t, 3> cids{{0U, 1U, 15U}};
     constexpr std::array<rohccxx_direction_t, 2> directions{{
@@ -502,7 +502,7 @@ TEST_CASE("Private FO missing-context rejection covers small CIDs and directions
     }
 }
 
-TEST_CASE("Profile-mismatched private FO rejection preserves an established context")
+TEST_CASE("Profile-mismatched private FO rejection preserves an established context", "[issue-45]")
 {
     constexpr std::array<std::uint32_t, 3> cids{{0U, 1U, 15U}};
     constexpr std::array<rohccxx_direction_t, 2> directions{{
@@ -546,7 +546,7 @@ TEST_CASE("Profile-mismatched private FO rejection preserves an established cont
     }
 }
 
-TEST_CASE("Private UDP FO for a reused CID rejects stale same-profile context")
+TEST_CASE("Private UDP FO for a reused CID rejects stale same-profile context", "[issue-45]")
 {
     DecompPtr decomp(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
     REQUIRE(decomp != nullptr);
@@ -588,7 +588,7 @@ TEST_CASE("Private UDP FO for a reused CID rejects stale same-profile context")
                        output.begin()));
 }
 
-TEST_CASE("Captured private UDP FO cannot authenticate as formal PT-0 under stale CID context")
+TEST_CASE("Captured private UDP FO cannot authenticate as formal PT-0 under stale CID context", "[issue-45]")
 {
     DecompPtr decomp(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
     REQUIRE(decomp != nullptr);
@@ -649,7 +649,7 @@ TEST_CASE("Captured private UDP FO cannot authenticate as formal PT-0 under stal
     REQUIRE(output == guarded_output);
 }
 
-TEST_CASE("Private UDP FO binds same-profile static context across CIDs and directions")
+TEST_CASE("Private UDP FO binds same-profile static context across CIDs and directions", "[issue-45]")
 {
     constexpr std::array<std::uint32_t, 3> cids{{0U, 1U, 15U}};
     constexpr std::array<rohccxx_direction_t, 2> directions{{
@@ -686,7 +686,7 @@ TEST_CASE("Private UDP FO binds same-profile static context across CIDs and dire
     }
 }
 
-TEST_CASE("Private IP UDP-Lite and ESP FO bind same-profile reconstruction context")
+TEST_CASE("Private IP UDP-Lite and ESP FO bind same-profile reconstruction context", "[issue-45]")
 {
     constexpr std::array<PrivateProfile, 3> profiles{{
         PrivateProfile::Ip,

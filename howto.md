@@ -90,6 +90,7 @@ On output calls, pass `*out_len` as the output buffer capacity. On success, `roh
 | `rohc_decompress4(decomp, rohc_packet, rohc_len, ip_packet, ip_len)` | Decompresses one ROHC packet or accepts one segment. |
 | `rohc_comp_set_mode()` / `rohc_decomp_set_mode()` | Select Unidirectional, Optimistic, or Reliable mode for a channel/context. |
 | `rohc_comp_get_mode()` / `rohc_decomp_get_mode()` | Query current mode. |
+| `rohc_decomp_set_context_refresh_ack_enabled()` | Opt in to positive ACK feedback after accepted IR and IR-DYN context refreshes. It is disabled by default for backward compatibility. |
 | `rohc_decomp_has_feedback()` / `rohc_decomp_get_feedback()` | Poll decompressor-generated feedback after failed or repair-relevant receive events. |
 | `rohc_comp_handle_feedback()` | Deliver a simple feedback event to the compressor. |
 | `rohc_comp_deliver_feedback_packet()` | Deliver a serialized ROHC feedback packet or piggybacked feedback prefix to the compressor. |
@@ -106,6 +107,7 @@ Use this flow for normal RFC 5225 compressed profiles, including RTP/UDP/IP, UDP
 2. Create one transmit compressor and one receive decompressor for each ROHC channel.
 3. If the negotiated channel uses segmentation, call `rohc_comp_set_mrru()` and `rohc_decomp_set_mrru()` with the same negotiated MRRU.
 4. If the channel starts in a non-default mode, call `rohc_comp_set_mode()` and `rohc_decomp_set_mode()`.
+5. When the embedding transport has a reverse feedback path, enable context-refresh ACKs and deliver them to the peer compressor so hardened contexts can resume compact packets safely.
 
 ```c
 struct rohc_comp* comp = rohc_comp_new2(max_cid, ROHCCXX_DIRECTION_UPLINK);
@@ -113,6 +115,7 @@ struct rohc_decomp* decomp = rohc_decomp_new2(max_cid, ROHCCXX_DIRECTION_UPLINK)
 
 rohc_comp_set_mode(comp, ROHCCXX_MODE_O);
 rohc_decomp_set_mode(decomp, ROHCCXX_MODE_O);
+rohc_decomp_set_context_refresh_ack_enabled(decomp, 1);
 
 if(mrru != 0)
 {

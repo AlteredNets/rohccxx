@@ -5,6 +5,8 @@
 #include <rohccxx.h>
 
 #include "rohccxx/core/feedback.hpp"
+#include "rohccxx/core/packet_type.hpp"
+#include "rohccxx/utils/crc.hpp"
 
 #include <array>
 #include <cstdint>
@@ -15,7 +17,9 @@
 namespace
 {
 struct CompDelete { void operator()(rohc_comp* value) const { rohc_comp_free(value); } };
+struct DecompDelete { void operator()(rohc_decomp* value) const { rohc_decomp_free(value); } };
 using CompPtr = std::unique_ptr<rohc_comp, CompDelete>;
+using DecompPtr = std::unique_ptr<rohc_decomp, DecompDelete>;
 
 void put16(std::uint8_t* out, std::uint16_t value)
 {
@@ -54,13 +58,62 @@ std::vector<std::uint8_t> udp_packet(std::uint16_t msn, unsigned flow)
     return packet;
 }
 
-std::vector<std::uint8_t> compress(rohc_comp* comp, std::uint16_t msn, unsigned flow)
+std::vector<std::uint8_t> compress_packet(rohc_comp* comp,
+                                          const std::vector<std::uint8_t>& packet)
 {
-    const auto packet = udp_packet(msn, flow);
     std::array<std::uint8_t, 256> output{};
     std::size_t output_len = output.size();
     REQUIRE(rohc_compress4(comp, packet.data(), packet.size(), output.data(), &output_len) == 0);
     return {output.begin(), output.begin() + static_cast<std::ptrdiff_t>(output_len)};
+}
+
+std::vector<std::uint8_t> legacy_udp_ir_dyn(std::uint16_t ipv4_id,
+                                            const std::vector<std::uint8_t>& payload_source)
+{
+    std::vector<std::uint8_t> wire{
+        0xe1U, 0xf8U, 0x02U, 0x00U,
+        0x00U, 0x40U,
+        static_cast<std::uint8_t>(ipv4_id >> 8U), static_cast<std::uint8_t>(ipv4_id),
+        0x02U, 0x00U,
+        0x00U, 0x00U,
+    };
+    wire[3] = rohccxx::utils::crc8(wire.data(), wire.size());
+    wire.insert(wire.end(), payload_source.begin() + 28, payload_source.end());
+    return wire;
+}
+
+std::vector<std::uint8_t> compress(rohc_comp* comp, std::uint16_t msn, unsigned flow)
+{
+    const auto packet = udp_packet(msn, flow);
+    return compress_packet(comp, packet);
+}
+
+rohccxx::RohcPacketType packet_type(const std::vector<std::uint8_t>& wire,
+                                    bool large_cid = false)
+{
+    rohccxx::ParsedRohcPacket parsed{};
+    REQUIRE(rohccxx::parse_rohc_packet(wire.data(), wire.size(), parsed, large_cid));
+    return parsed.type;
+}
+
+void require_exact(rohc_decomp* decomp,
+                   const std::vector<std::uint8_t>& wire,
+                   const std::vector<std::uint8_t>& expected)
+{
+    std::array<std::uint8_t, 256> output{};
+    std::size_t output_len = output.size();
+    REQUIRE(rohc_decompress4(decomp, wire.data(), wire.size(), output.data(), &output_len) == 0);
+    REQUIRE(output_len == expected.size());
+    REQUIRE(std::memcmp(output.data(), expected.data(), expected.size()) == 0);
+}
+
+rohccxx_feedback_v1_t require_feedback(rohc_decomp* decomp, rohccxx::FeedbackType type)
+{
+    REQUIRE(rohc_decomp_has_feedback(decomp) == 1);
+    rohccxx_feedback_v1_t feedback{};
+    REQUIRE(rohc_decomp_get_feedback_v1(decomp, &feedback) == ROHCCXX_FEEDBACK_ACCEPTED);
+    REQUIRE(feedback.feedback_type == static_cast<std::uint8_t>(type));
+    return feedback;
 }
 
 rohccxx_feedback_v1_t make_feedback(std::uint32_t cid,
@@ -82,6 +135,198 @@ rohccxx_feedback_v1_t make_feedback(std::uint32_t cid,
             ROHCCXX_FEEDBACK_ACCEPTED);
     return parsed;
 }
+
+TEST_CASE("Context refresh ACK is disabled by default")
+{
+    CompPtr compressor(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    DecompPtr decompressor(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(compressor);
+    REQUIRE(decompressor);
+    REQUIRE(rohc_comp_set_cid(compressor.get(), 1U) == 0);
+
+    const auto expected = udp_packet(1U, 0U);
+    const auto wire = compress(compressor.get(), 1U, 0U);
+    REQUIRE(packet_type(wire) == rohccxx::RohcPacketType::IR);
+    require_exact(decompressor.get(), wire, expected);
+    REQUIRE(rohc_decomp_has_feedback(decompressor.get()) == 0);
+}
+
+TEST_CASE("Enabled accepted IR produces exactly one correlated ACK")
+{
+    CompPtr compressor(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    DecompPtr decompressor(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(compressor);
+    REQUIRE(decompressor);
+    REQUIRE(rohc_comp_set_cid(compressor.get(), 1U) == 0);
+    REQUIRE(rohc_decomp_set_context_refresh_ack_enabled(decompressor.get(), 1) == 0);
+
+    const auto expected = udp_packet(1U, 0U);
+    const auto wire = compress(compressor.get(), 1U, 0U);
+    REQUIRE(packet_type(wire) == rohccxx::RohcPacketType::IR);
+    require_exact(decompressor.get(), wire, expected);
+    const auto feedback = require_feedback(decompressor.get(), rohccxx::FeedbackType::ACK);
+    REQUIRE(feedback.cid == 1U);
+    REQUIRE(feedback.acknowledgment_valid == 1);
+    REQUIRE(rohc_comp_deliver_feedback_v1(compressor.get(), &feedback) == ROHCCXX_FEEDBACK_ACCEPTED);
+}
+
+TEST_CASE("Enabled accepted IR-DYN produces a correlated ACK")
+{
+    CompPtr compressor(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    DecompPtr decompressor(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(compressor);
+    REQUIRE(decompressor);
+    REQUIRE(rohc_comp_set_cid(compressor.get(), 1U) == 0);
+    REQUIRE(rohc_decomp_set_context_refresh_ack_enabled(decompressor.get(), 1) == 0);
+
+    const auto first = udp_packet(1U, 0U);
+    require_exact(decompressor.get(), compress_packet(compressor.get(), first), first);
+
+    const auto refresh = udp_packet(2U, 0U);
+    const auto wire = legacy_udp_ir_dyn(2U, refresh);
+    REQUIRE(packet_type(wire) == rohccxx::RohcPacketType::IR_DYN);
+    require_exact(decompressor.get(), wire, refresh);
+    const auto feedback = require_feedback(decompressor.get(), rohccxx::FeedbackType::ACK);
+    REQUIRE(feedback.acknowledgment_valid == 1);
+    REQUIRE(rohc_comp_deliver_feedback_v1(compressor.get(), &feedback) == ROHCCXX_FEEDBACK_ACCEPTED);
+}
+
+TEST_CASE("Enabled ordinary compact packet does not produce a refresh ACK")
+{
+    CompPtr compressor(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    DecompPtr decompressor(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(compressor);
+    REQUIRE(decompressor);
+    REQUIRE(rohc_decomp_set_context_refresh_ack_enabled(decompressor.get(), 1) == 0);
+
+    bool saw_compact = false;
+    for(std::uint16_t msn = 1U; msn <= 32U && !saw_compact; ++msn)
+    {
+        const auto expected = udp_packet(msn, 0U);
+        const auto wire = compress(compressor.get(), msn, 0U);
+        const auto type = packet_type(wire);
+        require_exact(decompressor.get(), wire, expected);
+        if(type == rohccxx::RohcPacketType::IR || type == rohccxx::RohcPacketType::IR_DYN)
+        {
+            const auto feedback = require_feedback(decompressor.get(), rohccxx::FeedbackType::ACK);
+            REQUIRE(rohc_comp_deliver_feedback_v1(compressor.get(), &feedback) == ROHCCXX_FEEDBACK_ACCEPTED);
+        }
+        else
+        {
+            saw_compact = true;
+            REQUIRE(rohc_decomp_has_feedback(decompressor.get()) == 0);
+        }
+    }
+    REQUIRE(saw_compact);
+}
+
+TEST_CASE("Disabling context refresh ACK restores prior behavior")
+{
+    CompPtr compressor(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    DecompPtr decompressor(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(compressor);
+    REQUIRE(decompressor);
+    REQUIRE(rohc_decomp_set_context_refresh_ack_enabled(decompressor.get(), 1) == 0);
+
+    auto expected = udp_packet(1U, 0U);
+    auto wire = compress(compressor.get(), 1U, 0U);
+    require_exact(decompressor.get(), wire, expected);
+    (void)require_feedback(decompressor.get(), rohccxx::FeedbackType::ACK);
+
+    REQUIRE(rohc_decomp_set_context_refresh_ack_enabled(decompressor.get(), 0) == 0);
+    expected = udp_packet(2U, 0U);
+    wire = compress(compressor.get(), 2U, 0U);
+    REQUIRE(packet_type(wire) == rohccxx::RohcPacketType::IR);
+    require_exact(decompressor.get(), wire, expected);
+    REQUIRE(rohc_decomp_has_feedback(decompressor.get()) == 0);
+}
+
+TEST_CASE("Rejected refresh never produces a positive ACK")
+{
+    CompPtr compressor(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    DecompPtr decompressor(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(compressor);
+    REQUIRE(decompressor);
+    REQUIRE(rohc_decomp_set_context_refresh_ack_enabled(decompressor.get(), 1) == 0);
+
+    auto wire = compress(compressor.get(), 1U, 0U);
+    REQUIRE(packet_type(wire) == rohccxx::RohcPacketType::IR);
+    REQUIRE(wire.size() > 3U);
+    wire[2] ^= 0x01U;
+    std::array<std::uint8_t, 256> output{};
+    std::size_t output_len = output.size();
+    REQUIRE(rohc_decompress4(decompressor.get(), wire.data(), wire.size(),
+                             output.data(), &output_len) == -1);
+    (void)require_feedback(decompressor.get(), rohccxx::FeedbackType::NACK);
+}
+
+TEST_CASE("Pending negative feedback is not overwritten by a refresh ACK")
+{
+    CompPtr compressor(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    DecompPtr decompressor(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(compressor);
+    REQUIRE(decompressor);
+    REQUIRE(rohc_decomp_set_context_refresh_ack_enabled(decompressor.get(), 1) == 0);
+
+    const std::array<std::uint8_t, 1> malformed{{0xffU}};
+    std::array<std::uint8_t, 256> output{};
+    std::size_t output_len = output.size();
+    REQUIRE(rohc_decompress4(decompressor.get(), malformed.data(), malformed.size(),
+                             output.data(), &output_len) == -1);
+    const auto pending = require_feedback(decompressor.get(), rohccxx::FeedbackType::NACK);
+
+    const auto expected = udp_packet(1U, 0U);
+    const auto wire = compress(compressor.get(), 1U, 0U);
+    require_exact(decompressor.get(), wire, expected);
+    const auto retained = require_feedback(decompressor.get(), rohccxx::FeedbackType::NACK);
+    REQUIRE(retained.cid == pending.cid);
+    REQUIRE(retained.acknowledgment_valid == pending.acknowledgment_valid);
+}
+}
+
+TEST_CASE("Successful context refresh produces a correlated ACK")
+{
+    CompPtr compressor(rohc_comp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    DecompPtr decompressor(rohc_decomp_new2(15U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(compressor);
+    REQUIRE(decompressor);
+    REQUIRE(rohc_decomp_set_context_refresh_ack_enabled(decompressor.get(), 1) == 0);
+
+    REQUIRE(rohc_comp_set_cid(compressor.get(), 1U) == 0);
+
+    std::size_t acknowledgments = 0;
+    std::size_t compact_packets = 0;
+    for(std::uint16_t msn = 1U; msn <= 48U; ++msn)
+    {
+        const auto expected = udp_packet(msn, 0U);
+        const auto wire = compress(compressor.get(), msn, 0U);
+        if(wire.size() < expected.size())
+            ++compact_packets;
+
+        std::array<std::uint8_t, 256> output{};
+        std::size_t output_len = output.size();
+        REQUIRE(rohc_decompress4(decompressor.get(), wire.data(), wire.size(),
+                                 output.data(), &output_len) == 0);
+        REQUIRE(output_len == expected.size());
+        REQUIRE(std::memcmp(output.data(), expected.data(), expected.size()) == 0);
+
+        if(rohc_decomp_has_feedback(decompressor.get()) == 1)
+        {
+            rohccxx_feedback_v1_t feedback{};
+            REQUIRE(rohc_decomp_get_feedback_v1(decompressor.get(), &feedback) ==
+                    ROHCCXX_FEEDBACK_ACCEPTED);
+            REQUIRE(feedback.cid == 1U);
+            REQUIRE(feedback.feedback_type ==
+                    static_cast<std::uint8_t>(rohccxx::FeedbackType::ACK));
+            REQUIRE(feedback.acknowledgment_valid == 1);
+            REQUIRE(rohc_comp_deliver_feedback_v1(compressor.get(), &feedback) ==
+                    ROHCCXX_FEEDBACK_ACCEPTED);
+            ++acknowledgments;
+        }
+    }
+
+    REQUIRE(acknowledgments >= 3U);
+    REQUIRE(compact_packets > 24U);
 }
 
 TEST_CASE("Feedback v1 rejects retired CID acknowledgments transactionally")
