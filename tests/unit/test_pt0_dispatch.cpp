@@ -9,6 +9,7 @@
 #include "rohccxx/core/emit_ip_fo.hpp"
 #include "rohccxx/core/emit_udp_fo.hpp"
 #include "rohccxx/core/feedback.hpp"
+#include "rohccxx/core/formal_co.hpp"
 #include "rohccxx/core/rohcoipsec.hpp"
 
 #include <array>
@@ -646,10 +647,10 @@ TEST_CASE("public C API round-trips every safely emitted RFC 5225 PT-0 first oct
     // exceed the unambiguous four-bit forward window. A per-context
     // TOS witness supplies every CRC-3 value for the 14 safe MSN values without
     // fabricating wire packets or bypassing the public encoder.
-    // Current ESP emission uses PT-0-CRC7 and has dedicated framing and
-    // delayed-unit coverage below. This exhaustive octet test covers the
-    // remaining current one-octet CRC-3 emitters.
-    for(const auto profile : {Pt0Profile::Udp, Pt0Profile::Ip})
+    // Current UDP and ESP emission uses PT-0-CRC7 and has dedicated framing
+    // and delayed-unit coverage below. This exhaustive octet test covers the
+    // remaining current one-octet CRC-3 emitter.
+    for(const auto profile : {Pt0Profile::Ip})
     {
         for(unsigned value = 0; value <= 0x7fU; ++value)
         {
@@ -670,8 +671,9 @@ TEST_CASE("public C API round-trips every safely emitted RFC 5225 PT-0 first oct
 
 TEST_CASE("public C API resolves every PT-0 private-FO marker for every formal profile")
 {
-    // Legacy ESP marker overlap remains covered by the Issue 47 witness.
-    for(const auto profile : {Pt0Profile::Udp, Pt0Profile::Ip})
+    // Legacy UDP and ESP marker overlap remains covered by the Issue 68 and
+    // Issue 47 witnesses respectively.
+    for(const auto profile : {Pt0Profile::Ip})
     {
         for(const std::uint8_t marker : {0x77U, 0x78U, 0x79U, 0x7aU})
         {
@@ -694,8 +696,8 @@ TEST_CASE("public C API reproduces the scientific comparator collision ordinals"
         const char* sha256;
     };
     const FixturePin pins[] = {
-        {Pt0Profile::Udp, 14U, 161U, 0x78U,
-         "4816fc555718ec1a4f88bec98dcdf0f08323d023954769052095cbaac92f34e7"},
+        {Pt0Profile::Udp, 14U, 162U, 0x87U,
+         "f0e5c25ee1c25d939f6d82132b86e92aa6ef7dc576c7559633d008e058011104"},
         {Pt0Profile::Esp, 47U, 162U, 0x97U,
          "dba96689be806bd04de2ec60dd783fed18375e376431aaa4c759563d2ba9bee1"},
         {Pt0Profile::Ip, 61U, 161U, 0x77U,
@@ -705,6 +707,8 @@ TEST_CASE("public C API reproduces the scientific comparator collision ordinals"
     {
         CAPTURE(static_cast<unsigned>(pin.profile), pin.ordinal);
         auto fixture = establish_before(pin.profile, pin.ordinal);
+        INFO("compressed SHA-256: " << hex_digest(sha256(fixture.collision)));
+        INFO("first octet: " << static_cast<unsigned>(fixture.collision.front()));
         REQUIRE(fixture.collision.size() == pin.compressed_len);
         REQUIRE(fixture.collision.front() == pin.first_octet);
         REQUIRE(hex_digest(sha256(fixture.collision)) == pin.sha256);
@@ -1098,6 +1102,136 @@ TEST_CASE("PT-0 stale reordering rejects CRC-3 collision witnesses transactional
     }
 }
 
+TEST_CASE("Issue 68 delayed UDP PT-0 cannot alias payload onto a future header",
+          "[issue-68]")
+{
+    // Geographic jitter delayed one compact unit by a complete four-bit MSN
+    // cycle.  Its payload was still the old packet's payload, while CRC-3
+    // authenticated a reconstructed header 16 IPv4 IDs ahead.  Accepted output
+    // must always be the exact original; this witness must therefore reject
+    // transactionally and leave the live context usable.
+    CompPtr comp(rohc_comp_new2(0U, ROHCCXX_DIRECTION_UPLINK));
+    DecompPtr decomp(rohc_decomp_new2(0U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(comp);
+    REQUIRE(decomp);
+
+    const auto geographic_packet = [](std::uint16_t sequence)
+    {
+        std::vector<std::uint8_t> packet(668U);
+        auto* ip = packet.data();
+        ip[0] = 0x45U;
+        put16(ip + 2U, static_cast<std::uint16_t>(packet.size()));
+        put16(ip + 4U, sequence);
+        put16(ip + 6U, 0x4000U);
+        ip[8] = 64U;
+        ip[9] = 17U;
+        ip[12] = 10U; ip[13] = 77U; ip[15] = 1U;
+        ip[16] = 10U; ip[17] = 88U; ip[19] = 2U;
+        put16(ip + 20U, 32001U);
+        put16(ip + 22U, 32002U);
+        put16(ip + 24U, static_cast<std::uint16_t>(packet.size() - 20U));
+        for(std::size_t pos = 28U; pos < packet.size(); ++pos)
+            packet[pos] = static_cast<std::uint8_t>(pos ^ sequence);
+        put16(ip + 10U, ipv4_checksum(ip));
+        return packet;
+    };
+    const auto compress_geographic = [](rohc_comp* compressor,
+                                        const std::vector<std::uint8_t>& packet)
+    {
+        std::array<std::uint8_t, 1024> output{};
+        std::size_t length = output.size();
+        REQUIRE(rohc_compress4(compressor, packet.data(), packet.size(),
+                               output.data(), &length) == 0);
+        return std::vector<std::uint8_t>(
+            output.begin(), output.begin() + static_cast<std::ptrdiff_t>(length));
+    };
+    const auto decode_geographic_exact = [](rohc_decomp* decompressor,
+                                            const std::vector<std::uint8_t>& wire,
+                                            const std::vector<std::uint8_t>& expected)
+    {
+        std::array<std::uint8_t, 1024> output{};
+        std::size_t length = output.size();
+        REQUIRE(rohc_decompress4(decompressor, wire.data(), wire.size(),
+                                 output.data(), &length) == 0);
+        REQUIRE(length == expected.size());
+        REQUIRE(std::equal(expected.begin(), expected.end(), output.begin()));
+    };
+
+    std::vector<std::uint8_t> delayed;
+    for(std::uint32_t sequence = 1U; sequence <= 50U; ++sequence)
+    {
+        const auto original = geographic_packet(static_cast<std::uint16_t>(sequence));
+        const auto rohc = compress_geographic(comp.get(), original);
+        acknowledge_refresh(comp.get(), Pt0Profile::Udp, 0U, sequence - 1U, rohc);
+        if(sequence == 35U)
+        {
+            std::array<std::uint8_t, 2> legacy_header{};
+            std::size_t legacy_header_len = legacy_header.size();
+            const rohccxx::rfc5225::FormalCoFields fields{
+                static_cast<std::uint16_t>(sequence), 0U, 0U, false};
+            const rohccxx::rfc5225::FormalCoCrcInput crc_input{
+                original.data(), 28U};
+            REQUIRE(rohccxx::rfc5225::emit_formal_co(
+                legacy_header.data(), &legacy_header_len, rohccxx::Profile::UDP,
+                rohccxx::rfc5225::FormalCoVariant::Pt0Crc3, 0U, false,
+                fields, crc_input));
+            REQUIRE(legacy_header_len == 1U);
+            delayed.assign(legacy_header.begin(),
+                           legacy_header.begin() +
+                               static_cast<std::ptrdiff_t>(legacy_header_len));
+            delayed.insert(delayed.end(), original.begin() + 28U, original.end());
+            continue;
+        }
+        decode_geographic_exact(decomp.get(), rohc, original);
+    }
+
+    REQUIRE(!delayed.empty());
+    std::array<std::uint8_t, 1024> rejected_output{};
+    rejected_output.fill(0xa5U);
+    const auto rejected_guard = rejected_output;
+    std::size_t rejected_length = rejected_output.size();
+    REQUIRE(rohc_decompress4(decomp.get(), delayed.data(), delayed.size(),
+                             rejected_output.data(), &rejected_length) != 0);
+    REQUIRE(rejected_length == 0U);
+    REQUIRE(rejected_output == rejected_guard);
+
+    const auto recovery = geographic_packet(51U);
+    const auto recovery_rohc = compress_geographic(comp.get(), recovery);
+    acknowledge_refresh(comp.get(), Pt0Profile::Udp, 0U, 50U, recovery_rohc);
+    decode_geographic_exact(decomp.get(), recovery_rohc, recovery);
+}
+
+TEST_CASE("Issue 68 UDP CRC-7 accepts refresh ACK beyond the legacy MSN window",
+          "[issue-68]")
+{
+    CompPtr comp(rohc_comp_new2(0U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(comp);
+
+    for(std::uint32_t ordinal = 0U; ordinal <= 80U; ++ordinal)
+    {
+        const auto rohc = compress_packet(
+            comp.get(), 0U, make_packet(Pt0Profile::Udp, ordinal));
+        if(ordinal == 64U)
+            REQUIRE(is_ir_packet(rohc, 0U));
+    }
+
+    // The refresh at ordinal 64 carried MSN 65. At an 80 ms RTT and a 5 ms
+    // packet interval, its ACK can arrive after 16 newer transmissions. That
+    // is outside the retired four-bit form's forward interval but within the
+    // current six-bit PT-0-CRC7 interval.
+    const auto delayed_ack = make_ack(0U, 65U);
+    REQUIRE(rohc_comp_deliver_feedback_v1(comp.get(), &delayed_ack) ==
+            ROHCCXX_FEEDBACK_ACCEPTED);
+
+    const auto refresh = compress_packet(
+        comp.get(), 0U, make_packet(Pt0Profile::Udp, 81U));
+    REQUIRE(is_ir_packet(refresh, 0U));
+    const auto next = compress_packet(
+        comp.get(), 0U, make_packet(Pt0Profile::Udp, 82U));
+    REQUIRE(next.size() - 160U == 2U);
+    REQUIRE((next.front() & 0xe0U) == 0x80U);
+}
+
 TEST_CASE("PT-0 no-reordering interval accepts delta 14 and refreshes before delta 15")
 {
     for(const auto profile : {Pt0Profile::Udp, Pt0Profile::Esp, Pt0Profile::Ip})
@@ -1117,7 +1251,7 @@ TEST_CASE("PT-0 no-reordering interval accepts delta 14 and refreshes before del
                     require_guarded_decode(decomp.get(), rohc, ip);
                 if(ordinal == 15U)
                     REQUIRE(rohc.size() - 160U ==
-                            (profile == Pt0Profile::Esp ? 2U : 1U));
+                            (profile == Pt0Profile::Ip ? 1U : 2U));
             }
         }
 
@@ -1196,13 +1330,13 @@ TEST_CASE("Delayed refresh ACK cannot authorize PT-0 beyond its forward window")
     REQUIRE(comp);
     REQUIRE(decomp);
     rohccxx_feedback_v1_t delayed{};
-    for(std::uint32_t ordinal = 0U; ordinal <= 32U; ++ordinal)
+    for(std::uint32_t ordinal = 0U; ordinal <= 128U; ++ordinal)
     {
         const auto original = make_packet(Pt0Profile::Udp, ordinal, 158U);
         const auto rohc = compress_packet(comp.get(), 0U, original);
-        if(ordinal <= 1U || ordinal == 16U)
+        if(ordinal <= 1U || ordinal == 64U)
             require_guarded_decode(decomp.get(), rohc, original);
-        if(ordinal == 16U)
+        if(ordinal == 64U)
         {
             REQUIRE(is_ir_packet(rohc, 0U));
             delayed = make_ack(0U, static_cast<std::uint16_t>(ordinal + 1U));
@@ -1211,7 +1345,7 @@ TEST_CASE("Delayed refresh ACK cannot authorize PT-0 beyond its forward window")
 
     REQUIRE(rohc_comp_deliver_feedback_v1(comp.get(), &delayed) ==
             ROHCCXX_FEEDBACK_STALE);
-    const auto current = make_packet(Pt0Profile::Udp, 33U, 158U);
+    const auto current = make_packet(Pt0Profile::Udp, 129U, 158U);
     const auto current_rohc = compress_packet(comp.get(), 0U, current);
     REQUIRE(is_ir_packet(current_rohc, 0U));
     require_guarded_decode(decomp.get(), current_rohc, current);
@@ -1257,9 +1391,11 @@ TEST_CASE("UDP formal PT-0 uses RFC 5225 small-CID framing")
             require_guarded_decode(decomp.get(), rohc, packet);
             if(ordinal >= 2U)
             {
-                REQUIRE(rohc.size() - 160U == (cid == 0U ? 1U : 2U));
+                REQUIRE(rohc.size() - 160U == (cid == 0U ? 2U : 3U));
                 if(cid != 0U)
                     REQUIRE(rohc[0] == static_cast<std::uint8_t>(0xe0U | cid));
+                const std::size_t base = cid == 0U ? 0U : 1U;
+                REQUIRE((rohc[base] & 0xe0U) == 0x80U);
             }
         }
     }
@@ -1281,7 +1417,7 @@ TEST_CASE("UDP formal PT-0 round-trips four interleaved small-CID flows")
             require_guarded_decode(decomp.get(), rohc, packet);
             acknowledge_refresh(comp.get(), Pt0Profile::Udp, flow, ordinal, rohc);
             if(ordinal >= 2U && !is_ir_packet(rohc, flow))
-                REQUIRE(rohc.size() - 160U == (flow == 0U ? 1U : 2U));
+                REQUIRE(rohc.size() - 160U == (flow == 0U ? 2U : 3U));
         }
     }
 }
@@ -1325,9 +1461,9 @@ TEST_CASE("unsafe UDP fields retain private FO and PT-0 failures are transaction
             valid = compress_packet(comp.get(), 1U, expected);
             if(ordinal < 2U) require_guarded_decode(decomp.get(), valid, expected);
         }
-        REQUIRE(valid.size() - 160U == 2U);
+        REQUIRE(valid.size() - 160U == 3U);
         auto corrupt = valid;
-        corrupt[1] ^= 0x01U;
+        corrupt[2] ^= 0x01U;
         require_failed_transaction(decomp.get(), corrupt, 510U, true, 1U);
         require_guarded_decode(decomp.get(), valid, expected);
 

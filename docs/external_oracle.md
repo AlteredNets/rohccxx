@@ -22,9 +22,12 @@ complete IR context establishment followed by externally generated formal CO.
 UDP/IP, ESP/IP, and IP-only exercise PT-0 in both directions with byte-exact IP
 reconstruction. With the tested reordering ratio of zero, the RFC 5225
 interpretation interval accepts forward MSN deltas of 1 through 14 and rejects
-the one older value without relying on CRC-3 to distinguish it from a future
-delta of 15. The reverse path tests one deliberately lost packet, rejection of
-an older out-of-order packet and a duplicate, sequence-number wrap (ESP),
+the one older value. Current UDP/IP output uses PT-0-CRC7 so six MSN bits and
+the reconstructed-header CRC distinguish a delayed compact unit from a future
+header. The decoder retains legacy UDP PT-0-CRC3 only until it observes the
+stronger form on that live context. The reverse path tests one deliberately
+lost packet, rejection of an older out-of-order packet and a duplicate,
+sequence-number wrap (ESP),
 CRC corruption, truncation, no-context rejection, and successful decoding after
 each failed transaction. It does not prove general reordering recovery or
 recovery after loss of 16 or more packets. The forward path independently checks

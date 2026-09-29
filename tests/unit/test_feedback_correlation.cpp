@@ -296,8 +296,9 @@ TEST_CASE("Successful context refresh produces a correlated ACK")
 
     std::size_t acknowledgments = 0;
     std::size_t compact_packets = 0;
-    for(std::uint16_t msn = 1U; msn <= 48U; ++msn)
+    for(std::uint16_t msn = 1U; msn <= 80U; ++msn)
     {
+        CAPTURE(msn);
         const auto expected = udp_packet(msn, 0U);
         const auto wire = compress(compressor.get(), msn, 0U);
         if(wire.size() < expected.size())
@@ -326,7 +327,7 @@ TEST_CASE("Successful context refresh produces a correlated ACK")
     }
 
     REQUIRE(acknowledgments >= 3U);
-    REQUIRE(compact_packets > 24U);
+    REQUIRE(compact_packets > 60U);
 }
 
 TEST_CASE("Feedback v1 rejects retired CID acknowledgments transactionally")

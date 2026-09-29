@@ -211,6 +211,7 @@ def main():
     decompressor = Rohc(args.library, False)
     exact = rejects = silent_mutations = guard_failures = wire_hash_failures = 0
     witnesses = []
+    wire_hash_mismatches = []
     try:
         wires = {}
         originals = {}
@@ -226,8 +227,15 @@ def main():
             ordinal = row["ordinal"]
             cid, round_no, generation, profile, flow_id = metadata[ordinal]
             wire = wires[ordinal]
-            if hashlib.sha384(wire).hexdigest() != row["compressed_sha384"]:
+            actual_wire_hash = hashlib.sha384(wire).hexdigest()
+            if actual_wire_hash != row["compressed_sha384"]:
                 wire_hash_failures += 1
+                wire_hash_mismatches.append({
+                    "arrival_index": row["arrival_index"],
+                    "ordinal": ordinal,
+                    "expected_compressed_sha384": row["compressed_sha384"],
+                    "actual_compressed_sha384": actual_wire_hash,
+                })
                 continue
             rc, output, guard_ok = decompressor.decompress(wire)
             if rc:
@@ -261,6 +269,7 @@ def main():
         "silent_mutations": silent_mutations,
         "guard_failures": guard_failures,
         "wire_hash_failures": wire_hash_failures,
+        "wire_hash_mismatches": wire_hash_mismatches,
         "witnesses": witnesses,
     }
     print(json.dumps(result, indent=2, sort_keys=True))
