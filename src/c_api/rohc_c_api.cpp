@@ -3037,11 +3037,11 @@ rohc_compress4(struct rohc_comp* comp,
             {
                 const rfc5225::FormalCoFields fields{ctx->msn, 0, 0, false};
                 const rfc5225::FormalCoCrcInput crc_input{ip_packet, ip_view.header_len + sizeof(*udp)};
-                std::array<std::uint8_t, 2> formal{};
+                std::array<std::uint8_t, 3> formal{};
                 size_t formal_len = formal.size();
                 const bool emitted = rfc5225::emit_formal_co(
                     formal.data(), &formal_len, ctx->profile,
-                    rfc5225::FormalCoVariant::Pt0Crc3, cid, false, fields, crc_input);
+                    rfc5225::FormalCoVariant::Pt0Crc7, cid, false, fields, crc_input);
                 const size_t payload_offset = ip_view.header_len + sizeof(*udp);
                 const std::uint8_t pt0 = formal[cid == 0U ? 0U : 1U];
                 if(!emitted || pt0_private_fo_ambiguous(
@@ -4002,6 +4002,68 @@ rohc_decompress4(struct rohc_decomp* decomp,
         return finish_decoding(verify_rohcoipsec_icv(0));
     }
 
+    // UDP PT-0-CRC7 carries six MSN bits and authenticates the reconstructed
+    // IPv4/UDP header. The previous one-octet CRC-3 form could accept a packet
+    // delayed by a complete four-bit MSN cycle with an old payload and a future
+    // reconstructed header. Keep legacy decoding until the stronger form is
+    // observed, then retire CRC-3 for this live context.
+    const bool fixed_udp_pt0_crc7_candidate =
+        parsed.type == RohcPacketType::FormalCO && packet_len >= 2U &&
+        (packet[0] & 0xe0U) == 0x80U &&
+        context_before_decode.profile == Profile::UDP &&
+        context_before_decode.ipv4_options_len == 0U &&
+        rfc5225::live_pt0_context_supported(context_before_decode,
+                                            decomp->impl.large_cid_space,
+                                            cid, parsed.has_add_cid);
+    if(fixed_udp_pt0_crc7_candidate)
+    {
+        Context formal_context = context_before_decode;
+        rfc5225::FormalCoPacket formal{};
+        bool formal_valid = rfc5225::read_formal_co_base(
+            packet, 2U, Profile::UDP,
+            rfc5225::FormalCoVariant::Pt0Crc7, formal);
+        std::uint16_t next_msn = 0U;
+        formal_valid = formal_valid && decode_forward_formal_msn(
+            formal_context, formal.msn, 6U, next_msn);
+        if(formal_valid)
+        {
+            const auto delta = static_cast<std::uint16_t>(
+                next_msn - formal_context.msn);
+            formal_context.msn = next_msn;
+            formal_context.ipv4_id = static_cast<std::uint16_t>(
+                formal_context.ipv4_id + delta);
+        }
+
+        const std::uint8_t* formal_payload = nullptr;
+        size_t formal_payload_len = 0U;
+        formal_valid = formal_valid && detail::payload_after_header(
+            packet, packet_len, 2U, formal_payload, formal_payload_len);
+        std::array<std::uint8_t, 28> formal_header{};
+        formal_valid = formal_valid && build_fixed_udp_ipv4_header(
+            formal_header, formal_context, formal_payload_len) &&
+            utils::crc7(formal_header.data(), formal_header.size()) ==
+                formal.header_crc;
+        if(!formal_valid ||
+           formal_payload_len > std::numeric_limits<size_t>::max() -
+                                    formal_header.size() ||
+           reconstruction_len < formal_header.size() + formal_payload_len)
+        {
+            return finish_decoding(fail_with_feedback(cid));
+        }
+
+        const size_t final_len = formal_header.size() + formal_payload_len;
+        formal_context.formal_pt0_crc7_seen = true;
+        formal_context.formal_pt0_crc3_retired = true;
+        *ctx = formal_context;
+        decomp->impl.mode = formal_context.mode;
+        std::memcpy(reconstruction_packet, formal_header.data(), formal_header.size());
+        if(formal_payload_len > 0U)
+            std::memcpy(reconstruction_packet + formal_header.size(), formal_payload,
+                        formal_payload_len);
+        reconstruction_len = final_len;
+        return finish_decoding(verify_rohcoipsec_icv(0));
+    }
+
     // ESP PT-0-CRC7 carries six MSN bits and authenticates the reconstructed
     // IPv4/ESP header with CRC-7. Once this stronger form is established for a
     // live CID, legacy CRC-3 compact units cannot downgrade the context: an
@@ -4193,7 +4255,8 @@ rohc_decompress4(struct rohc_decomp* decomp,
     {
         Context formal_context = context_before_decode;
         rfc5225::FormalCoPacket formal{};
-        bool formal_valid = rfc5225::read_formal_co_base(
+        bool formal_valid = !context_before_decode.formal_pt0_crc3_retired &&
+            rfc5225::read_formal_co_base(
             packet, 1U, Profile::UDP, rfc5225::FormalCoVariant::Pt0Crc3, formal);
         std::array<std::uint8_t, 28> formal_header{};
         const std::uint8_t* formal_payload = nullptr;
