@@ -1542,7 +1542,10 @@ static std::uint8_t formal_pt0_forward_limit(const rohccxx::Context& ctx)
     constexpr std::array<std::uint8_t, 4> p_by_reorder_ratio{{1U, 3U, 7U, 11U}};
     if(ctx.reorder_ratio >= p_by_reorder_ratio.size())
         return 0U;
-    return static_cast<std::uint8_t>(15U - p_by_reorder_ratio[ctx.reorder_ratio]);
+    const std::uint8_t max_msn_delta = ctx.profile == rohccxx::Profile::UDP
+        ? 63U : 15U;
+    return static_cast<std::uint8_t>(
+        max_msn_delta - p_by_reorder_ratio[ctx.reorder_ratio]);
 }
 
 static bool legacy_pt0_delta_safe_for_profile(const rohccxx::Context& ctx,
@@ -1578,11 +1581,11 @@ static void require_confirmation_before_pt0_alias(rohccxx::Context& ctx)
     if(limit > 0U && ctx.formal_pt0_since_confirmation >= limit &&
        !ctx.profile_replacement_pending)
     {
-        // PT-0 carries four MSN LSBs.  Past the decoder's unambiguous forward
-        // interval, a loss gap aliases a later packet to an earlier delta and
-        // CRC-3 cannot rule out every wrong reconstruction.  Advance the
-        // revision once and hold explicit context framing until the peer ACKs
-        // this exact revision.
+        // Current UDP PT-0-CRC7 carries six MSN LSBs; the remaining profiles
+        // governed here retain the four-bit interval. Past the applicable
+        // forward interval, a loss gap can alias a later packet to an earlier
+        // delta. Advance the revision once and hold explicit context framing
+        // until the peer ACKs this exact revision.
         ++ctx.context_revision;
         ctx.profile_replacement_pending = true;
     }

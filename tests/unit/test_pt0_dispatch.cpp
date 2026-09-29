@@ -1201,6 +1201,37 @@ TEST_CASE("Issue 68 delayed UDP PT-0 cannot alias payload onto a future header",
     decode_geographic_exact(decomp.get(), recovery_rohc, recovery);
 }
 
+TEST_CASE("Issue 68 UDP CRC-7 accepts refresh ACK beyond the legacy MSN window",
+          "[issue-68]")
+{
+    CompPtr comp(rohc_comp_new2(0U, ROHCCXX_DIRECTION_UPLINK));
+    REQUIRE(comp);
+
+    for(std::uint32_t ordinal = 0U; ordinal <= 80U; ++ordinal)
+    {
+        const auto rohc = compress_packet(
+            comp.get(), 0U, make_packet(Pt0Profile::Udp, ordinal));
+        if(ordinal == 64U)
+            REQUIRE(is_ir_packet(rohc, 0U));
+    }
+
+    // The refresh at ordinal 64 carried MSN 65. At an 80 ms RTT and a 5 ms
+    // packet interval, its ACK can arrive after 16 newer transmissions. That
+    // is outside the retired four-bit form's forward interval but within the
+    // current six-bit PT-0-CRC7 interval.
+    const auto delayed_ack = make_ack(0U, 65U);
+    REQUIRE(rohc_comp_deliver_feedback_v1(comp.get(), &delayed_ack) ==
+            ROHCCXX_FEEDBACK_ACCEPTED);
+
+    const auto refresh = compress_packet(
+        comp.get(), 0U, make_packet(Pt0Profile::Udp, 81U));
+    REQUIRE(is_ir_packet(refresh, 0U));
+    const auto next = compress_packet(
+        comp.get(), 0U, make_packet(Pt0Profile::Udp, 82U));
+    REQUIRE(next.size() - 160U == 2U);
+    REQUIRE((next.front() & 0xe0U) == 0x80U);
+}
+
 TEST_CASE("PT-0 no-reordering interval accepts delta 14 and refreshes before delta 15")
 {
     for(const auto profile : {Pt0Profile::Udp, Pt0Profile::Esp, Pt0Profile::Ip})
@@ -1299,13 +1330,13 @@ TEST_CASE("Delayed refresh ACK cannot authorize PT-0 beyond its forward window")
     REQUIRE(comp);
     REQUIRE(decomp);
     rohccxx_feedback_v1_t delayed{};
-    for(std::uint32_t ordinal = 0U; ordinal <= 32U; ++ordinal)
+    for(std::uint32_t ordinal = 0U; ordinal <= 128U; ++ordinal)
     {
         const auto original = make_packet(Pt0Profile::Udp, ordinal, 158U);
         const auto rohc = compress_packet(comp.get(), 0U, original);
-        if(ordinal <= 1U || ordinal == 16U)
+        if(ordinal <= 1U || ordinal == 64U)
             require_guarded_decode(decomp.get(), rohc, original);
-        if(ordinal == 16U)
+        if(ordinal == 64U)
         {
             REQUIRE(is_ir_packet(rohc, 0U));
             delayed = make_ack(0U, static_cast<std::uint16_t>(ordinal + 1U));
@@ -1314,7 +1345,7 @@ TEST_CASE("Delayed refresh ACK cannot authorize PT-0 beyond its forward window")
 
     REQUIRE(rohc_comp_deliver_feedback_v1(comp.get(), &delayed) ==
             ROHCCXX_FEEDBACK_STALE);
-    const auto current = make_packet(Pt0Profile::Udp, 33U, 158U);
+    const auto current = make_packet(Pt0Profile::Udp, 129U, 158U);
     const auto current_rohc = compress_packet(comp.get(), 0U, current);
     REQUIRE(is_ir_packet(current_rohc, 0U));
     require_guarded_decode(decomp.get(), current_rohc, current);
